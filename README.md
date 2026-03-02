@@ -88,26 +88,26 @@ Add to your MCP client config (e.g. `claude_desktop_config.json`):
 
 Environment variables or `.env` file (pydantic-settings). See `.env.example` for defaults.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `API_BASE_URL` | — (required) | OrionBelt Semantic Layer REST API URL |
-| `MCP_TRANSPORT` | `stdio` | `stdio`, `http`, or `sse` |
-| `MCP_SERVER_HOST` | `localhost` | Bind host for HTTP/SSE |
-| `MCP_SERVER_PORT` | `9000` | Bind port for HTTP/SSE |
-| `LOG_LEVEL` | `INFO` | Logging level |
-| `API_TIMEOUT` | `30` | HTTP timeout in seconds |
+| Variable          | Default      | Description                           |
+| ----------------- | ------------ | ------------------------------------- |
+| `API_BASE_URL`    | — (required) | OrionBelt Semantic Layer REST API URL |
+| `MCP_TRANSPORT`   | `stdio`      | `stdio`, `http`, or `sse`             |
+| `MCP_SERVER_HOST` | `localhost`  | Bind host for HTTP/SSE                |
+| `MCP_SERVER_PORT` | `9000`       | Bind port for HTTP/SSE                |
+| `LOG_LEVEL`       | `INFO`       | Logging level                         |
+| `API_TIMEOUT`     | `30`         | HTTP timeout in seconds               |
 
 ## Tools
 
-| MCP Tool | Description |
-|----------|-------------|
-| `get_obml_reference()` | Returns the full OBML format specification |
-| `load_model(model_yaml)` | Parse, validate, and store a semantic model |
-| `validate_model(model_yaml)` | Validate a model without storing it |
-| `describe_model(model_id)` | Inspect data objects, dimensions, measures, metrics |
-| `compile_query(...)` | Compile a semantic query to SQL (simple + full mode) |
-| `list_models()` | List all models loaded in the current session |
-| `list_dialects()` | List available SQL dialects and capabilities |
+| MCP Tool                     | Description                                          |
+| ---------------------------- | ---------------------------------------------------- |
+| `get_obml_reference()`       | Returns the full OBML format specification           |
+| `load_model(model_yaml)`     | Parse, validate, and store a semantic model          |
+| `validate_model(model_yaml)` | Validate a model without storing it                  |
+| `describe_model(model_id)`   | Inspect data objects, dimensions, measures, metrics  |
+| `compile_query(...)`         | Compile a semantic query to SQL (simple + full mode) |
+| `list_models()`              | List all models loaded in the current session        |
+| `list_dialects()`            | List available SQL dialects and capabilities         |
 
 ## Supported SQL Dialects
 
@@ -130,6 +130,19 @@ uv run pytest
 uv run ruff check server.py
 uv run ruff format server.py tests/
 ```
+
+## MCP Live Demo Hosting at Prefect Horizon
+
+The OrionBelt Semantic Layer MCP server is available as a hosted live demo on [Prefect Horizon](https://horizon.prefect.io), a managed platform for deploying MCP servers.
+
+### Quick start with Claude Desktop
+
+1. Download the Desktop Extension:
+   [orionbelt-semantic-layer.dxt](https://orionbelt-semantic-layer.fastmcp.app/manifest.dxt?v=371e7521-55de-4d82-a65d-cd5dd278daf8)
+2. Open the `.dxt` file in [Claude Desktop](https://claude.ai/download)
+   (requires Claude Desktop with MCP support)
+
+No local setup or API key needed — the hosted server connects to the live demo API.
 
 ## License
 
