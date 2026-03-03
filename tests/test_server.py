@@ -513,6 +513,51 @@ def test_connect_error_raises_tool_error():
 
 
 # ---------------------------------------------------------------------------
+# Health check
+# ---------------------------------------------------------------------------
+
+
+def test_health_check_passes(mock_api: respx.MockRouter):
+    """_check_api_health succeeds when /health returns 200."""
+    mock_api.get("/health").mock(
+        return_value=httpx.Response(200, json={"status": "ok"})
+    )
+    # Should not raise
+    server._check_api_health()
+
+
+def test_health_check_connect_error():
+    """_check_api_health exits on connection error."""
+    original_url = server.settings.api_base_url
+    server.settings.api_base_url = "http://127.0.0.1:1"
+    server._http_client = None
+
+    with pytest.raises(SystemExit, match="1"):
+        server._check_api_health()
+
+    server.settings.api_base_url = original_url
+    server._http_client = None
+
+
+def test_health_check_timeout(mock_api: respx.MockRouter):
+    """_check_api_health exits on timeout."""
+    mock_api.get("/health").mock(side_effect=httpx.TimeoutException("timed out"))
+
+    with pytest.raises(SystemExit, match="1"):
+        server._check_api_health()
+
+
+def test_health_check_server_error(mock_api: respx.MockRouter):
+    """_check_api_health exits on 5xx."""
+    mock_api.get("/health").mock(
+        return_value=httpx.Response(503, text="Service Unavailable")
+    )
+
+    with pytest.raises(SystemExit, match="1"):
+        server._check_api_health()
+
+
+# ---------------------------------------------------------------------------
 # Prompts & resource
 # ---------------------------------------------------------------------------
 

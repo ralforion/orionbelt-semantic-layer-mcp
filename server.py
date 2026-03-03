@@ -940,6 +940,31 @@ from the query's join graph.
 # ---------------------------------------------------------------------------
 
 
+def _check_api_health() -> None:
+    """Check that the OrionBelt Semantic Layer API is reachable at startup."""
+    client = _get_client()
+    try:
+        resp = client.get("/health")
+        resp.raise_for_status()
+        logger.info("API health check passed (%s)", settings.api_base_url)
+    except httpx.ConnectError:
+        logger.error(
+            "Cannot connect to OrionBelt Semantic Layer API at %s — is the service running?",
+            settings.api_base_url,
+        )
+        raise SystemExit(1)
+    except httpx.TimeoutException:
+        logger.error(
+            "API health check timed out (%s)", settings.api_base_url
+        )
+        raise SystemExit(1)
+    except httpx.HTTPStatusError as exc:
+        logger.error(
+            "API health check failed: %s %s", exc.response.status_code, exc.response.text
+        )
+        raise SystemExit(1)
+
+
 def main() -> None:
     """Run the MCP server using settings from environment / .env file."""
     logging.basicConfig(level=settings.log_level.upper())
@@ -948,6 +973,8 @@ def main() -> None:
         settings.mcp_transport,
         settings.api_base_url,
     )
+
+    _check_api_health()
 
     try:
         if settings.mcp_transport == "stdio":
