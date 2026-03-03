@@ -959,6 +959,8 @@ def main() -> None:
                 port=settings.mcp_server_port,
                 log_level=settings.log_level.lower(),
             )
+    except KeyboardInterrupt:
+        logger.info("Shutting down…")
     finally:
         # Best-effort session cleanup
         if _api_session_id is not None:
