@@ -59,7 +59,7 @@ uv sync --all-groups
 ### stdio (default)
 
 ```bash
-uv run python server.py
+uv run server.py
 ```
 
 ### HTTP transport
