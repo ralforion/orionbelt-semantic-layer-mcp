@@ -1002,16 +1002,19 @@ mcp.add_prompt(StaticPrompt(
     name="write_obml_model",
     description="OBML syntax reference — how to write a semantic model in YAML.",
     text=_WRITE_OBML_MODEL_TEXT,
+    meta={"text": _WRITE_OBML_MODEL_TEXT},
 ))
 mcp.add_prompt(StaticPrompt(
     name="write_query",
     description="How to use the compile_query tool — simple and full modes.",
     text=_WRITE_QUERY_TEXT,
+    meta={"text": _WRITE_QUERY_TEXT},
 ))
 mcp.add_prompt(StaticPrompt(
     name="debug_validation",
     description="All OBML validation error codes with causes and fixes.",
     text=_DEBUG_VALIDATION_TEXT,
+    meta={"text": _DEBUG_VALIDATION_TEXT},
 ))
 
 
