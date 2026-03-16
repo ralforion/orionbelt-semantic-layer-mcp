@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = ["mcp", "semantic-layer", "orionbelt", "llm"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
     "License :: OSI Approved :: Apache Software License",
@@ -22,8 +22,8 @@ classifiers = [
 ]
 dependencies = [
     "fastmcp>=3.1,<4",
-    "httpx>=0.28",
-    "pydantic-settings>=2.12",
+    "httpx>=0.28,<1",
+    "pydantic-settings>=2.12,<3",
 ]
 
 [project.urls]

@@ -97,7 +97,7 @@ def _create_api_session() -> str:
         raise ToolError("API request timed out while creating session") from None
     except httpx.HTTPStatusError as exc:
         _raise_api_error(exc.response)
-    data = resp.json()
+    data = _parse_json(resp)
     return data["session_id"]
 
 
@@ -122,6 +122,14 @@ def _invalidate_session() -> None:
 # ---------------------------------------------------------------------------
 # API client helpers
 # ---------------------------------------------------------------------------
+
+
+def _parse_json(resp: httpx.Response):
+    """Parse JSON from a successful API response, raising ToolError on failure."""
+    try:
+        return resp.json()
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise ToolError(f"API returned invalid JSON: {exc}") from None
 
 
 def _parse_error_detail(response: httpx.Response) -> str:
@@ -517,7 +525,7 @@ def load_model(model_yaml: str) -> str:
     """
     logger.info("load_model called (yaml length=%d)", len(model_yaml))
     resp = _session_request("POST", "/models", json_body={"model_yaml": model_yaml})
-    data = resp.json()
+    data = _parse_json(resp)
 
     parts = [
         f"Model loaded successfully.  model_id: {data['model_id']}",
@@ -543,7 +551,7 @@ def validate_model(model_yaml: str) -> str:
     """
     logger.info("validate_model called (yaml length=%d)", len(model_yaml))
     resp = _session_request("POST", "/validate", json_body={"model_yaml": model_yaml})
-    data = resp.json()
+    data = _parse_json(resp)
 
     if data["valid"]:
         msg = "Model is valid."
@@ -577,7 +585,7 @@ def describe_model(model_id: str) -> str:
         model_id: The id returned by ``load_model``.
     """
     resp = _session_request("GET", f"/models/{model_id}")
-    desc = resp.json()
+    desc = _parse_json(resp)
 
     lines: list[str] = [f"Model {model_id}:", ""]
 
@@ -698,7 +706,7 @@ def compile_query(
         "/query/sql",
         json_body={"model_id": model_id, "dialect": dialect, "query": query},
     )
-    data = resp.json()
+    data = _parse_json(resp)
 
     resolved = data.get("resolved", {})
     parts = [
@@ -735,7 +743,7 @@ def compile_query(
 def list_models() -> str:
     """List all models currently loaded in a session."""
     resp = _session_request("GET", "/models")
-    models = resp.json()
+    models = _parse_json(resp)
     if not models:
         return "No models loaded.  Use load_model to load one."
     lines = ["Loaded models:", ""]
@@ -752,7 +760,7 @@ def list_models() -> str:
 def list_dialects() -> str:
     """List available SQL dialects and their capabilities."""
     resp = _api_request("GET", f"{_API_V1}/dialects", retry_on_expired=False)
-    data = resp.json()
+    data = _parse_json(resp)
     lines = ["Available dialects:", ""]
     for d in data.get("dialects", []):
         caps = d.get("capabilities", {})
@@ -780,7 +788,7 @@ def get_model_diagram(
     """
     params = f"?show_columns={str(show_columns).lower()}&theme={theme}"
     resp = _session_request("GET", f"/models/{model_id}/diagram/er{params}")
-    data = resp.json()
+    data = _parse_json(resp)
     return data["mermaid"]
 
 
@@ -807,7 +815,7 @@ def get_model_schema(model_id: str) -> str:
         model_id: The id returned by ``load_model``.
     """
     resp = _session_request("GET", f"/models/{model_id}/schema")
-    return json.dumps(resp.json(), indent=2)
+    return json.dumps(_parse_json(resp), indent=2)
 
 
 @mcp.tool
@@ -821,7 +829,7 @@ def list_dimensions(model_id: str) -> str:
         model_id: The id returned by ``load_model``.
     """
     resp = _session_request("GET", f"/models/{model_id}/dimensions")
-    dims = resp.json()
+    dims = _parse_json(resp)
     if not dims:
         return "No dimensions in this model."
     lines = ["Dimensions:", ""]
@@ -844,7 +852,7 @@ def get_dimension(model_id: str, name: str) -> str:
         name: The dimension name.
     """
     resp = _session_request("GET", f"/models/{model_id}/dimensions/{quote(name, safe='')}")
-    return json.dumps(resp.json(), indent=2)
+    return json.dumps(_parse_json(resp), indent=2)
 
 
 @mcp.tool
@@ -858,7 +866,7 @@ def list_measures(model_id: str) -> str:
         model_id: The id returned by ``load_model``.
     """
     resp = _session_request("GET", f"/models/{model_id}/measures")
-    measures = resp.json()
+    measures = _parse_json(resp)
     if not measures:
         return "No measures in this model."
     lines = ["Measures:", ""]
@@ -879,7 +887,7 @@ def get_measure(model_id: str, name: str) -> str:
         name: The measure name.
     """
     resp = _session_request("GET", f"/models/{model_id}/measures/{quote(name, safe='')}")
-    return json.dumps(resp.json(), indent=2)
+    return json.dumps(_parse_json(resp), indent=2)
 
 
 @mcp.tool
@@ -893,7 +901,7 @@ def list_metrics(model_id: str) -> str:
         model_id: The id returned by ``load_model``.
     """
     resp = _session_request("GET", f"/models/{model_id}/metrics")
-    metrics = resp.json()
+    metrics = _parse_json(resp)
     if not metrics:
         return "No metrics in this model."
     lines = ["Metrics:", ""]
@@ -916,7 +924,7 @@ def get_metric(model_id: str, name: str) -> str:
         name: The metric name.
     """
     resp = _session_request("GET", f"/models/{model_id}/metrics/{quote(name, safe='')}")
-    return json.dumps(resp.json(), indent=2)
+    return json.dumps(_parse_json(resp), indent=2)
 
 
 @mcp.tool
@@ -932,7 +940,7 @@ def explain_artefact(model_id: str, name: str) -> str:
         name: The dimension, measure, or metric name to explain.
     """
     resp = _session_request("GET", f"/models/{model_id}/explain/{quote(name, safe='')}")
-    data = resp.json()
+    data = _parse_json(resp)
     lines = [f"Explain: {data['name']}  (type: {data['type']})", ""]
     for item in data.get("lineage", []):
         detail = f"  — {item['detail']}" if item.get("detail") else ""
@@ -961,7 +969,7 @@ def find_artefacts(
     if types is not None:
         body["types"] = types
     resp = _session_request("POST", f"/models/{model_id}/find", json_body=body)
-    data = resp.json()
+    data = _parse_json(resp)
     results = data.get("results", [])
     if not results:
         return f"No artefacts found matching '{query}'."
@@ -982,7 +990,7 @@ def get_join_graph(model_id: str) -> str:
         model_id: The id returned by ``load_model``.
     """
     resp = _session_request("GET", f"/models/{model_id}/join-graph")
-    data = resp.json()
+    data = _parse_json(resp)
     lines = [f"Nodes: {', '.join(data.get('nodes', []))}", ""]
     edges = data.get("edges", [])
     if edges:
@@ -1012,7 +1020,7 @@ def get_settings() -> str:
     and any pre-loaded model YAML.
     """
     resp = _api_request("GET", f"{_API_V1}/settings", retry_on_expired=False)
-    data = resp.json()
+    data = _parse_json(resp)
     lines = ["API Settings:", ""]
     lines.append(f"  Single-model mode: {data.get('single_model_mode', False)}")
     lines.append(f"  Session TTL: {data.get('session_ttl_seconds', 'N/A')}s")
@@ -1037,7 +1045,7 @@ def convert_osi_to_obml(input_yaml: str) -> str:
         json_body={"input_yaml": input_yaml},
         retry_on_expired=False,
     )
-    data = resp.json()
+    data = _parse_json(resp)
 
     parts = [data["output_yaml"]]
     if data.get("warnings"):
@@ -1080,7 +1088,7 @@ def convert_obml_to_osi(
         },
         retry_on_expired=False,
     )
-    data = resp.json()
+    data = _parse_json(resp)
 
     parts = [data["output_yaml"]]
     if data.get("warnings"):
