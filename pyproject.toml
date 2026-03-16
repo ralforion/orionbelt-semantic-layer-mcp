@@ -21,7 +21,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
-    "fastmcp>=3.0,<4",
+    "fastmcp>=3.1,<4",
     "httpx>=0.28",
     "pydantic-settings>=2.12",
 ]

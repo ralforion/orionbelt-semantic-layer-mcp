@@ -10,7 +10,7 @@
 [![Version 1.0.0](https://img.shields.io/badge/version-1.0.0-purple.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/releases)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/blob/main/LICENSE)
-[![FastMCP](https://img.shields.io/badge/FastMCP-3.0+-8A2BE2)](https://gofastmcp.com)
+[![FastMCP](https://img.shields.io/badge/FastMCP-3.1+-8A2BE2)](https://gofastmcp.com)
 [![Pydantic v2](https://img.shields.io/badge/Pydantic-v2-E92063.svg?logo=pydantic&logoColor=white)](https://docs.pydantic.dev)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://docs.astral.sh/ruff/)
 
