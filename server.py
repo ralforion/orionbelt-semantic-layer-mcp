@@ -17,6 +17,7 @@ import json
 import logging
 import threading
 from typing import Literal, NoReturn
+from urllib.parse import quote
 
 import httpx
 from fastmcp import FastMCP
@@ -49,6 +50,9 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# All API routes (except /health) are under the /v1 prefix since API v1.0.0
+_API_V1 = "/v1"
 
 # ---------------------------------------------------------------------------
 # FastMCP server instance
@@ -83,7 +87,7 @@ def _create_api_session() -> str:
     """Create a new API session and return its session_id."""
     client = _get_client()
     try:
-        resp = client.post("/sessions", json={"metadata": {"source": "mcp"}})
+        resp = client.post(f"{_API_V1}/sessions", json={"metadata": {"source": "mcp"}})
         resp.raise_for_status()
     except httpx.ConnectError:
         raise ToolError(
@@ -194,7 +198,7 @@ def _api_request(
         # Session expired — recreate and retry once
         _invalidate_session()
         sid = _ensure_session()
-        new_path = f"/sessions/{sid}{path_suffix}"
+        new_path = f"{_API_V1}/sessions/{sid}{path_suffix}"
         resp = _do_request(client, method, new_path, json_body)
 
     if resp.status_code >= 400:
@@ -214,7 +218,7 @@ def _session_request(
     Automatically ensures a session exists.
     """
     sid = _ensure_session()
-    path = f"/sessions/{sid}{path_suffix}"
+    path = f"{_API_V1}/sessions/{sid}{path_suffix}"
     return _api_request(method, path, json_body=json_body, path_suffix=path_suffix)
 
 
@@ -432,7 +436,7 @@ metrics:
 
 ## Supported SQL Dialects
 
-postgres, snowflake, clickhouse, databricks, dremio
+postgres, snowflake, clickhouse, databricks, dremio, bigquery, duckdb
 
 ## Workflow
 
@@ -705,6 +709,22 @@ def compile_query(
         "",
         data["sql"],
     ]
+    if not data.get("sql_valid", True):
+        parts.append("")
+        parts.append("-- WARNING: Generated SQL may not be valid for this dialect")
+    if data.get("explain"):
+        exp = data["explain"]
+        parts.append("")
+        parts.append(f"-- Planner: {exp['planner']} ({exp.get('planner_reason', '')})")
+        parts.append(
+            f"-- Base object: {exp['base_object']} ({exp.get('base_object_reason', '')})"
+        )
+        for j in exp.get("joins", []):
+            parts.append(
+                f"--   Join: {j['from_object']} -> {j['to_object']} ({j.get('reason', '')})"
+            )
+        if exp.get("has_totals"):
+            parts.append(f"-- Totals: yes (CFL legs: {exp.get('cfl_legs', 0)})")
     if data.get("warnings"):
         parts.append("")
         parts.append(f"-- Warnings: {'; '.join(data['warnings'])}")
@@ -731,7 +751,7 @@ def list_models() -> str:
 @mcp.tool
 def list_dialects() -> str:
     """List available SQL dialects and their capabilities."""
-    resp = _api_request("GET", "/dialects", retry_on_expired=False)
+    resp = _api_request("GET", f"{_API_V1}/dialects", retry_on_expired=False)
     data = resp.json()
     lines = ["Available dialects:", ""]
     for d in data.get("dialects", []):
@@ -765,6 +785,243 @@ def get_model_diagram(
 
 
 @mcp.tool
+def remove_model(model_id: str) -> str:
+    """Remove a model from the current session.
+
+    Args:
+        model_id: The id returned by ``load_model``.
+    """
+    _session_request("DELETE", f"/models/{model_id}")
+    return f"Model {model_id} removed."
+
+
+@mcp.tool
+def get_model_schema(model_id: str) -> str:
+    """Get the full model structure as JSON.
+
+    Returns a detailed JSON representation of the model including all data
+    objects (with columns, types, comments, owners), dimensions, measures,
+    metrics, and their synonyms.  More detailed than ``describe_model``.
+
+    Args:
+        model_id: The id returned by ``load_model``.
+    """
+    resp = _session_request("GET", f"/models/{model_id}/schema")
+    return json.dumps(resp.json(), indent=2)
+
+
+@mcp.tool
+def list_dimensions(model_id: str) -> str:
+    """List all dimensions in a model.
+
+    Returns dimension details including data object, column, result type,
+    time grain, and synonyms.
+
+    Args:
+        model_id: The id returned by ``load_model``.
+    """
+    resp = _session_request("GET", f"/models/{model_id}/dimensions")
+    dims = resp.json()
+    if not dims:
+        return "No dimensions in this model."
+    lines = ["Dimensions:", ""]
+    for d in dims:
+        grain = f"  grain={d['time_grain']}" if d.get("time_grain") else ""
+        lines.append(
+            f"  {d['name']}  ({d['result_type']}, {d['data_object']}.{d['column']}{grain})"
+        )
+        if d.get("synonyms"):
+            lines.append(f"    synonyms: {', '.join(d['synonyms'])}")
+    return "\n".join(lines)
+
+
+@mcp.tool
+def get_dimension(model_id: str, name: str) -> str:
+    """Get a single dimension by name.
+
+    Args:
+        model_id: The id returned by ``load_model``.
+        name: The dimension name.
+    """
+    resp = _session_request("GET", f"/models/{model_id}/dimensions/{quote(name, safe='')}")
+    return json.dumps(resp.json(), indent=2)
+
+
+@mcp.tool
+def list_measures(model_id: str) -> str:
+    """List all measures in a model.
+
+    Returns measure details including aggregation type, expression, result
+    type, and synonyms.
+
+    Args:
+        model_id: The id returned by ``load_model``.
+    """
+    resp = _session_request("GET", f"/models/{model_id}/measures")
+    measures = resp.json()
+    if not measures:
+        return "No measures in this model."
+    lines = ["Measures:", ""]
+    for m in measures:
+        expr = f"  expr: {m['expression']}" if m.get("expression") else ""
+        lines.append(f"  {m['name']}  ({m['result_type']}, {m['aggregation']}{expr})")
+        if m.get("synonyms"):
+            lines.append(f"    synonyms: {', '.join(m['synonyms'])}")
+    return "\n".join(lines)
+
+
+@mcp.tool
+def get_measure(model_id: str, name: str) -> str:
+    """Get a single measure by name.
+
+    Args:
+        model_id: The id returned by ``load_model``.
+        name: The measure name.
+    """
+    resp = _session_request("GET", f"/models/{model_id}/measures/{quote(name, safe='')}")
+    return json.dumps(resp.json(), indent=2)
+
+
+@mcp.tool
+def list_metrics(model_id: str) -> str:
+    """List all metrics in a model.
+
+    Returns metric details including expression, component measures, and
+    synonyms.
+
+    Args:
+        model_id: The id returned by ``load_model``.
+    """
+    resp = _session_request("GET", f"/models/{model_id}/metrics")
+    metrics = resp.json()
+    if not metrics:
+        return "No metrics in this model."
+    lines = ["Metrics:", ""]
+    for met in metrics:
+        components = ", ".join(met.get("component_measures", []))
+        lines.append(f"  {met['name']}  expr: {met['expression']}")
+        if components:
+            lines.append(f"    components: {components}")
+        if met.get("synonyms"):
+            lines.append(f"    synonyms: {', '.join(met['synonyms'])}")
+    return "\n".join(lines)
+
+
+@mcp.tool
+def get_metric(model_id: str, name: str) -> str:
+    """Get a single metric by name.
+
+    Args:
+        model_id: The id returned by ``load_model``.
+        name: The metric name.
+    """
+    resp = _session_request("GET", f"/models/{model_id}/metrics/{quote(name, safe='')}")
+    return json.dumps(resp.json(), indent=2)
+
+
+@mcp.tool
+def explain_artefact(model_id: str, name: str) -> str:
+    """Explain the lineage of a dimension, measure, or metric.
+
+    Traces the composition chain from the named artefact down to the
+    underlying data objects and columns.  Useful for understanding how a
+    measure is computed or where a dimension originates.
+
+    Args:
+        model_id: The id returned by ``load_model``.
+        name: The dimension, measure, or metric name to explain.
+    """
+    resp = _session_request("GET", f"/models/{model_id}/explain/{quote(name, safe='')}")
+    data = resp.json()
+    lines = [f"Explain: {data['name']}  (type: {data['type']})", ""]
+    for item in data.get("lineage", []):
+        detail = f"  — {item['detail']}" if item.get("detail") else ""
+        lines.append(f"  [{item['type']}] {item['name']}{detail}")
+    return "\n".join(lines)
+
+
+@mcp.tool
+def find_artefacts(
+    model_id: str,
+    query: str,
+    types: list[str] | None = None,
+) -> str:
+    """Search across model artefacts by name or synonym.
+
+    Finds dimensions, measures, metrics, and data objects whose name or
+    synonym matches the search query (case-insensitive substring match).
+
+    Args:
+        model_id: The id returned by ``load_model``.
+        query: Search term (matched against names and synonyms).
+        types: Object types to search.  Defaults to all types:
+            dimension, measure, metric, data_object.
+    """
+    body: dict = {"query": query}
+    if types is not None:
+        body["types"] = types
+    resp = _session_request("POST", f"/models/{model_id}/find", json_body=body)
+    data = resp.json()
+    results = data.get("results", [])
+    if not results:
+        return f"No artefacts found matching '{query}'."
+    lines = [f"Search results for '{query}':", ""]
+    for r in results:
+        lines.append(f"  [{r['type']}] {r['name']}  (matched on {r['match_field']})")
+    return "\n".join(lines)
+
+
+@mcp.tool
+def get_join_graph(model_id: str) -> str:
+    """Return the join graph as an adjacency list.
+
+    Shows the data object nodes and join edges (with cardinality and join
+    columns) in the model.  Useful for understanding table relationships.
+
+    Args:
+        model_id: The id returned by ``load_model``.
+    """
+    resp = _session_request("GET", f"/models/{model_id}/join-graph")
+    data = resp.json()
+    lines = [f"Nodes: {', '.join(data.get('nodes', []))}", ""]
+    edges = data.get("edges", [])
+    if edges:
+        lines.append("Edges:")
+        for e in edges:
+            cols = (
+                f"  on ({', '.join(e['columns_from'])}) = ({', '.join(e['columns_to'])})"
+                if e.get("columns_from")
+                else ""
+            )
+            secondary = " [secondary]" if e.get("secondary") else ""
+            path = f" path={e['path_name']}" if e.get("path_name") else ""
+            lines.append(
+                f"  {e['from_object']} --[{e['cardinality']}]--> "
+                f"{e['to_object']}{cols}{secondary}{path}"
+            )
+    else:
+        lines.append("No joins defined.")
+    return "\n".join(lines)
+
+
+@mcp.tool
+def get_settings() -> str:
+    """Get API configuration settings.
+
+    Returns whether the API is in single-model mode, the session TTL,
+    and any pre-loaded model YAML.
+    """
+    resp = _api_request("GET", f"{_API_V1}/settings", retry_on_expired=False)
+    data = resp.json()
+    lines = ["API Settings:", ""]
+    lines.append(f"  Single-model mode: {data.get('single_model_mode', False)}")
+    lines.append(f"  Session TTL: {data.get('session_ttl_seconds', 'N/A')}s")
+    if data.get("model_yaml"):
+        lines.append(f"  Pre-loaded model: yes ({len(data['model_yaml'])} chars)")
+    return "\n".join(lines)
+
+
+@mcp.tool
 def convert_osi_to_obml(input_yaml: str) -> str:
     """Convert an OSI (Open Semantic Interchange) YAML model to OBML format.
 
@@ -776,7 +1033,7 @@ def convert_osi_to_obml(input_yaml: str) -> str:
     """
     resp = _api_request(
         "POST",
-        "/convert/osi-to-obml",
+        f"{_API_V1}/convert/osi-to-obml",
         json_body={"input_yaml": input_yaml},
         retry_on_expired=False,
     )
@@ -814,7 +1071,7 @@ def convert_obml_to_osi(
     """
     resp = _api_request(
         "POST",
-        "/convert/obml-to-osi",
+        f"{_API_V1}/convert/obml-to-osi",
         json_body={
             "input_yaml": input_yaml,
             "model_name": model_name,
@@ -995,7 +1252,7 @@ compile_query(
 
 ## Supported Dialects
 
-`postgres`, `snowflake`, `clickhouse`, `databricks`, `dremio`
+`postgres`, `snowflake`, `clickhouse`, `databricks`, `dremio`, `bigquery`, `duckdb`
 
 ## Tips
 
@@ -1164,7 +1421,7 @@ def main() -> None:
         if _api_session_id is not None:
             try:
                 client = _get_client()
-                client.delete(f"/sessions/{_api_session_id}")
+                client.delete(f"{_API_V1}/sessions/{_api_session_id}")
                 logger.info("Cleaned up API session: %s", _api_session_id)
             except Exception:
                 logger.debug("Session cleanup failed (API TTL will handle it)")

@@ -13,7 +13,7 @@ LLM Client  ──MCP──▶  server.py  ──HTTP──▶  OrionBelt Semant
 
 - **No business logic** — all tool calls delegate to the REST API
 - **Auto-session management** — creates an API session on first tool call, caches the ID
-- **7 tools** (no session tools exposed — session handling is internal)
+- **22 tools** (no session tools exposed — session handling is internal)
 - **3 prompts + 1 resource** — static text, identical to the main repo's MCP server
 
 ## Commands
@@ -54,20 +54,37 @@ For Prefect Horizon: `server.py:mcp`
 
 ## Tool → API Mapping
 
+All API endpoints use the `/v1/` prefix (since API v1.0.0).
+
 | MCP Tool | API Endpoint | Notes |
 |----------|-------------|-------|
 | `get_obml_reference()` | — | Returns static OBML_REFERENCE string |
-| `load_model(model_yaml)` | `POST /sessions/{id}/models` | Auto-creates session |
-| `validate_model(model_yaml)` | `POST /sessions/{id}/validate` | Always 200 |
-| `describe_model(model_id)` | `GET /sessions/{id}/models/{mid}` | Formats nested JSON |
-| `compile_query(...)` | `POST /sessions/{id}/query/sql` | Simple + full mode |
-| `list_models()` | `GET /sessions/{id}/models` | Lists models in session |
-| `list_dialects()` | `GET /dialects` | No session needed |
+| `load_model(model_yaml)` | `POST /v1/sessions/{id}/models` | Auto-creates session |
+| `validate_model(model_yaml)` | `POST /v1/sessions/{id}/validate` | Always 200 |
+| `describe_model(model_id)` | `GET /v1/sessions/{id}/models/{mid}` | Formats nested JSON |
+| `compile_query(...)` | `POST /v1/sessions/{id}/query/sql` | Simple + full mode, includes explain plan |
+| `list_models()` | `GET /v1/sessions/{id}/models` | Lists models in session |
+| `list_dialects()` | `GET /v1/dialects` | No session needed |
+| `get_model_diagram(...)` | `GET /v1/sessions/{id}/models/{mid}/diagram/er` | Mermaid ER diagram |
+| `remove_model(model_id)` | `DELETE /v1/sessions/{id}/models/{mid}` | Remove model from session |
+| `get_model_schema(model_id)` | `GET /v1/sessions/{id}/models/{mid}/schema` | Full JSON structure |
+| `list_dimensions(model_id)` | `GET /v1/sessions/{id}/models/{mid}/dimensions` | All dimensions |
+| `get_dimension(model_id, name)` | `GET /v1/sessions/{id}/models/{mid}/dimensions/{name}` | Single dimension |
+| `list_measures(model_id)` | `GET /v1/sessions/{id}/models/{mid}/measures` | All measures |
+| `get_measure(model_id, name)` | `GET /v1/sessions/{id}/models/{mid}/measures/{name}` | Single measure |
+| `list_metrics(model_id)` | `GET /v1/sessions/{id}/models/{mid}/metrics` | All metrics |
+| `get_metric(model_id, name)` | `GET /v1/sessions/{id}/models/{mid}/metrics/{name}` | Single metric |
+| `explain_artefact(model_id, name)` | `GET /v1/sessions/{id}/models/{mid}/explain/{name}` | Lineage trace |
+| `find_artefacts(model_id, query)` | `POST /v1/sessions/{id}/models/{mid}/find` | Name/synonym search |
+| `get_join_graph(model_id)` | `GET /v1/sessions/{id}/models/{mid}/join-graph` | Adjacency list |
+| `get_settings()` | `GET /v1/settings` | No session needed |
+| `convert_osi_to_obml(...)` | `POST /v1/convert/osi-to-obml` | No session needed |
+| `convert_obml_to_osi(...)` | `POST /v1/convert/obml-to-osi` | No session needed |
 
 ## Session Management
 
 Sessions are fully internal — the LLM never sees session IDs:
-1. On first API call, `POST /sessions` creates one
+1. On first API call, `POST /v1/sessions` creates one
 2. Session ID is cached in `_api_session_id`
 3. On 404 (expired), auto-recreates and retries once
-4. Best-effort cleanup on shutdown via `DELETE /sessions/{id}`
+4. Best-effort cleanup on shutdown via `DELETE /v1/sessions/{id}`

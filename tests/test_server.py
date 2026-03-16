@@ -33,8 +33,8 @@ def mock_api():
 
 
 def _mock_create_session(rsps: respx.MockRouter, session_id: str = "test-session-1"):
-    """Add a mock for POST /sessions that returns the given session_id."""
-    rsps.post("/sessions").mock(
+    """Add a mock for POST /v1/sessions that returns the given session_id."""
+    rsps.post("/v1/sessions").mock(
         return_value=httpx.Response(
             201,
             json={
@@ -68,9 +68,9 @@ def test_get_obml_reference():
 
 
 def test_load_model(mock_api: respx.MockRouter):
-    """load_model creates a session then POSTs to /sessions/{id}/models."""
+    """load_model creates a session then POSTs to /v1/sessions/{id}/models."""
     _mock_create_session(mock_api)
-    mock_api.post("/sessions/test-session-1/models").mock(
+    mock_api.post("/v1/sessions/test-session-1/models").mock(
         return_value=httpx.Response(
             201,
             json={
@@ -94,7 +94,7 @@ def test_load_model(mock_api: respx.MockRouter):
 def test_load_model_with_warnings(mock_api: respx.MockRouter):
     """load_model includes warnings in the output."""
     _mock_create_session(mock_api)
-    mock_api.post("/sessions/test-session-1/models").mock(
+    mock_api.post("/v1/sessions/test-session-1/models").mock(
         return_value=httpx.Response(
             201,
             json={
@@ -121,7 +121,7 @@ def test_load_model_with_warnings(mock_api: respx.MockRouter):
 def test_validate_model_valid(mock_api: respx.MockRouter):
     """validate_model returns 'valid' message when model is valid."""
     _mock_create_session(mock_api)
-    mock_api.post("/sessions/test-session-1/validate").mock(
+    mock_api.post("/v1/sessions/test-session-1/validate").mock(
         return_value=httpx.Response(
             200,
             json={"valid": True, "errors": [], "warnings": []},
@@ -135,7 +135,7 @@ def test_validate_model_valid(mock_api: respx.MockRouter):
 def test_validate_model_with_errors(mock_api: respx.MockRouter):
     """validate_model formats validation errors."""
     _mock_create_session(mock_api)
-    mock_api.post("/sessions/test-session-1/validate").mock(
+    mock_api.post("/v1/sessions/test-session-1/validate").mock(
         return_value=httpx.Response(
             200,
             json={
@@ -166,7 +166,7 @@ def test_validate_model_with_errors(mock_api: respx.MockRouter):
 def test_describe_model(mock_api: respx.MockRouter):
     """describe_model formats the model description."""
     _mock_create_session(mock_api)
-    mock_api.get("/sessions/test-session-1/models/m001").mock(
+    mock_api.get("/v1/sessions/test-session-1/models/m001").mock(
         return_value=httpx.Response(
             200,
             json={
@@ -222,7 +222,7 @@ def test_describe_model(mock_api: respx.MockRouter):
 def test_compile_query_simple_mode(mock_api: respx.MockRouter):
     """compile_query simple mode sends dimensions/measures to API."""
     _mock_create_session(mock_api)
-    mock_api.post("/sessions/test-session-1/query/sql").mock(
+    mock_api.post("/v1/sessions/test-session-1/query/sql").mock(
         return_value=httpx.Response(
             200,
             json={
@@ -253,7 +253,7 @@ def test_compile_query_simple_mode(mock_api: respx.MockRouter):
 def test_compile_query_full_mode(mock_api: respx.MockRouter):
     """compile_query full mode sends query JSON to API."""
     _mock_create_session(mock_api)
-    mock_api.post("/sessions/test-session-1/query/sql").mock(
+    mock_api.post("/v1/sessions/test-session-1/query/sql").mock(
         return_value=httpx.Response(
             200,
             json={
@@ -277,6 +277,78 @@ def test_compile_query_full_mode(mock_api: respx.MockRouter):
     )
     assert "Dialect: snowflake" in result
     assert "SELECT country" in result
+
+
+def test_compile_query_with_explain(mock_api: respx.MockRouter):
+    """compile_query includes explain plan in output."""
+    _mock_create_session(mock_api)
+    mock_api.post("/v1/sessions/test-session-1/query/sql").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "sql": "SELECT c.country, SUM(o.amount) FROM orders o JOIN customers c ...",
+                "dialect": "postgres",
+                "resolved": {
+                    "fact_tables": ["Orders"],
+                    "dimensions": ["Country"],
+                    "measures": ["Revenue"],
+                },
+                "warnings": [],
+                "sql_valid": True,
+                "explain": {
+                    "planner": "star",
+                    "planner_reason": "single fact table",
+                    "base_object": "Orders",
+                    "base_object_reason": "only fact table",
+                    "joins": [
+                        {
+                            "from_object": "Orders",
+                            "to_object": "Customers",
+                            "join_columns": ["Customer ID"],
+                            "reason": "dimension Country",
+                        }
+                    ],
+                    "where_filter_count": 0,
+                    "having_filter_count": 0,
+                    "has_totals": False,
+                    "cfl_legs": 0,
+                },
+            },
+        )
+    )
+
+    result = server.compile_query(
+        model_id="m001",
+        dimensions=["Country"],
+        measures=["Revenue"],
+    )
+    assert "Planner: star" in result
+    assert "Base object: Orders" in result
+    assert "Join: Orders -> Customers" in result
+
+
+def test_compile_query_sql_invalid(mock_api: respx.MockRouter):
+    """compile_query shows warning when sql_valid is false."""
+    _mock_create_session(mock_api)
+    mock_api.post("/v1/sessions/test-session-1/query/sql").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "sql": "SELECT ...",
+                "dialect": "postgres",
+                "resolved": {"fact_tables": [], "dimensions": [], "measures": []},
+                "warnings": [],
+                "sql_valid": False,
+            },
+        )
+    )
+
+    result = server.compile_query(
+        model_id="m001",
+        dimensions=["Country"],
+        measures=["Revenue"],
+    )
+    assert "WARNING: Generated SQL may not be valid" in result
 
 
 def test_compile_query_no_args():
@@ -303,7 +375,9 @@ def test_compile_query_invalid_json():
 def test_list_models_empty(mock_api: respx.MockRouter):
     """list_models returns a message when no models are loaded."""
     _mock_create_session(mock_api)
-    mock_api.get("/sessions/test-session-1/models").mock(return_value=httpx.Response(200, json=[]))
+    mock_api.get("/v1/sessions/test-session-1/models").mock(
+        return_value=httpx.Response(200, json=[])
+    )
 
     result = server.list_models()
     assert "No models loaded" in result
@@ -312,7 +386,7 @@ def test_list_models_empty(mock_api: respx.MockRouter):
 def test_list_models_with_models(mock_api: respx.MockRouter):
     """list_models formats the model list."""
     _mock_create_session(mock_api)
-    mock_api.get("/sessions/test-session-1/models").mock(
+    mock_api.get("/v1/sessions/test-session-1/models").mock(
         return_value=httpx.Response(
             200,
             json=[
@@ -338,8 +412,8 @@ def test_list_models_with_models(mock_api: respx.MockRouter):
 
 
 def test_list_dialects(mock_api: respx.MockRouter):
-    """list_dialects fetches from /dialects (no session needed)."""
-    mock_api.get("/dialects").mock(
+    """list_dialects fetches from /v1/dialects (no session needed)."""
+    mock_api.get("/v1/dialects").mock(
         return_value=httpx.Response(
             200,
             json={
@@ -370,6 +444,477 @@ def test_list_dialects(mock_api: respx.MockRouter):
 
 
 # ---------------------------------------------------------------------------
+# remove_model
+# ---------------------------------------------------------------------------
+
+
+def test_remove_model(mock_api: respx.MockRouter):
+    """remove_model sends DELETE to the API."""
+    _mock_create_session(mock_api)
+    mock_api.delete("/v1/sessions/test-session-1/models/m001").mock(
+        return_value=httpx.Response(204)
+    )
+
+    result = server.remove_model("m001")
+    assert "m001" in result
+    assert "removed" in result
+
+
+# ---------------------------------------------------------------------------
+# get_model_schema
+# ---------------------------------------------------------------------------
+
+
+def test_get_model_schema(mock_api: respx.MockRouter):
+    """get_model_schema returns JSON model structure."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/schema").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "model_id": "m001",
+                "version": 1.0,
+                "data_objects": [{"name": "Orders", "code": "ORDERS"}],
+                "dimensions": [{"name": "Country"}],
+                "measures": [{"name": "Revenue"}],
+                "metrics": [],
+            },
+        )
+    )
+
+    result = server.get_model_schema("m001")
+    assert '"model_id": "m001"' in result
+    assert '"Orders"' in result
+
+
+# ---------------------------------------------------------------------------
+# list_dimensions / get_dimension
+# ---------------------------------------------------------------------------
+
+
+def test_list_dimensions(mock_api: respx.MockRouter):
+    """list_dimensions formats dimension list."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/dimensions").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "name": "Country",
+                    "data_object": "Customers",
+                    "column": "Country",
+                    "result_type": "string",
+                    "time_grain": None,
+                    "synonyms": ["nation"],
+                }
+            ],
+        )
+    )
+
+    result = server.list_dimensions("m001")
+    assert "Country" in result
+    assert "Customers" in result
+    assert "synonyms: nation" in result
+
+
+def test_list_dimensions_empty(mock_api: respx.MockRouter):
+    """list_dimensions handles empty list."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/dimensions").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+
+    result = server.list_dimensions("m001")
+    assert "No dimensions" in result
+
+
+def test_get_dimension(mock_api: respx.MockRouter):
+    """get_dimension returns JSON for a single dimension."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/dimensions/Country").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "name": "Country",
+                "data_object": "Customers",
+                "column": "Country",
+                "result_type": "string",
+            },
+        )
+    )
+
+    result = server.get_dimension("m001", "Country")
+    assert '"Country"' in result
+
+
+def test_get_dimension_url_encodes_name(mock_api: respx.MockRouter):
+    """get_dimension URL-encodes names with spaces."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/dimensions/Customer%20Country").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "name": "Customer Country",
+                "data_object": "Customers",
+                "column": "Country",
+                "result_type": "string",
+            },
+        )
+    )
+
+    result = server.get_dimension("m001", "Customer Country")
+    assert '"Customer Country"' in result
+
+
+# ---------------------------------------------------------------------------
+# list_measures / get_measure
+# ---------------------------------------------------------------------------
+
+
+def test_list_measures(mock_api: respx.MockRouter):
+    """list_measures formats measure list."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/measures").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "name": "Total Revenue",
+                    "result_type": "float",
+                    "aggregation": "sum",
+                    "expression": None,
+                    "synonyms": ["sales"],
+                }
+            ],
+        )
+    )
+
+    result = server.list_measures("m001")
+    assert "Total Revenue" in result
+    assert "sum" in result
+    assert "synonyms: sales" in result
+
+
+def test_get_measure(mock_api: respx.MockRouter):
+    """get_measure returns JSON for a single measure."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/measures/Total%20Revenue").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "name": "Total Revenue",
+                "result_type": "float",
+                "aggregation": "sum",
+            },
+        )
+    )
+
+    result = server.get_measure("m001", "Total Revenue")
+    assert '"Total Revenue"' in result
+
+
+# ---------------------------------------------------------------------------
+# list_metrics / get_metric
+# ---------------------------------------------------------------------------
+
+
+def test_list_metrics(mock_api: respx.MockRouter):
+    """list_metrics formats metric list."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/metrics").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "name": "Profit Margin",
+                    "expression": "{[Profit]} / {[Revenue]}",
+                    "component_measures": ["Profit", "Revenue"],
+                    "synonyms": [],
+                }
+            ],
+        )
+    )
+
+    result = server.list_metrics("m001")
+    assert "Profit Margin" in result
+    assert "components: Profit, Revenue" in result
+
+
+def test_list_metrics_empty(mock_api: respx.MockRouter):
+    """list_metrics handles empty list."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/metrics").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+
+    result = server.list_metrics("m001")
+    assert "No metrics" in result
+
+
+def test_get_metric(mock_api: respx.MockRouter):
+    """get_metric returns JSON for a single metric."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/metrics/Profit%20Margin").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "name": "Profit Margin",
+                "expression": "{[Profit]} / {[Revenue]}",
+                "component_measures": ["Profit", "Revenue"],
+            },
+        )
+    )
+
+    result = server.get_metric("m001", "Profit Margin")
+    assert '"Profit Margin"' in result
+
+
+# ---------------------------------------------------------------------------
+# explain_artefact
+# ---------------------------------------------------------------------------
+
+
+def test_explain_artefact(mock_api: respx.MockRouter):
+    """explain_artefact formats lineage trace."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/explain/Total%20Revenue").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "name": "Total Revenue",
+                "type": "measure",
+                "lineage": [
+                    {
+                        "type": "measure",
+                        "name": "Total Revenue",
+                        "detail": "aggregation=sum, type=float",
+                    },
+                    {
+                        "type": "column",
+                        "name": "Orders.Amount",
+                        "detail": "source column",
+                    },
+                    {
+                        "type": "data_object",
+                        "name": "Orders",
+                        "detail": "table=EDW.SALES.ORDERS",
+                    },
+                ],
+            },
+        )
+    )
+
+    result = server.explain_artefact("m001", "Total Revenue")
+    assert "Total Revenue" in result
+    assert "measure" in result
+    assert "Orders.Amount" in result
+    assert "source column" in result
+
+
+# ---------------------------------------------------------------------------
+# find_artefacts
+# ---------------------------------------------------------------------------
+
+
+def test_find_artefacts(mock_api: respx.MockRouter):
+    """find_artefacts formats search results."""
+    _mock_create_session(mock_api)
+    mock_api.post("/v1/sessions/test-session-1/models/m001/find").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"type": "dimension", "name": "Country", "match_field": "name", "score": 1.0},
+                    {"type": "measure", "name": "Revenue", "match_field": "synonym", "score": 1.0},
+                ]
+            },
+        )
+    )
+
+    result = server.find_artefacts("m001", "rev")
+    assert "Country" in result
+    assert "Revenue" in result
+    assert "matched on synonym" in result
+
+
+def test_find_artefacts_no_results(mock_api: respx.MockRouter):
+    """find_artefacts handles no results."""
+    _mock_create_session(mock_api)
+    mock_api.post("/v1/sessions/test-session-1/models/m001/find").mock(
+        return_value=httpx.Response(200, json={"results": []})
+    )
+
+    result = server.find_artefacts("m001", "xyz")
+    assert "No artefacts found" in result
+
+
+# ---------------------------------------------------------------------------
+# get_join_graph
+# ---------------------------------------------------------------------------
+
+
+def test_get_join_graph(mock_api: respx.MockRouter):
+    """get_join_graph formats the adjacency list."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/join-graph").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "nodes": ["Orders", "Customers"],
+                "edges": [
+                    {
+                        "from_object": "Orders",
+                        "to_object": "Customers",
+                        "cardinality": "many-to-one",
+                        "columns_from": ["Customer ID"],
+                        "columns_to": ["Cust ID"],
+                        "secondary": False,
+                        "path_name": None,
+                    }
+                ],
+            },
+        )
+    )
+
+    result = server.get_join_graph("m001")
+    assert "Orders" in result
+    assert "Customers" in result
+    assert "many-to-one" in result
+    assert "Customer ID" in result
+
+
+def test_get_join_graph_no_edges(mock_api: respx.MockRouter):
+    """get_join_graph handles models with no joins."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/join-graph").mock(
+        return_value=httpx.Response(
+            200, json={"nodes": ["Orders"], "edges": []}
+        )
+    )
+
+    result = server.get_join_graph("m001")
+    assert "Orders" in result
+    assert "No joins defined" in result
+
+
+# ---------------------------------------------------------------------------
+# get_settings
+# ---------------------------------------------------------------------------
+
+
+def test_get_settings(mock_api: respx.MockRouter):
+    """get_settings returns API configuration."""
+    mock_api.get("/v1/settings").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "single_model_mode": False,
+                "model_yaml": None,
+                "session_ttl_seconds": 1800,
+            },
+        )
+    )
+
+    result = server.get_settings()
+    assert "Single-model mode: False" in result
+    assert "Session TTL: 1800s" in result
+
+
+def test_get_settings_single_model(mock_api: respx.MockRouter):
+    """get_settings shows pre-loaded model info in single-model mode."""
+    mock_api.get("/v1/settings").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "single_model_mode": True,
+                "model_yaml": "version: 1.0\ndataObjects: ...",
+                "session_ttl_seconds": 3600,
+            },
+        )
+    )
+
+    result = server.get_settings()
+    assert "Single-model mode: True" in result
+    assert "Pre-loaded model: yes" in result
+
+
+# ---------------------------------------------------------------------------
+# get_model_diagram
+# ---------------------------------------------------------------------------
+
+
+def test_get_model_diagram(mock_api: respx.MockRouter):
+    """get_model_diagram returns Mermaid ER diagram."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/diagram/er").mock(
+        return_value=httpx.Response(
+            200,
+            json={"mermaid": "erDiagram\n  Orders ||--o{ Customers : joins"},
+        )
+    )
+
+    result = server.get_model_diagram("m001")
+    assert "erDiagram" in result
+    assert "Orders" in result
+
+
+# ---------------------------------------------------------------------------
+# convert_osi_to_obml
+# ---------------------------------------------------------------------------
+
+
+def test_convert_osi_to_obml(mock_api: respx.MockRouter):
+    """convert_osi_to_obml calls /v1/convert/osi-to-obml."""
+    mock_api.post("/v1/convert/osi-to-obml").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "output_yaml": "version: 1.0\ndataObjects: {}",
+                "warnings": [],
+                "validation": {
+                    "schema_valid": True,
+                    "semantic_valid": True,
+                    "schema_errors": [],
+                    "semantic_errors": [],
+                    "semantic_warnings": [],
+                },
+            },
+        )
+    )
+
+    result = server.convert_osi_to_obml("osi_yaml_content")
+    assert "version: 1.0" in result
+
+
+# ---------------------------------------------------------------------------
+# convert_obml_to_osi
+# ---------------------------------------------------------------------------
+
+
+def test_convert_obml_to_osi(mock_api: respx.MockRouter):
+    """convert_obml_to_osi calls /v1/convert/obml-to-osi."""
+    mock_api.post("/v1/convert/obml-to-osi").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "output_yaml": "semantic_model:\n  name: test",
+                "warnings": [],
+                "validation": {
+                    "schema_valid": True,
+                    "semantic_valid": True,
+                    "schema_errors": [],
+                    "semantic_errors": [],
+                    "semantic_warnings": [],
+                },
+            },
+        )
+    )
+
+    result = server.convert_obml_to_osi("obml_yaml_content")
+    assert "semantic_model" in result
+
+
+# ---------------------------------------------------------------------------
 # Session auto-creation & caching
 # ---------------------------------------------------------------------------
 
@@ -377,13 +922,17 @@ def test_list_dialects(mock_api: respx.MockRouter):
 def test_session_created_once(mock_api: respx.MockRouter):
     """Session is created only once and reused for subsequent calls."""
     _mock_create_session(mock_api)
-    mock_api.get("/sessions/test-session-1/models").mock(return_value=httpx.Response(200, json=[]))
+    mock_api.get("/v1/sessions/test-session-1/models").mock(
+        return_value=httpx.Response(200, json=[])
+    )
 
     server.list_models()
     server.list_models()
 
-    # POST /sessions should have been called exactly once
-    session_calls = [call for call in mock_api.calls if call.request.url.path == "/sessions"]
+    # POST /v1/sessions should have been called exactly once
+    session_calls = [
+        call for call in mock_api.calls if call.request.url.path == "/v1/sessions"
+    ]
     assert len(session_calls) == 1
 
 
@@ -401,12 +950,12 @@ def test_session_retry_on_404(mock_api: respx.MockRouter):
     server._api_session_id = "session-old"
 
     # First call to models returns 404 (session expired)
-    mock_api.get("/sessions/session-old/models").mock(
+    mock_api.get("/v1/sessions/session-old/models").mock(
         return_value=httpx.Response(404, json={"detail": "Session not found"})
     )
 
     # New session creation after invalidation
-    mock_api.post("/sessions").mock(
+    mock_api.post("/v1/sessions").mock(
         return_value=httpx.Response(
             201,
             json={
@@ -420,7 +969,9 @@ def test_session_retry_on_404(mock_api: respx.MockRouter):
     )
 
     # Retry call succeeds with new session
-    mock_api.get("/sessions/session-new/models").mock(return_value=httpx.Response(200, json=[]))
+    mock_api.get("/v1/sessions/session-new/models").mock(
+        return_value=httpx.Response(200, json=[])
+    )
 
     result = server.list_models()
     assert "No models loaded" in result
@@ -437,14 +988,16 @@ def test_session_not_invalidated_on_model_404(mock_api: respx.MockRouter):
     from fastmcp.exceptions import ToolError
 
     server._api_session_id = "session-old"
-    mock_api.get("/sessions/session-old/models/no-such-model").mock(
+    mock_api.get("/v1/sessions/session-old/models/no-such-model").mock(
         return_value=httpx.Response(404, json={"detail": "Model not found"})
     )
 
     with pytest.raises(ToolError, match="API error.*404"):
         server.describe_model("no-such-model")
 
-    session_calls = [call for call in mock_api.calls if call.request.url.path == "/sessions"]
+    session_calls = [
+        call for call in mock_api.calls if call.request.url.path == "/v1/sessions"
+    ]
     assert len(session_calls) == 0
     assert server._api_session_id == "session-old"
 
@@ -454,14 +1007,16 @@ def test_session_not_invalidated_on_plain_text_404(mock_api: respx.MockRouter):
     from fastmcp.exceptions import ToolError
 
     server._api_session_id = "session-old"
-    mock_api.get("/sessions/session-old/models/missing").mock(
+    mock_api.get("/v1/sessions/session-old/models/missing").mock(
         return_value=httpx.Response(404, text="Not Found")
     )
 
     with pytest.raises(ToolError, match="API error.*404"):
         server.describe_model("missing")
 
-    session_calls = [call for call in mock_api.calls if call.request.url.path == "/sessions"]
+    session_calls = [
+        call for call in mock_api.calls if call.request.url.path == "/v1/sessions"
+    ]
     assert len(session_calls) == 0
     assert server._api_session_id == "session-old"
 
@@ -476,7 +1031,7 @@ def test_api_error_raises_tool_error(mock_api: respx.MockRouter):
     from fastmcp.exceptions import ToolError
 
     _mock_create_session(mock_api)
-    mock_api.post("/sessions/test-session-1/models").mock(
+    mock_api.post("/v1/sessions/test-session-1/models").mock(
         return_value=httpx.Response(
             422,
             json={"detail": "Invalid OBML model: parsing or validation failed"},

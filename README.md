@@ -7,32 +7,49 @@
 
 <p align="center"><strong>Thin MCP server that delegates to the OrionBelt Semantic Layer REST API</strong></p>
 
-[![Version 0.7.0](https://img.shields.io/badge/version-0.7.0-purple.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/releases)
+[![Version 1.0.0](https://img.shields.io/badge/version-1.0.0-purple.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/releases)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/blob/main/LICENSE)
 [![FastMCP](https://img.shields.io/badge/FastMCP-3.0+-8A2BE2)](https://gofastmcp.com)
 [![Pydantic v2](https://img.shields.io/badge/Pydantic-v2-E92063.svg?logo=pydantic&logoColor=white)](https://docs.pydantic.dev)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://docs.astral.sh/ruff/)
 
+[![BigQuery](https://img.shields.io/badge/BigQuery-669DF6.svg?logo=googlebigquery&logoColor=white)](https://cloud.google.com/bigquery)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1.svg?logo=postgresql&logoColor=white)](https://www.postgresql.org)
 [![Snowflake](https://img.shields.io/badge/Snowflake-29B5E8.svg?logo=snowflake&logoColor=white)](https://www.snowflake.com)
 [![ClickHouse](https://img.shields.io/badge/ClickHouse-FFCC01.svg?logo=clickhouse&logoColor=black)](https://clickhouse.com)
 [![Dremio](https://img.shields.io/badge/Dremio-31B48D.svg)](https://www.dremio.com)
 [![Databricks](https://img.shields.io/badge/Databricks-FF3621.svg?logo=databricks&logoColor=white)](https://www.databricks.com)
+[![DuckDB](https://img.shields.io/badge/DuckDB-FFF000.svg?logo=duckdb&logoColor=black)](https://duckdb.org)
 
 A thin MCP server that delegates all business logic to the [OrionBelt Semantic Layer](https://github.com/ralfbecher/orionbelt-semantic-layer) REST API via HTTP. No embedded engine — pure API pass-through.
 
 ## Architecture
 
+The OrionBelt Semantic Layer platform has two deployment modes. This MCP server supports both:
+
+- **Standalone** — Deploy the [OrionBelt Semantic Layer API](https://github.com/ralfbecher/orionbelt-semantic-layer) anywhere (Cloud Run, Docker, localhost) and point this MCP server at it via `API_BASE_URL`.
+- **Hosted** — Use the managed deployment on [Prefect Horizon](https://horizon.prefect.io) with zero local setup (see [Live Demo Hosting](#mcp-live-demo-hosting-at-prefect-horizon) below).
+
 ```
-LLM Client  ──MCP──>  server.py  ──HTTP──>  OrionBelt Semantic Layer API
-                       (FastMCP + httpx)     (Cloud Run / localhost)
+┌────────────┐       ┌──────────────────────────────────────────────────────┐
+│ LLM Client │       │                OrionBelt Platform                    │
+│            │       │                                                      │
+│  Claude,   │──MCP──│──> server.py  ──HTTP /v1──>  Semantic Layer REST API │
+│  Cursor,   │       │    (FastMCP                   (FastAPI: parse OBML,  │
+│  any MCP   │       │     + httpx)                   validate, compile     │
+│  client    │       │                                to SQL)               │
+└────────────┘       └──────────────────────────────────────────────────────┘
 ```
 
-- **No business logic** — all tool calls delegate to the REST API
+- **No business logic** — all tool calls delegate to the REST API (v1 endpoints)
 - **Auto-session management** — creates an API session on first tool call, caches the ID
-- **10 tools** for model loading, validation, querying, diagrams, and format conversion
+- **22 tools** for model loading, validation, querying, discovery, diagrams, and format conversion
 - **3 prompts + 1 resource** for OBML reference and usage guidance
+
+<p align="center">
+  <img src="docs/assets/architecture.png" alt="OrionBelt Analytics Architecture" width="900">
+</p>
 
 ## Live Demo
 
@@ -99,28 +116,57 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 
 ## Tools
 
-| MCP Tool                     | Description                                          |
-| ---------------------------- | ---------------------------------------------------- |
-| `get_obml_reference()`       | Returns the full OBML format specification           |
-| `load_model(model_yaml)`     | Parse, validate, and store a semantic model          |
-| `validate_model(model_yaml)` | Validate a model without storing it                  |
-| `describe_model(model_id)`   | Inspect data objects, dimensions, measures, metrics  |
-| `compile_query(...)`         | Compile a semantic query to SQL (simple + full mode) |
-| `list_models()`              | List all models loaded in the current session        |
-| `list_dialects()`            | List available SQL dialects and capabilities         |
-| `get_model_diagram(model_id)`| Generate a Mermaid ER diagram for a loaded model     |
-| `convert_osi_to_obml(input_yaml)` | Convert OSI YAML to OBML format               |
-| `convert_obml_to_osi(input_yaml)` | Convert OBML YAML to OSI format               |
+### Model lifecycle
+
+| MCP Tool                          | Description                                              |
+| --------------------------------- | -------------------------------------------------------- |
+| `get_obml_reference()`            | Returns the full OBML format specification               |
+| `load_model(model_yaml)`          | Parse, validate, and store a semantic model              |
+| `validate_model(model_yaml)`      | Validate a model without storing it                      |
+| `describe_model(model_id)`        | Inspect data objects, dimensions, measures, metrics      |
+| `remove_model(model_id)`          | Remove a model from the current session                  |
+| `list_models()`                   | List all models loaded in the current session            |
+
+### Model discovery
+
+| MCP Tool                          | Description                                              |
+| --------------------------------- | -------------------------------------------------------- |
+| `get_model_schema(model_id)`      | Full model structure as JSON (detailed)                  |
+| `list_dimensions(model_id)`       | List all dimensions in a model                           |
+| `get_dimension(model_id, name)`   | Get a single dimension by name                           |
+| `list_measures(model_id)`         | List all measures in a model                             |
+| `get_measure(model_id, name)`     | Get a single measure by name                             |
+| `list_metrics(model_id)`          | List all metrics in a model                              |
+| `get_metric(model_id, name)`      | Get a single metric by name                              |
+| `explain_artefact(model_id, name)`| Explain lineage of a dimension, measure, or metric       |
+| `find_artefacts(model_id, query)` | Search artefacts by name or synonym                      |
+| `get_join_graph(model_id)`        | Return the join graph as an adjacency list               |
+
+### Query & diagrams
+
+| MCP Tool                          | Description                                              |
+| --------------------------------- | -------------------------------------------------------- |
+| `compile_query(...)`              | Compile a semantic query to SQL (with explain plan)      |
+| `get_model_diagram(model_id)`     | Generate a Mermaid ER diagram for a loaded model         |
+
+### Utilities
+
+| MCP Tool                          | Description                                              |
+| --------------------------------- | -------------------------------------------------------- |
+| `list_dialects()`                 | List available SQL dialects and capabilities             |
+| `get_settings()`                  | Get API configuration (single-model mode, TTL)           |
+| `convert_osi_to_obml(input_yaml)` | Convert OSI YAML to OBML format                          |
+| `convert_obml_to_osi(input_yaml)` | Convert OBML YAML to OSI format                          |
 
 ## Supported SQL Dialects
 
-`postgres`, `snowflake`, `clickhouse`, `databricks`, `dremio`
+`postgres`, `snowflake`, `clickhouse`, `databricks`, `dremio`, `bigquery`, `duckdb`
 
 ## Workflow
 
 1. **Get reference** — call `get_obml_reference()` to learn OBML syntax
 2. **Load model** — call `load_model(model_yaml)` to get a `model_id`
-3. **Explore** — call `describe_model(model_id)` to inspect the model
+3. **Explore** — call `describe_model(model_id)` or use discovery tools (`list_dimensions`, `find_artefacts`, `explain_artefact`, etc.)
 4. **Query** — call `compile_query(model_id, dimensions=[...], measures=[...])` to generate SQL
 
 ## Development
