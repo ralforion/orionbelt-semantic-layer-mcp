@@ -254,6 +254,7 @@ dataObjects:
       Amount:
         code: AMOUNT
         abstractType: float
+        numClass: additive        # categorical | additive | non-additive
     joins:                        # optional — defined on fact tables
       - joinType: many-to-one     # many-to-one | one-to-one
         joinTo: Customers         # target data object name
@@ -320,12 +321,51 @@ metrics:
 string, int, float, date, time, time_tz, timestamp,
 timestamp_tz, boolean, json
 
+## numClass Values (optional — classification of numeric columns to control aggregation behavior)
+
+categorical, additive, non-additive
+
 ## Aggregation Values
 
 sum, count, count_distinct, avg, min, max,
 any_value, median, mode, listagg
 
-## 5. synonyms — alternative names (optional, LLM hints)
+## 5. description — business metadata (optional)
+
+All six levels (model, dataObject, column, dimension, measure, metric) support
+an optional `description` field for business metadata.  This is distinct from
+`comment` (which holds physical database comments from COMMENT ON TABLE/COLUMN):
+
+```yaml
+dataObjects:
+  Orders:
+    code: ORDERS
+    database: EDW
+    schema: SALES
+    description: Main sales order fact table
+    columns:
+      Amount:
+        code: AMOUNT
+        abstractType: float
+        description: Order total in USD
+
+dimensions:
+  Customer Country:
+    dataObject: Customers
+    column: Country
+    description: Country of the customer's billing address
+
+measures:
+  Total Revenue:
+    columns:
+      - dataObject: Orders
+        column: Amount
+    resultType: float
+    aggregation: sum
+    description: Sum of all order amounts
+```
+
+## 6. synonyms — alternative names (optional, LLM hints)
 
 All five element levels (dataObject, column, dimension, measure, metric) support
 an optional `synonyms` list — alternative names or terms that help LLMs
@@ -357,7 +397,7 @@ measures:
     synonyms: [sales, income, turnover]
 ```
 
-## 6. customExtensions — vendor-keyed metadata (optional)
+## 7. customExtensions — vendor-keyed metadata (optional)
 
 All six levels (model, dataObject, column, dimension, measure, metric) support
 an optional `customExtensions` array for vendor-specific metadata:
@@ -593,6 +633,8 @@ def describe_model(model_id: str) -> str:
     lines.append("DATA OBJECTS:")
     for obj in desc.get("data_objects", []):
         lines.append(f"  {obj['label']}  (code: {obj['code']})")
+        if obj.get("description"):
+            lines.append(f"    description: {obj['description']}")
         lines.append(f"    columns: {', '.join(obj.get('columns', []))}")
         if obj.get("join_targets"):
             lines.append(f"    joins to: {', '.join(obj['join_targets'])}")
@@ -607,6 +649,8 @@ def describe_model(model_id: str) -> str:
         lines.append(
             f"  {dim['name']}  ({dim['result_type']}, {dim['data_object']}.{dim['column']}{grain})"
         )
+        if dim.get("description"):
+            lines.append(f"    description: {dim['description']}")
         if dim.get("synonyms"):
             lines.append(f"    synonyms: {', '.join(dim['synonyms'])}")
     lines.append("")
@@ -616,6 +660,8 @@ def describe_model(model_id: str) -> str:
     for m in desc.get("measures", []):
         expr = f"  expr: {m['expression']}" if m.get("expression") else ""
         lines.append(f"  {m['name']}  ({m['result_type']}, {m['aggregation']}{expr})")
+        if m.get("description"):
+            lines.append(f"    description: {m['description']}")
         if m.get("synonyms"):
             lines.append(f"    synonyms: {', '.join(m['synonyms'])}")
     lines.append("")
@@ -626,6 +672,8 @@ def describe_model(model_id: str) -> str:
         lines.append("METRICS:")
         for met in metrics:
             lines.append(f"  {met['name']}  expr: {met['expression']}")
+            if met.get("description"):
+                lines.append(f"    description: {met['description']}")
             if met.get("synonyms"):
                 lines.append(f"    synonyms: {', '.join(met['synonyms'])}")
         lines.append("")
@@ -658,7 +706,29 @@ def compile_query(
         )
 
     The full query JSON supports: ``select`` (dimensions + measures), ``where``,
-    ``having``, ``order_by``, ``limit``, ``usePathNames``.
+    ``having``, ``order_by``, ``limit``, ``offset``, ``usePathNames``,
+    ``dimensionsExclude``.
+
+    **Filters** — ``where`` and ``having`` accept leaf filters and filter groups:
+
+    - Leaf filter: ``{"field": "Country", "op": "equals", "value": "US"}``
+    - Filter group (AND/OR/NOT)::
+
+        {"logic": "or", "filters": [
+          {"field": "Country", "op": "equals", "value": "US"},
+          {"field": "Country", "op": "equals", "value": "DE"}
+        ]}
+
+    Groups can be nested and optionally negated:
+    ``{"logic": "and", "negated": true, "filters": [...]}``.
+
+
+    **Filter field syntax** — WHERE filters accept:
+
+    - Dimension name: ``"Country"``
+    - Qualified column: ``"Orders.Order Priority"`` (DataObject.Column — auto-joins if reachable)
+
+    HAVING filters reference a measure name.
 
     Use ``describe_model`` first to discover available dimension and measure
     names.  Filter operators: equals, notequals, gt, gte, lt, lte, inlist,
@@ -666,13 +736,18 @@ def compile_query(
     ends_with, between, notbetween, set, notset, is_null, is_not_null,
     relative.
 
+    **dimensionsExclude** — set ``"dimensionsExclude": true`` to return dimension
+    value combinations that do NOT exist in the data (anti-join via EXCEPT).
+    Requires 2+ dimensions on independent branches and no measures.
+
     For secondary joins, pass ``use_path_names`` (simple mode) or include
     ``usePathNames`` in query_json (full mode). Each item has ``source``,
     ``target``, and ``pathName`` keys.
 
     Args:
         model_id: The id returned by ``load_model``.
-        dialect: Target SQL dialect (postgres, snowflake, clickhouse, databricks, dremio).
+        dialect: Target SQL dialect (postgres, snowflake, clickhouse,
+            databricks, dremio, bigquery, duckdb).
         dimensions: List of dimension names (simple mode).
         measures: List of measure names (simple mode).
         query_json: Full query object as JSON string (full mode).
@@ -749,6 +824,84 @@ def compile_query(
         parts.append("")
         parts.append(f"-- Warnings: {'; '.join(data['warnings'])}")
     return "\n".join(parts)
+
+
+@mcp.tool
+def execute_query(
+    model_id: str,
+    dialect: str = "postgres",
+    dimensions: list[str] | None = None,
+    measures: list[str] | None = None,
+    query_json: str | None = None,
+    use_path_names: list[dict[str, str]] | None = None,
+) -> str:
+    """Compile and execute a semantic query, returning SQL and result data.
+
+    Requires the API to have ``QUERY_EXECUTE=true`` or ``FLIGHT_ENABLED=true``
+    configured.  Returns the compiled SQL, column metadata, and the actual
+    query results from the database.  Use ``get_settings`` to check
+    availability.
+
+    Two modes (same as ``compile_query``):
+
+    **Simple mode** — pass ``dimensions`` and ``measures`` lists directly::
+
+        execute_query(model_id="abc12345", dimensions=["Country"], measures=["Revenue"])
+
+    **Full mode** — pass a complete query as JSON via ``query_json``::
+
+        execute_query(
+            model_id="abc12345",
+            query_json='{"select":{"dimensions":["Country"],"measures":["Revenue"]},"limit":100}'
+        )
+
+    The full query JSON supports: ``select`` (dimensions + measures), ``where``,
+    ``having``, ``order_by``, ``limit``, ``offset``, ``usePathNames``,
+    ``dimensionsExclude``.  Filters support the same leaf and filter group
+    syntax as ``compile_query`` (see its docstring for details).
+
+    If no ``limit`` is specified, a server-side default row limit is enforced.
+
+    Args:
+        model_id: The id returned by ``load_model``.
+        dialect: Target SQL dialect (postgres, snowflake, bigquery, clickhouse,
+            databricks, dremio, duckdb).
+        dimensions: List of dimension names (simple mode).
+        measures: List of measure names (simple mode).
+        query_json: Full query object as JSON string (full mode).
+        use_path_names: List of {source, target, pathName} dicts for
+            selecting secondary joins (simple mode).
+    """
+    logger.info("execute_query called (model_id=%s, dialect=%s)", model_id, dialect)
+
+    # Build the query object (same logic as compile_query)
+    if query_json is not None:
+        try:
+            query = json.loads(query_json)
+        except json.JSONDecodeError as exc:
+            raise ToolError(f"Invalid query JSON: {exc}") from exc
+    elif dimensions is not None or measures is not None:
+        query: dict = {  # type: ignore[no-redef]
+            "select": {
+                "dimensions": dimensions or [],
+                "measures": measures or [],
+            },
+        }
+        if use_path_names:
+            query["usePathNames"] = use_path_names
+    else:
+        raise ToolError(
+            "Provide either dimensions/measures (simple mode) or query_json (full mode)."
+        )
+
+    resp = _session_request(
+        "POST",
+        "/query/execute",
+        json_body={"model_id": model_id, "dialect": dialect, "query": query},
+    )
+    data = _parse_json(resp)
+
+    return json.dumps(data, indent=2)
 
 
 @mcp.tool
@@ -850,6 +1003,8 @@ def list_dimensions(model_id: str) -> str:
         lines.append(
             f"  {d['name']}  ({d['result_type']}, {d['data_object']}.{d['column']}{grain})"
         )
+        if d.get("description"):
+            lines.append(f"    description: {d['description']}")
         if d.get("synonyms"):
             lines.append(f"    synonyms: {', '.join(d['synonyms'])}")
     return "\n".join(lines)
@@ -885,6 +1040,8 @@ def list_measures(model_id: str) -> str:
     for m in measures:
         expr = f"  expr: {m['expression']}" if m.get("expression") else ""
         lines.append(f"  {m['name']}  ({m['result_type']}, {m['aggregation']}{expr})")
+        if m.get("description"):
+            lines.append(f"    description: {m['description']}")
         if m.get("synonyms"):
             lines.append(f"    synonyms: {', '.join(m['synonyms'])}")
     return "\n".join(lines)
@@ -920,6 +1077,8 @@ def list_metrics(model_id: str) -> str:
     for met in metrics:
         components = ", ".join(met.get("component_measures", []))
         lines.append(f"  {met['name']}  expr: {met['expression']}")
+        if met.get("description"):
+            lines.append(f"    description: {met['description']}")
         if components:
             lines.append(f"    components: {components}")
         if met.get("synonyms"):
@@ -1029,7 +1188,7 @@ def get_settings() -> str:
     """Get API configuration settings.
 
     Returns whether the API is in single-model mode, the session TTL,
-    and any pre-loaded model YAML.
+    Flight SQL status, and any pre-loaded model YAML.
     """
     resp = _api_request("GET", f"{_API_V1}/settings", retry_on_expired=False)
     data = _parse_json(resp)
@@ -1038,6 +1197,18 @@ def get_settings() -> str:
     lines.append(f"  Session TTL: {data.get('session_ttl_seconds', 'N/A')}s")
     if data.get("model_yaml"):
         lines.append(f"  Pre-loaded model: yes ({len(data['model_yaml'])} chars)")
+    query_exec = data.get("query_execute", False)
+    flight = data.get("flight")
+    if flight:
+        lines.append(f"  Flight SQL: enabled (port {flight.get('port', 'N/A')})")
+        lines.append(f"  DB vendor: {flight.get('db_vendor', 'N/A')}")
+        lines.append(f"  Auth mode: {flight.get('auth_mode', 'none')}")
+    else:
+        lines.append("  Flight SQL: not enabled")
+    if query_exec or flight:
+        lines.append("  Query execution: available (use execute_query tool)")
+    else:
+        lines.append("  Query execution: not available")
     return "\n".join(lines)
 
 
@@ -1150,6 +1321,8 @@ dataObjects:
       <Column Name>:              # unique within this data object
         code: <COLUMN>            # physical column name
         abstractType: string      # see abstractType values below
+        numClass: additive        # optional: categorical | additive | non-additive
+        description: <text>       # optional: business description
     joins:                        # optional — define on fact tables
       - joinType: many-to-one     # many-to-one | one-to-one
         joinTo: <TargetObject>
@@ -1187,6 +1360,7 @@ metrics:
     expression: '{[Measure A]} / {[Measure B]}'   # {[Measure Name]} syntax
 
 # Optional on dataObject, column, dimension, measure, metric:
+# description: <text>                  # business metadata
 # synonyms: [alternative name, ...]   # LLM hints for matching user intent
 
 # Optional on any level: model, dataObject, column, dimension, measure, metric
@@ -1199,6 +1373,10 @@ customExtensions:
 
 string, int, float, date, time, time_tz, timestamp,
 timestamp_tz, boolean, json
+
+## numClass Values
+
+categorical, additive, non-additive
 
 ## Aggregation Values
 
@@ -1269,6 +1447,41 @@ compile_query(
 - Null: `is_null`, `is_not_null`, `set`, `notset`
 - String: `contains`, `notcontains`, `like`, `notlike`, `starts_with`, `ends_with`
 - Range: `between`, `notbetween`, `relative`
+
+## Filter Groups (AND/OR/NOT)
+
+`where` and `having` arrays accept both leaf filters and filter groups
+for complex boolean expressions:
+
+```json
+"where": [
+  {"logic": "or", "filters": [
+    {"field": "Customer Country", "op": "equals", "value": "US"},
+    {"field": "Customer Country", "op": "equals", "value": "DE"}
+  ]},
+  {"field": "Order Status", "op": "notequals", "value": "Cancelled"}
+]
+```
+
+Top-level items are combined with AND.  Groups support:
+- `logic`: `"and"` (default) or `"or"`
+- `filters`: array of leaf filters or nested groups (recursive)
+- `negated`: `true` to negate the entire group (NOT)
+
+## Qualified Column References (WHERE only)
+
+WHERE filter fields accept three syntaxes:
+- Dimension name: `"Customer Country"`
+- Qualified column: `"Orders.Order Priority"` (DataObject.Column)
+- The data object must be reachable from the query's join graph (auto-joined)
+
+HAVING filter fields reference a measure name.
+
+## dimensionsExclude
+
+Set `"dimensionsExclude": true` to return dimension value combinations that
+do NOT exist in the data (anti-join via EXCEPT).  Requires 2+ dimensions on
+independent branches and no measures.
 
 ## Supported Dialects
 

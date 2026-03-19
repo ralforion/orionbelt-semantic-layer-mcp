@@ -7,7 +7,7 @@
 
 <p align="center"><strong>Thin MCP server that delegates to the OrionBelt Semantic Layer REST API</strong></p>
 
-[![Version 1.0.0](https://img.shields.io/badge/version-1.0.0-purple.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/releases)
+[![Version 1.1.0](https://img.shields.io/badge/version-1.1.0-purple.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/releases)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/blob/main/LICENSE)
 [![FastMCP](https://img.shields.io/badge/FastMCP-3.1+-8A2BE2)](https://gofastmcp.com)
@@ -44,7 +44,7 @@ The OrionBelt Semantic Layer platform has two deployment modes. This MCP server 
 
 - **No business logic** — all tool calls delegate to the REST API (v1 endpoints)
 - **Auto-session management** — creates an API session on first tool call, caches the ID
-- **22 tools** for model loading, validation, querying, discovery, diagrams, and format conversion
+- **23 tools** for model loading, validation, querying, execution, discovery, diagrams, and format conversion
 - **3 prompts + 1 resource** for OBML reference and usage guidance
 
 <p align="center">
@@ -142,11 +142,12 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 | `find_artefacts(model_id, query)` | Search artefacts by name or synonym                      |
 | `get_join_graph(model_id)`        | Return the join graph as an adjacency list               |
 
-### Query & diagrams
+### Query, execution & diagrams
 
 | MCP Tool                          | Description                                              |
 | --------------------------------- | -------------------------------------------------------- |
 | `compile_query(...)`              | Compile a semantic query to SQL (with explain plan)      |
+| `execute_query(...)`              | Compile and execute a query, returning SQL + result data |
 | `get_model_diagram(model_id)`     | Generate a Mermaid ER diagram for a loaded model         |
 
 ### Utilities
@@ -154,7 +155,7 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 | MCP Tool                          | Description                                              |
 | --------------------------------- | -------------------------------------------------------- |
 | `list_dialects()`                 | List available SQL dialects and capabilities             |
-| `get_settings()`                  | Get API configuration (single-model mode, TTL)           |
+| `get_settings()`                  | Get API config (single-model mode, TTL, Flight SQL)      |
 | `convert_osi_to_obml(input_yaml)` | Convert OSI YAML to OBML format                          |
 | `convert_obml_to_osi(input_yaml)` | Convert OBML YAML to OSI format                          |
 
@@ -168,6 +169,7 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 2. **Load model** — call `load_model(model_yaml)` to get a `model_id`
 3. **Explore** — call `describe_model(model_id)` or use discovery tools (`list_dimensions`, `find_artefacts`, `explain_artefact`, etc.)
 4. **Query** — call `compile_query(model_id, dimensions=[...], measures=[...])` to generate SQL
+5. **Execute** — call `execute_query(model_id, dimensions=[...], measures=[...])` to run SQL and get results (requires `FLIGHT_ENABLED=true` on the API)
 
 ## Development
 
