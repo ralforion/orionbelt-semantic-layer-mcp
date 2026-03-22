@@ -234,270 +234,34 @@ def _session_request(
 # Resources
 # ---------------------------------------------------------------------------
 
-OBML_REFERENCE = """\
-# OBML (OrionBelt ML) Reference
+_obml_reference_cache: str | None = None
+_dialect_names_cache: list[str] | None = None
 
-OBML is a YAML-based semantic model format. A model has four top-level sections:
 
-## 1. dataObjects — physical tables/views
+def _fetch_obml_reference() -> str:
+    """Fetch and cache the OBML reference from the API."""
+    global _obml_reference_cache
+    if _obml_reference_cache is None:
+        resp = _api_request("GET", f"{_API_V1}/reference/obml", retry_on_expired=False)
+        data = _parse_json(resp)
+        _obml_reference_cache = data["reference"]
+    return _obml_reference_cache
 
-```yaml
-dataObjects:
-  Orders:                         # data object name
-    code: ORDERS                  # physical table/view name
-    database: EDW                 # database
-    schema: SALES_MART            # schema
-    columns:
-      Order ID:                   # column name — must be unique within this data object
-        code: ID                  # physical column name
-        abstractType: string      # see abstractType values below
-      Amount:
-        code: AMOUNT
-        abstractType: float
-        numClass: additive        # categorical | additive | non-additive
-    joins:                        # optional — defined on fact tables
-      - joinType: many-to-one     # many-to-one | one-to-one
-        joinTo: Customers         # target data object name
-        columnsFrom:
-          - Customer ID           # local column name
-        columnsTo:
-          - Customer ID           # target column name
-```
 
-## 2. dimensions — named analytical dimensions
-
-```yaml
-dimensions:
-  Customer Country:
-    dataObject: Customers         # which data object owns this dimension
-    column: Country               # column within that data object
-    resultType: string            # data type of the result (informative only)
-    timeGrain: month              # optional: year | quarter | month | week | day | hour
-```
-
-## 3. measures — aggregations
-
-```yaml
-measures:
-  Total Revenue:                  # measure name
-    columns:                      # column references (for simple aggregations)
-      - dataObject: Orders
-        column: Amount
-    resultType: float
-    aggregation: sum              # see aggregation values below
-    total: false                  # optional: use total (unfiltered) value in metrics
-
-  Profit:                         # expression-based measure
-    resultType: float
-    aggregation: sum
-    expression: '{[Orders].[Amount]} - {[Orders].[Cost]}'  # {[DataObject].[Column]} syntax
-
-  Filtered Measure:               # measure with a filter
-    columns:
-      - dataObject: Orders
-        column: Amount
-    resultType: float
-    aggregation: sum
-    filter:
-      column:
-        dataObject: Orders
-        column: Status
-      operator: equals            # equals | gt | gte | lt | lte | in | not_in | ...
-      values:
-        - dataType: string
-          valueString: completed
-```
-
-## 4. metrics — composite calculations from measures
-
-```yaml
-metrics:
-  Profit Margin:
-    expression: '{[Profit]} / {[Total Revenue]}'  # {[Measure Name]} syntax
-```
-
-## abstractType Values
-
-string, int, float, date, time, time_tz, timestamp,
-timestamp_tz, boolean, json
-
-## numClass Values (optional — classification of numeric columns to control aggregation behavior)
-
-categorical, additive, non-additive
-
-## Aggregation Values
-
-sum, count, count_distinct, avg, min, max,
-any_value, median, mode, listagg
-
-## 5. description — business metadata (optional)
-
-All six levels (model, dataObject, column, dimension, measure, metric) support
-an optional `description` field for business metadata.  This is distinct from
-`comment` (which holds physical database comments from COMMENT ON TABLE/COLUMN):
-
-```yaml
-dataObjects:
-  Orders:
-    code: ORDERS
-    database: EDW
-    schema: SALES
-    description: Main sales order fact table
-    columns:
-      Amount:
-        code: AMOUNT
-        abstractType: float
-        description: Order total in USD
-
-dimensions:
-  Customer Country:
-    dataObject: Customers
-    column: Country
-    description: Country of the customer's billing address
-
-measures:
-  Total Revenue:
-    columns:
-      - dataObject: Orders
-        column: Amount
-    resultType: float
-    aggregation: sum
-    description: Sum of all order amounts
-```
-
-## 6. synonyms — alternative names (optional, LLM hints)
-
-All five element levels (dataObject, column, dimension, measure, metric) support
-an optional `synonyms` list — alternative names or terms that help LLMs
-map natural-language questions to the correct model element:
-
-```yaml
-dataObjects:
-  Customers:
-    code: CUSTOMERS
-    database: EDW
-    schema: SALES
-    synonyms: [client, buyer, purchaser]
-    columns:
-      Country:
-        code: COUNTRY
-        abstractType: string
-        synonyms: [nation, region]
-
-dimensions:
-  Customer Country:
-    dataObject: Customers
-    column: Country
-    synonyms: [client country, buyer country]
-
-measures:
-  Revenue:
-    aggregation: sum
-    expression: '{[Orders].[Amount]}'
-    synonyms: [sales, income, turnover]
-```
-
-## 7. customExtensions — vendor-keyed metadata (optional)
-
-All six levels (model, dataObject, column, dimension, measure, metric) support
-an optional `customExtensions` array for vendor-specific metadata:
-
-```yaml
-customExtensions:
-  - vendor: OSI
-    data: '{"instructions": "Use for retail analytics", "synonyms": ["sales"]}'
-  - vendor: GOVERNANCE
-    data: '{"owner": "data-team", "classification": "internal"}'
-```
-
-Each entry has `vendor` (identifier string) and `data` (opaque JSON string).
-OrionBelt preserves these during parsing but does not interpret them.
-
-## Key Rules
-
-1. **Column names are unique within each data object**.
-   Dimensions, measures, and metrics must be unique across the model.
-2. Measure expressions use `{[DataObject].[Column]}` to reference columns.
-3. Metric expressions use `{[Measure Name]}` to reference measures by name.
-4. Joins are defined on fact tables pointing to dimension tables \
-(many-to-one or one-to-one).
-5. A dimension references exactly one `dataObject` + `column` pair.
-
-## Complete Minimal Example
-
-```yaml
-version: 1.0
-
-dataObjects:
-  Orders:
-    code: ORDERS
-    database: EDW
-    schema: SALES
-    columns:
-      Order ID:
-        code: ID
-        abstractType: string
-      Customer ID:
-        code: CUST_ID
-        abstractType: string
-      Amount:
-        code: AMOUNT
-        abstractType: float
-    joins:
-      - joinType: many-to-one
-        joinTo: Customers
-        columnsFrom:
-          - Customer ID
-        columnsTo:
-          - Cust ID
-
-  Customers:
-    code: CUSTOMERS
-    database: EDW
-    schema: SALES
-    columns:
-      Cust ID:
-        code: ID
-        abstractType: string
-      Country:
-        code: COUNTRY
-        abstractType: string
-
-dimensions:
-  Customer Country:
-    dataObject: Customers
-    column: Country
-    resultType: string
-
-measures:
-  Total Revenue:
-    columns:
-      - dataObject: Orders
-        column: Amount
-    resultType: float
-    aggregation: sum
-
-metrics:
-  Revenue Per Order:
-    expression: '{[Total Revenue]} / {[Order Count]}'
-```
-
-## Supported SQL Dialects
-
-postgres, snowflake, clickhouse, databricks, dremio, bigquery, duckdb
-
-## Workflow
-
-1. `load_model(model_yaml)` — parse, validate, store → returns `model_id`
-2. `describe_model(model_id)` — inspect data objects, dimensions, measures, metrics
-3. `compile_query(model_id, dimensions=[...], measures=[...])` — generate SQL
-"""
+def _fetch_dialect_names() -> list[str]:
+    """Fetch and cache the list of supported dialect names from the API."""
+    global _dialect_names_cache
+    if _dialect_names_cache is None:
+        resp = _api_request("GET", f"{_API_V1}/dialects", retry_on_expired=False)
+        data = _parse_json(resp)
+        _dialect_names_cache = [d["name"] for d in data.get("dialects", [])]
+    return _dialect_names_cache
 
 
 @mcp.resource("obml://reference")
 def obml_reference() -> str:
     """Full OBML format reference — data objects, dimensions, measures, metrics, joins."""
-    return OBML_REFERENCE
+    return _fetch_obml_reference()
 
 
 # ---------------------------------------------------------------------------
@@ -513,7 +277,7 @@ def get_obml_reference() -> str:
     the correct syntax.  Returns the full specification with examples for
     dataObjects, dimensions, measures, metrics, joins, and expressions.
     """
-    return OBML_REFERENCE
+    return _fetch_obml_reference()
 
 
 @mcp.tool
@@ -614,6 +378,17 @@ def validate_model(model_yaml: str) -> str:
     return "\n".join(lines)
 
 
+def _format_metric_summary(met: dict) -> str:
+    """Format a one-line summary for a metric (derived or cumulative)."""
+    met_type = met.get("type", "derived")
+    if met_type == "cumulative":
+        parts = [f"type: cumulative, measure: {met.get('measure', '?')}"]
+        if met.get("time_dimension"):
+            parts.append(f"timeDimension: {met['time_dimension']}")
+        return ", ".join(parts)
+    return f"expr: {met.get('expression', '?')}"
+
+
 @mcp.tool
 def describe_model(model_id: str) -> str:
     """Describe the contents of a loaded model.
@@ -671,7 +446,7 @@ def describe_model(model_id: str) -> str:
     if metrics:
         lines.append("METRICS:")
         for met in metrics:
-            lines.append(f"  {met['name']}  expr: {met['expression']}")
+            lines.append(f"  {met['name']}  {_format_metric_summary(met)}")
             if met.get("description"):
                 lines.append(f"    description: {met['description']}")
             if met.get("synonyms"):
@@ -746,8 +521,7 @@ def compile_query(
 
     Args:
         model_id: The id returned by ``load_model``.
-        dialect: Target SQL dialect (postgres, snowflake, clickhouse,
-            databricks, dremio, bigquery, duckdb).
+        dialect: Target SQL dialect (see ``write_query`` prompt for available dialects).
         dimensions: List of dimension names (simple mode).
         measures: List of measure names (simple mode).
         query_json: Full query object as JSON string (full mode).
@@ -864,8 +638,7 @@ def execute_query(
 
     Args:
         model_id: The id returned by ``load_model``.
-        dialect: Target SQL dialect (postgres, snowflake, bigquery, clickhouse,
-            databricks, dremio, duckdb).
+        dialect: Target SQL dialect (see ``write_query`` prompt for available dialects).
         dimensions: List of dimension names (simple mode).
         measures: List of measure names (simple mode).
         query_json: Full query object as JSON string (full mode).
@@ -1076,7 +849,7 @@ def list_metrics(model_id: str) -> str:
     lines = ["Metrics:", ""]
     for met in metrics:
         components = ", ".join(met.get("component_measures", []))
-        lines.append(f"  {met['name']}  expr: {met['expression']}")
+        lines.append(f"  {met['name']}  {_format_metric_summary(met)}")
         if met.get("description"):
             lines.append(f"    description: {met['description']}")
         if components:
@@ -1304,101 +1077,6 @@ class StaticPrompt(_BasePrompt):
         return self.text
 
 
-_WRITE_OBML_MODEL_TEXT = """\
-# OBML (OrionBelt ML) Syntax Reference
-
-An OBML model is a YAML file with four top-level sections:
-
-```yaml
-version: 1.0
-
-dataObjects:
-  <ObjectName>:
-    code: <TABLE_NAME>             # physical table/view name
-    database: <DB>
-    schema: <SCHEMA>
-    columns:
-      <Column Name>:              # unique within this data object
-        code: <COLUMN>            # physical column name
-        abstractType: string      # see abstractType values below
-        numClass: additive        # optional: categorical | additive | non-additive
-        description: <text>       # optional: business description
-    joins:                        # optional — define on fact tables
-      - joinType: many-to-one     # many-to-one | one-to-one
-        joinTo: <TargetObject>
-        columnsFrom:
-          - <local column name>
-        columnsTo:
-          - <target column name>
-
-dimensions:
-  <Dimension Name>:
-    dataObject: <ObjectName>       # which data object owns this dimension
-    column: <Column Name>          # column within that data object
-    resultType: string             # data type
-    timeGrain: month               # optional: year | quarter | month | week | day | hour
-
-measures:
-  <Measure Name>:
-    columns:                       # column references (for simple aggregations)
-      - dataObject: <ObjectName>
-        column: <Column Name>
-    resultType: float
-    aggregation: sum               # see aggregation values below
-    expression: '{[Orders].[Amount]} - {[Orders].[Cost]}'  # {[DataObject].[Column]}
-    filter:                        # optional measure-level filter
-      column:
-        dataObject: <ObjectName>
-        column: <Column Name>
-      operator: gt
-      values:
-        - dataType: float
-          valueFloat: 100.0
-
-metrics:
-  <Metric Name>:
-    expression: '{[Measure A]} / {[Measure B]}'   # {[Measure Name]} syntax
-
-# Optional on dataObject, column, dimension, measure, metric:
-# description: <text>                  # business metadata
-# synonyms: [alternative name, ...]   # LLM hints for matching user intent
-
-# Optional on any level: model, dataObject, column, dimension, measure, metric
-customExtensions:
-  - vendor: <VENDOR>
-    data: '<JSON string>'
-```
-
-## abstractType Values
-
-string, int, float, date, time, time_tz, timestamp,
-timestamp_tz, boolean, json
-
-## numClass Values
-
-categorical, additive, non-additive
-
-## Aggregation Values
-
-sum, count, count_distinct, avg, min, max,
-any_value, median, mode, listagg
-
-## Key Rules
-
-1. **Column names are unique within each data object**.
-   Dimensions, measures, and metrics must be unique across the model.
-2. Measure expressions use `{[DataObject].[Column]}` to reference columns.
-3. Metric expressions use `{[Measure Name]}` to reference measures.
-4. Joins are defined on fact tables pointing to dimension tables.
-5. A dimension references exactly one `dataObject` + `column` pair.
-
-## Workflow
-
-1. `load_model(model_yaml)` → get a `model_id`
-2. `describe_model(model_id)` → see what's in the model
-3. `compile_query(model_id, ...)` → generate SQL
-"""
-
 _WRITE_QUERY_TEXT = """\
 # Compiling Queries with OrionBelt
 
@@ -1485,7 +1163,7 @@ independent branches and no measures.
 
 ## Supported Dialects
 
-`postgres`, `snowflake`, `clickhouse`, `databricks`, `dremio`, `bigquery`, `duckdb`
+{dialects}
 
 ## Tips
 
@@ -1583,18 +1261,15 @@ from the query's join graph.
 4. Once valid, use `load_model(model_yaml)` to load it.
 """
 
-mcp.add_prompt(StaticPrompt(
-    name="write_obml_model",
-    description="OBML syntax reference — how to write a semantic model in YAML.",
-    text=_WRITE_OBML_MODEL_TEXT,
-    meta={"text": _WRITE_OBML_MODEL_TEXT},
-))
-mcp.add_prompt(StaticPrompt(
-    name="write_query",
-    description="How to use the compile_query tool — simple and full modes.",
-    text=_WRITE_QUERY_TEXT,
-    meta={"text": _WRITE_QUERY_TEXT},
-))
+@mcp.prompt
+def write_obml_model() -> str:
+    """OBML syntax reference — how to write a semantic model in YAML."""
+    return _fetch_obml_reference()
+@mcp.prompt
+def write_query() -> str:
+    """How to use the compile_query tool — simple and full modes."""
+    dialect_list = ", ".join(f"`{d}`" for d in _fetch_dialect_names())
+    return _WRITE_QUERY_TEXT.replace("{dialects}", dialect_list)
 mcp.add_prompt(StaticPrompt(
     name="debug_validation",
     description="All OBML validation error codes with causes and fixes.",

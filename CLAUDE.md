@@ -14,7 +14,7 @@ LLM Client  ──MCP──▶  server.py  ──HTTP──▶  OrionBelt Semant
 - **No business logic** — all tool calls delegate to the REST API
 - **Auto-session management** — creates an API session on first tool call, caches the ID
 - **23 tools** (no session tools exposed — session handling is internal)
-- **3 prompts + 1 resource** — static text, identical to the main repo's MCP server
+- **3 prompts + 1 resource** — `write_obml_model` fetched from API; others static
 
 ## Commands
 
@@ -58,7 +58,7 @@ All API endpoints use the `/v1/` prefix (since API v1.0.0).
 
 | MCP Tool | API Endpoint | Notes |
 |----------|-------------|-------|
-| `get_obml_reference()` | — | Returns static OBML_REFERENCE string |
+| `get_obml_reference()` | `GET /v1/reference/obml` | Fetched from API, cached |
 | `load_model(model_yaml)` | `POST /v1/sessions/{id}/models` | Auto-creates session |
 | `validate_model(model_yaml)` | `POST /v1/sessions/{id}/validate` | Always 200 |
 | `describe_model(model_id)` | `GET /v1/sessions/{id}/models/{mid}` | Formats nested JSON |

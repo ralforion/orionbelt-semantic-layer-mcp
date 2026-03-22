@@ -18,11 +18,15 @@ def _reset_state():
     """Reset module-level state before each test."""
     server._api_session_id = None
     server._http_client = None
+    server._obml_reference_cache = None
+    server._dialect_names_cache = None
     yield
     if server._http_client is not None:
         server._http_client.close()
         server._http_client = None
     server._api_session_id = None
+    server._obml_reference_cache = None
+    server._dialect_names_cache = None
 
 
 @pytest.fixture()
@@ -53,8 +57,39 @@ def _mock_create_session(rsps: respx.MockRouter, session_id: str = "test-session
 # ---------------------------------------------------------------------------
 
 
-def test_get_obml_reference():
-    """get_obml_reference returns the static OBML reference text."""
+_MOCK_OBML_REFERENCE = (
+    "# OBML Reference\n\ndataObjects, dimensions, measures, metrics."
+)
+
+
+def _mock_obml_reference(rsps: respx.MockRouter):
+    """Add a mock for GET /v1/reference/obml."""
+    rsps.get("/v1/reference/obml").mock(
+        return_value=httpx.Response(
+            200,
+            json={"reference": _MOCK_OBML_REFERENCE},
+        )
+    )
+
+
+def _mock_dialects(rsps: respx.MockRouter):
+    """Add a mock for GET /v1/dialects."""
+    rsps.get("/v1/dialects").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "dialects": [
+                    {"name": "postgres", "capabilities": {}},
+                    {"name": "mysql", "capabilities": {}},
+                ]
+            },
+        )
+    )
+
+
+def test_get_obml_reference(mock_api):
+    """get_obml_reference fetches the OBML reference from the API."""
+    _mock_obml_reference(mock_api)
     result = server.get_obml_reference()
     assert "OBML" in result
     assert "dataObjects" in result
@@ -640,6 +675,44 @@ def test_list_metrics(mock_api: respx.MockRouter):
     assert "components: Profit, Revenue" in result
 
 
+def test_list_metrics_cumulative(mock_api: respx.MockRouter):
+    """list_metrics formats cumulative metrics correctly."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/metrics").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "name": "Running Revenue",
+                    "type": "cumulative",
+                    "expression": None,
+                    "measure": "Total Revenue",
+                    "time_dimension": "Order Date",
+                    "component_measures": [],
+                    "synonyms": [],
+                },
+                {
+                    "name": "Profit Margin",
+                    "type": "derived",
+                    "expression": "{[Profit]} / {[Revenue]}",
+                    "measure": None,
+                    "time_dimension": None,
+                    "component_measures": ["Profit", "Revenue"],
+                    "synonyms": [],
+                },
+            ],
+        )
+    )
+
+    result = server.list_metrics("m001")
+    assert "Running Revenue" in result
+    assert "type: cumulative" in result
+    assert "measure: Total Revenue" in result
+    assert "timeDimension: Order Date" in result
+    assert "Profit Margin" in result
+    assert "expr: {[Profit]} / {[Revenue]}" in result
+
+
 def test_list_metrics_empty(mock_api: respx.MockRouter):
     """list_metrics handles empty list."""
     _mock_create_session(mock_api)
@@ -1093,18 +1166,22 @@ def test_health_check_server_error(mock_api: respx.MockRouter):
 # ---------------------------------------------------------------------------
 
 
-def test_write_obml_model_prompt():
-    """write_obml_model prompt returns OBML syntax reference."""
-    result = server._WRITE_OBML_MODEL_TEXT
+def test_write_obml_model_prompt(mock_api):
+    """write_obml_model prompt fetches OBML reference from the API."""
+    _mock_obml_reference(mock_api)
+    result = server.write_obml_model()
     assert "OBML" in result
     assert "dataObjects" in result
 
 
-def test_write_query_prompt():
-    """write_query prompt returns query compilation guide."""
-    result = server._WRITE_QUERY_TEXT
+def test_write_query_prompt(mock_api):
+    """write_query prompt fetches dialects and injects them."""
+    _mock_dialects(mock_api)
+    result = server.write_query()
     assert "Simple Mode" in result
     assert "Full Mode" in result
+    assert "`postgres`" in result
+    assert "`mysql`" in result
 
 
 def test_debug_validation_prompt():
@@ -1114,8 +1191,9 @@ def test_debug_validation_prompt():
     assert "UNKNOWN_COLUMN" in result
 
 
-def test_obml_reference_resource():
-    """obml://reference resource returns the OBML reference."""
+def test_obml_reference_resource(mock_api):
+    """obml://reference resource fetches the OBML reference from the API."""
+    _mock_obml_reference(mock_api)
     result = server.obml_reference()
     assert "OBML" in result
     assert "dataObjects" in result
