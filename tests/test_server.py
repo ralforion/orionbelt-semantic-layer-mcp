@@ -725,6 +725,99 @@ def test_list_metrics_cumulative(mock_api: respx.MockRouter):
     assert "expr: {[Profit]} / {[Revenue]}" in result
 
 
+def test_list_metrics_pop(mock_api: respx.MockRouter):
+    """list_metrics formats period-over-period metrics correctly."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/metrics").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "name": "Revenue YoY Growth",
+                    "type": "period_over_period",
+                    "expression": "{[Revenue]}",
+                    "measure": None,
+                    "time_dimension": None,
+                    "period_over_period": {
+                        "time_dimension": "Order Date",
+                        "grain": "month",
+                        "offset": -1,
+                        "offset_grain": "year",
+                        "comparison": "percentChange",
+                    },
+                    "component_measures": ["Revenue"],
+                    "synonyms": [],
+                },
+                {
+                    "name": "Profit Margin",
+                    "type": "derived",
+                    "expression": "{[Profit]} / {[Revenue]}",
+                    "measure": None,
+                    "time_dimension": None,
+                    "component_measures": ["Profit", "Revenue"],
+                    "synonyms": [],
+                },
+            ],
+        )
+    )
+
+    result = server.list_metrics("m001")
+    assert "Revenue YoY Growth" in result
+    assert "type: period_over_period" in result
+    assert "expr: {[Revenue]}" in result
+    assert "timeDimension: Order Date" in result
+    assert "grain: month" in result
+    assert "offsetGrain: year" in result
+    assert "comparison: percentChange" in result
+    assert "Profit Margin" in result
+    assert "expr: {[Profit]} / {[Revenue]}" in result
+
+
+def test_list_metrics_cumulative_extras(mock_api: respx.MockRouter):
+    """list_metrics shows cumulative extras (window, grainToDate, cumulativeType)."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/metrics").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "name": "7-Day Rolling Avg",
+                    "type": "cumulative",
+                    "expression": None,
+                    "measure": "Revenue",
+                    "time_dimension": "Order Date",
+                    "cumulative_type": "avg",
+                    "window": 7,
+                    "grain_to_date": None,
+                    "component_measures": [],
+                    "synonyms": [],
+                },
+                {
+                    "name": "MTD Revenue",
+                    "type": "cumulative",
+                    "expression": None,
+                    "measure": "Revenue",
+                    "time_dimension": "Order Date",
+                    "cumulative_type": "sum",
+                    "window": None,
+                    "grain_to_date": "month",
+                    "component_measures": [],
+                    "synonyms": [],
+                },
+            ],
+        )
+    )
+
+    result = server.list_metrics("m001")
+    assert "7-Day Rolling Avg" in result
+    assert "cumulativeType: avg" in result
+    assert "window: 7" in result
+    assert "MTD Revenue" in result
+    assert "grainToDate: month" in result
+    # sum is the default, should not be shown
+    assert "cumulativeType: sum" not in result
+
+
 def test_list_metrics_empty(mock_api: respx.MockRouter):
     """list_metrics handles empty list."""
     _mock_create_session(mock_api)

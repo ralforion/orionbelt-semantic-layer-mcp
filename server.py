@@ -324,9 +324,34 @@ def load_model(model_yaml: str) -> str:
                 column: <Column Name>
             resultType: float
             aggregation: sum         # see OBML reference for all types
+          <Filtered Measure>:        # measure with filters (CASE WHEN)
+            columns:
+              - dataObject: <Name>
+                column: <Column Name>
+            resultType: float
+            aggregation: sum
+            filters:                 # rows not matching are excluded from agg
+              - column: {dataObject: <Name>, column: <Col>}
+                operator: equals
+                values: [{dataType: string, valueString: "value"}]
         metrics:
-          <Metric Name>:
+          <Derived Metric>:
             expression: '{[Measure A]} / {[Measure B]}'
+          <Cumulative Metric>:       # running total / rolling window
+            type: cumulative
+            measure: <Measure Name>
+            timeDimension: <Dim Name>
+            # optional: cumulativeType (sum/avg/min/max/count), window (int),
+            #           grainToDate (year/quarter/month/week)
+          <PoP Metric>:              # period-over-period comparison
+            type: period_over_period
+            expression: '{[Measure Name]}'
+            periodOverPeriod:
+              timeDimension: <Dim Name>
+              grain: month           # spine grain
+              offset: -1
+              offsetGrain: year      # comparison offset unit
+              comparison: percentChange  # ratio/difference/previousValue
 
     Args:
         model_yaml: Complete OBML YAML content (version 1.0).
@@ -383,12 +408,30 @@ def validate_model(model_yaml: str) -> str:
 
 
 def _format_metric_summary(met: dict) -> str:
-    """Format a one-line summary for a metric (derived or cumulative)."""
+    """Format a one-line summary for a metric (derived, cumulative, or PoP)."""
     met_type = met.get("type", "derived")
     if met_type == "cumulative":
         parts = [f"type: cumulative, measure: {met.get('measure', '?')}"]
         if met.get("time_dimension"):
             parts.append(f"timeDimension: {met['time_dimension']}")
+        if met.get("cumulative_type") and met["cumulative_type"] != "sum":
+            parts.append(f"cumulativeType: {met['cumulative_type']}")
+        if met.get("window"):
+            parts.append(f"window: {met['window']}")
+        if met.get("grain_to_date"):
+            parts.append(f"grainToDate: {met['grain_to_date']}")
+        return ", ".join(parts)
+    if met_type == "period_over_period":
+        parts = [f"type: period_over_period, expr: {met.get('expression', '?')}"]
+        pop = met.get("period_over_period") or {}
+        if pop.get("time_dimension"):
+            parts.append(f"timeDimension: {pop['time_dimension']}")
+        if pop.get("grain"):
+            parts.append(f"grain: {pop['grain']}")
+        if pop.get("offset_grain"):
+            parts.append(f"offsetGrain: {pop['offset_grain']}")
+        if pop.get("comparison"):
+            parts.append(f"comparison: {pop['comparison']}")
         return ", ".join(parts)
     return f"expr: {met.get('expression', '?')}"
 
@@ -1173,6 +1216,23 @@ independent branches and no measures.
 
 {dialects}
 
+## Metric Types
+
+Metrics are queried by name like any measure.  Three types exist:
+
+- **Derived** (default): expression-based, e.g. `{[Profit]} / {[Revenue]}`.
+- **Cumulative**: running total, rolling window, or grain-to-date over a
+  time dimension.  Queried as a regular metric name.
+- **Period-over-Period (PoP)**: compares a measure across time periods
+  (e.g. YoY growth, MoM difference).  Queried as a regular metric name.
+
+## Measure Filters & Ratios
+
+Measures can have **filters** that restrict which rows contribute to
+aggregation (compiled as `CASE WHEN`).  A filtered measure like
+"US Revenue" can then be used in a **ratio metric**:
+`{{[US Revenue]}} / {{[Revenue]}}`  — no query-level WHERE needed.
+
 ## Tips
 
 - Use `describe_model` first to see available dimension/measure names.
@@ -1196,7 +1256,13 @@ _DEBUG_VALIDATION_TEXT = """\
 - `MEASURE_PARSE_ERROR`: Cannot parse a measure definition.
   Fix: Check required fields (aggregation, resultType) and either columns or expression.
 - `METRIC_PARSE_ERROR`: Cannot parse a metric definition.
-  Fix: Check required field (expression).
+  Fix: Derived metrics need `expression`.  Cumulative metrics need `measure`
+  + `timeDimension` (and `window`/`grainToDate` are mutually exclusive).
+  Period-over-period metrics need `expression` + `periodOverPeriod` block
+  with `timeDimension`, `grain`, and `offsetGrain`.
+- `MEASURE_FILTER_PARSE_ERROR`: Cannot parse a measure filter.
+  Fix: Each filter needs `column` ({dataObject, column}), `operator`, and
+  `values`.  Filter groups need `logic` (and/or) and `filters` array.
 
 ## Reference Errors
 
@@ -1225,6 +1291,10 @@ references unknown column.
 
 ## Semantic Errors
 
+- `UNKNOWN_FILTER_DATA_OBJECT`: Measure filter references non-existent data object.
+  Fix: Check `column.dataObject` value matches a data object name.
+- `UNKNOWN_FILTER_COLUMN`: Measure filter references non-existent column.
+  Fix: Check `column.column` value matches a column in the referenced data object.
 - `DUPLICATE_IDENTIFIER`: Duplicate name across data objects, dimensions, measures, or metrics.
   Fix: All names must be unique across the model.
 - `CYCLIC_JOIN`: Join graph contains a cycle.

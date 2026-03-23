@@ -82,6 +82,18 @@ All API endpoints use the `/v1/` prefix (since API v1.0.0).
 | `convert_osi_to_obml(...)` | `POST /v1/convert/osi-to-obml` | No session needed |
 | `convert_obml_to_osi(...)` | `POST /v1/convert/obml-to-osi` | No session needed |
 
+## Semantic Features
+
+The API supports three **metric types** and **measure filters**:
+
+- **Derived metrics** — expression-based: `{[Measure A]} / {[Measure B]}`
+- **Cumulative metrics** — running total, rolling window (`window: N`), or grain-to-date (`grainToDate: month`)
+- **Period-over-Period (PoP) metrics** — compare a measure across time periods (YoY, MoM, QoQ) with configurable comparison (`percentChange`, `difference`, `ratio`, `previousValue`)
+- **Measure filters** — restrict aggregation to matching rows via `CASE WHEN` wrapping; supports leaf filters and nested AND/OR/NOT groups
+- **Ratio pattern** — derived metrics referencing filtered measures (e.g. `{[US Revenue]} / {[Revenue]}`)
+
+All features are handled by the API — the MCP server passes through OBML YAML and query parameters unchanged.
+
 ## Session Management
 
 Sessions are fully internal — the LLM never sees session IDs:
