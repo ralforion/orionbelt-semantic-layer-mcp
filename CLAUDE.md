@@ -12,8 +12,9 @@ LLM Client  ──MCP──▶  server.py  ──HTTP──▶  OrionBelt Semant
 ```
 
 - **No business logic** — all tool calls delegate to the REST API
-- **Auto-session management** — creates an API session on first tool call, caches the ID
-- **23 tools** (no session tools exposed — session handling is internal)
+- **Two modes** — auto-detected at startup via `GET /v1/settings`
+  - **Multi-model mode**: 23 tools with `model_id`, session-scoped endpoints
+  - **Single-model mode**: 20 tools (no `load_model`/`remove_model`/`list_models`/`validate_model`; adds `get_model`; no `model_id`), shortcut endpoints
 - **3 prompts + 1 resource** — `write_obml_model` fetched from API; others static
 
 ## Commands
@@ -56,17 +57,19 @@ For Prefect Horizon: `server.py:mcp`
 
 All API endpoints use the `/v1/` prefix (since API v1.0.0).
 
+### Multi-model mode (session-scoped)
+
 | MCP Tool | API Endpoint | Notes |
 |----------|-------------|-------|
 | `get_obml_reference()` | `GET /v1/reference/obml` | Fetched from API, cached |
 | `load_model(model_yaml)` | `POST /v1/sessions/{id}/models` | Auto-creates session |
 | `validate_model(model_yaml)` | `POST /v1/sessions/{id}/validate` | Always 200 |
 | `describe_model(model_id)` | `GET /v1/sessions/{id}/models/{mid}` | Formats nested JSON |
-| `compile_query(...)` | `POST /v1/sessions/{id}/query/sql` | Simple + full mode, includes explain plan |
-| `execute_query(...)` | `POST /v1/sessions/{id}/query/execute` | Compile + execute, requires QUERY_EXECUTE or FLIGHT_ENABLED |
+| `compile_query(model_id, ...)` | `POST /v1/sessions/{id}/query/sql` | Simple + full mode, includes explain plan |
+| `execute_query(model_id, ...)` | `POST /v1/sessions/{id}/query/execute` | Compile + execute, requires QUERY_EXECUTE or FLIGHT_ENABLED |
 | `list_models()` | `GET /v1/sessions/{id}/models` | Lists models in session |
 | `list_dialects()` | `GET /v1/dialects` | No session needed |
-| `get_model_diagram(...)` | `GET /v1/sessions/{id}/models/{mid}/diagram/er` | Mermaid ER diagram |
+| `get_model_diagram(model_id, ...)` | `GET /v1/sessions/{id}/models/{mid}/diagram/er` | Mermaid ER diagram |
 | `remove_model(model_id)` | `DELETE /v1/sessions/{id}/models/{mid}` | Remove model from session |
 | `get_model_schema(model_id)` | `GET /v1/sessions/{id}/models/{mid}/schema` | Full JSON structure |
 | `list_dimensions(model_id)` | `GET /v1/sessions/{id}/models/{mid}/dimensions` | All dimensions |
@@ -82,6 +85,30 @@ All API endpoints use the `/v1/` prefix (since API v1.0.0).
 | `convert_osi_to_obml(...)` | `POST /v1/convert/osi-to-obml` | No session needed |
 | `convert_obml_to_osi(...)` | `POST /v1/convert/obml-to-osi` | No session needed |
 
+### Single-model mode (shortcut endpoints, no model_id)
+
+When `GET /v1/settings` returns `single_model_mode: true`, the server registers tools
+**without** `model_id` and uses shortcut endpoints that auto-resolve session/model.
+`load_model`, `remove_model`, and `list_models` are **not registered**.
+
+| MCP Tool | Shortcut Endpoint | Notes |
+|----------|------------------|-------|
+| `get_model()` | `GET /v1/settings` → `model_yaml` | Returns original OBML YAML source |
+| `describe_model()` | `GET /v1/schema` | SchemaResponse (columns as ColumnDetail) |
+| `compile_query(...)` | `POST /v1/query/sql` | dialect as query param, query body direct |
+| `execute_query(...)` | `POST /v1/query/execute` | dialect as query param, query body direct |
+| `get_model_diagram(...)` | `GET /v1/diagram/er` | params: show_columns, theme |
+| `get_model_schema()` | `GET /v1/schema` | Full JSON structure |
+| `list_dimensions()` | `GET /v1/dimensions` | All dimensions |
+| `get_dimension(name)` | `GET /v1/dimensions/{name}` | Single dimension |
+| `list_measures()` | `GET /v1/measures` | All measures |
+| `get_measure(name)` | `GET /v1/measures/{name}` | Single measure |
+| `list_metrics()` | `GET /v1/metrics` | All metrics |
+| `get_metric(name)` | `GET /v1/metrics/{name}` | Single metric |
+| `explain_artefact(name)` | `GET /v1/explain/{name}` | Lineage trace |
+| `find_artefacts(query)` | `POST /v1/find` | Name/synonym search |
+| `get_join_graph()` | `GET /v1/join-graph` | Adjacency list |
+
 ## Semantic Features
 
 The API supports three **metric types** and **measure filters**:
@@ -96,8 +123,19 @@ All features are handled by the API — the MCP server passes through OBML YAML 
 
 ## Session Management
 
-Sessions are fully internal — the LLM never sees session IDs:
+**Multi-model mode** — sessions are fully internal (LLM never sees session IDs):
 1. On first API call, `POST /v1/sessions` creates one
 2. Session ID is cached in `_api_session_id`
 3. On 404 (expired), auto-recreates and retries once
 4. Best-effort cleanup on shutdown via `DELETE /v1/sessions/{id}`
+
+**Single-model mode** — no sessions created.  The API has a `__default__` session
+with the pre-loaded model.  Shortcut endpoints auto-resolve.  `validate_model`
+is not registered (model is pre-loaded and immutable).
+
+## Code Structure
+
+- Mode-independent tools: decorated with `@mcp.tool` at module level
+- Mode-dependent tools: defined in `_register_single_model_tools()` / `_register_multi_model_tools()`
+- Shared logic: `_impl_*` functions accept `model_id: str | None`
+- Registration: `main()` calls `_detect_single_model_mode()` then registers the right set

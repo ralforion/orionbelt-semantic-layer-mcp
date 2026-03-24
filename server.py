@@ -3,6 +3,14 @@
 Delegates all business logic to the OrionBelt Semantic Layer REST API via HTTP.
 No embedded engine — pure API pass-through.
 
+Supports two modes:
+
+- **Multi-model mode** (default): LLM loads models via ``load_model``, gets a
+  ``model_id``, and passes it to every tool.
+- **Single-model mode**: API has a pre-loaded model.  Session/model management
+  tools are hidden; discovery and query tools use shortcut endpoints that
+  auto-resolve session and model.
+
 Run via::
 
     uv run python server.py                        # stdio (default)
@@ -61,12 +69,17 @@ _API_V1 = "/v1"
 mcp = FastMCP("OrionBelt Semantic Layer")
 
 # ---------------------------------------------------------------------------
-# Internal session management
+# Internal state
 # ---------------------------------------------------------------------------
 
 _state_lock = threading.RLock()
 _api_session_id: str | None = None
 _http_client: httpx.Client | None = None
+_single_model_mode: bool = False
+
+# ---------------------------------------------------------------------------
+# HTTP client & session management
+# ---------------------------------------------------------------------------
 
 
 def _get_client() -> httpx.Client:
@@ -234,8 +247,34 @@ def _session_request(
     return _api_request(method, path, json_body=json_body, path_suffix=path_suffix)
 
 
+def _shortcut_request(
+    method: str,
+    path: str,
+    *,
+    json_body: dict | None = None,
+    params: dict[str, str] | None = None,
+) -> httpx.Response:
+    """Make an API request to a shortcut endpoint (no session required).
+
+    Used in single-model mode where the API auto-resolves session/model.
+    """
+    client = _get_client()
+    full_path = f"{_API_V1}{path}"
+    try:
+        resp = client.request(method, full_path, json=json_body, params=params)
+    except httpx.ConnectError:
+        raise ToolError(
+            f"Cannot connect to OrionBelt Semantic Layer API at {settings.api_base_url}"
+        ) from None
+    except httpx.TimeoutException:
+        raise ToolError("API request timed out") from None
+    if resp.status_code >= 400:
+        _raise_api_error(resp)
+    return resp
+
+
 # ---------------------------------------------------------------------------
-# Resources
+# Resources & caches
 # ---------------------------------------------------------------------------
 
 _obml_reference_cache: str | None = None
@@ -269,7 +308,7 @@ def obml_reference() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tools
+# Mode-independent tools (always registered)
 # ---------------------------------------------------------------------------
 
 
@@ -282,463 +321,6 @@ def get_obml_reference() -> str:
     dataObjects, dimensions, measures, metrics, joins, and expressions.
     """
     return _fetch_obml_reference()
-
-
-@mcp.tool
-def load_model(model_yaml: str) -> str:
-    """Load an OBML semantic model into a session.
-
-    IMPORTANT: Before composing OBML YAML, call ``get_obml_reference()``
-    first to learn the correct format.
-
-    Parse, validate, and store the model.  Returns a model_id that you must
-    pass to other tools (describe_model, compile_query, etc.).
-
-    The OBML YAML must start with ``version: 1.0`` and uses YAML **mappings**
-    (not lists) for all sections.  Quick structure::
-
-        version: 1.0
-        dataObjects:
-          <Name>:                    # mapping key = data object name
-            code: <TABLE>
-            database: <DB>
-            schema: <SCHEMA>
-            columns:
-              <Column Name>:         # unique within this data object
-                code: <COLUMN>
-                abstractType: string # see OBML reference for all types
-            joins:                   # optional, on fact tables
-              - joinType: many-to-one
-                joinTo: <Target>
-                columnsFrom: [<local column>]
-                columnsTo: [<target column>]
-        dimensions:
-          <Dim Name>:
-            dataObject: <Name>       # must match a dataObjects key
-            column: <Column Name>    # must match a column in that object
-            resultType: string
-        measures:
-          <Measure Name>:
-            columns:
-              - dataObject: <Name>
-                column: <Column Name>
-            resultType: float
-            aggregation: sum         # see OBML reference for all types
-          <Filtered Measure>:        # measure with filters (CASE WHEN)
-            columns:
-              - dataObject: <Name>
-                column: <Column Name>
-            resultType: float
-            aggregation: sum
-            filters:                 # rows not matching are excluded from agg
-              - column: {dataObject: <Name>, column: <Col>}
-                operator: equals
-                values: [{dataType: string, valueString: "value"}]
-        metrics:
-          <Derived Metric>:
-            expression: '{[Measure A]} / {[Measure B]}'
-          <Cumulative Metric>:       # running total / rolling window
-            type: cumulative
-            measure: <Measure Name>
-            timeDimension: <Dim Name>
-            # optional: cumulativeType (sum/avg/min/max/count), window (int),
-            #           grainToDate (year/quarter/month/week)
-          <PoP Metric>:              # period-over-period comparison
-            type: period_over_period
-            expression: '{[Measure Name]}'
-            periodOverPeriod:
-              timeDimension: <Dim Name>
-              grain: month           # spine grain
-              offset: -1
-              offsetGrain: year      # comparison offset unit
-              comparison: percentChange  # ratio/difference/previousValue
-
-    Args:
-        model_yaml: Complete OBML YAML content (version 1.0).
-    """
-    logger.info("load_model called (yaml length=%d)", len(model_yaml))
-    resp = _session_request("POST", "/models", json_body={"model_yaml": model_yaml})
-    data = _parse_json(resp)
-
-    parts = [
-        f"Model loaded successfully.  model_id: {data['model_id']}",
-        f"  data objects: {data['data_objects']}",
-        f"  dimensions:   {data['dimensions']}",
-        f"  measures:     {data['measures']}",
-        f"  metrics:      {data['metrics']}",
-    ]
-    if data.get("warnings"):
-        parts.append(f"  warnings: {'; '.join(data['warnings'])}")
-    return "\n".join(parts)
-
-
-@mcp.tool
-def validate_model(model_yaml: str) -> str:
-    """Validate an OBML model without storing it.
-
-    Returns validation errors and warnings.  Useful for checking a model
-    before loading it.
-
-    Args:
-        model_yaml: Complete OBML YAML content.
-    """
-    logger.info("validate_model called (yaml length=%d)", len(model_yaml))
-    resp = _session_request("POST", "/validate", json_body={"model_yaml": model_yaml})
-    data = _parse_json(resp)
-
-    if data["valid"]:
-        msg = "Model is valid."
-        if data.get("warnings"):
-            msg += "\nWarnings:"
-            for w in data["warnings"]:
-                msg += f"\n  [{w['code']}] {w['message']}"
-        return msg
-
-    lines = ["Model has validation errors:"]
-    for e in data.get("errors", []):
-        line = f"  [{e['code']}] {e['message']}"
-        if e.get("path"):
-            line += f"  (at {e['path']})"
-        lines.append(line)
-    if data.get("warnings"):
-        lines.append("Warnings:")
-        for w in data["warnings"]:
-            lines.append(f"  [{w['code']}] {w['message']}")
-    return "\n".join(lines)
-
-
-def _format_metric_summary(met: dict) -> str:
-    """Format a one-line summary for a metric (derived, cumulative, or PoP)."""
-    met_type = met.get("type", "derived")
-    if met_type == "cumulative":
-        parts = [f"type: cumulative, measure: {met.get('measure', '?')}"]
-        if met.get("time_dimension"):
-            parts.append(f"timeDimension: {met['time_dimension']}")
-        if met.get("cumulative_type") and met["cumulative_type"] != "sum":
-            parts.append(f"cumulativeType: {met['cumulative_type']}")
-        if met.get("window"):
-            parts.append(f"window: {met['window']}")
-        if met.get("grain_to_date"):
-            parts.append(f"grainToDate: {met['grain_to_date']}")
-        return ", ".join(parts)
-    if met_type == "period_over_period":
-        parts = [f"type: period_over_period, expr: {met.get('expression', '?')}"]
-        pop = met.get("period_over_period") or {}
-        if pop.get("time_dimension"):
-            parts.append(f"timeDimension: {pop['time_dimension']}")
-        if pop.get("grain"):
-            parts.append(f"grain: {pop['grain']}")
-        if pop.get("offset_grain"):
-            parts.append(f"offsetGrain: {pop['offset_grain']}")
-        if pop.get("comparison"):
-            parts.append(f"comparison: {pop['comparison']}")
-        return ", ".join(parts)
-    return f"expr: {met.get('expression', '?')}"
-
-
-@mcp.tool
-def describe_model(model_id: str) -> str:
-    """Describe the contents of a loaded model.
-
-    Shows data objects (with columns and joins), dimensions, measures, and
-    metrics.  Use this after ``load_model`` to explore the model.
-
-    Args:
-        model_id: The id returned by ``load_model``.
-    """
-    resp = _session_request("GET", f"/models/{model_id}")
-    desc = _parse_json(resp)
-
-    lines: list[str] = [f"Model {model_id}:", ""]
-
-    # Data objects
-    lines.append("DATA OBJECTS:")
-    for obj in desc.get("data_objects", []):
-        lines.append(f"  {obj['label']}  (code: {obj['code']})")
-        if obj.get("description"):
-            lines.append(f"    description: {obj['description']}")
-        lines.append(f"    columns: {', '.join(obj.get('columns', []))}")
-        if obj.get("join_targets"):
-            lines.append(f"    joins to: {', '.join(obj['join_targets'])}")
-        if obj.get("synonyms"):
-            lines.append(f"    synonyms: {', '.join(obj['synonyms'])}")
-    lines.append("")
-
-    # Dimensions
-    lines.append("DIMENSIONS:")
-    for dim in desc.get("dimensions", []):
-        grain = f"  grain={dim['time_grain']}" if dim.get("time_grain") else ""
-        lines.append(
-            f"  {dim['name']}  ({dim['result_type']}, {dim['data_object']}.{dim['column']}{grain})"
-        )
-        if dim.get("description"):
-            lines.append(f"    description: {dim['description']}")
-        if dim.get("synonyms"):
-            lines.append(f"    synonyms: {', '.join(dim['synonyms'])}")
-    lines.append("")
-
-    # Measures
-    lines.append("MEASURES:")
-    for m in desc.get("measures", []):
-        expr = f"  expr: {m['expression']}" if m.get("expression") else ""
-        lines.append(f"  {m['name']}  ({m['result_type']}, {m['aggregation']}{expr})")
-        if m.get("description"):
-            lines.append(f"    description: {m['description']}")
-        if m.get("synonyms"):
-            lines.append(f"    synonyms: {', '.join(m['synonyms'])}")
-    lines.append("")
-
-    # Metrics
-    metrics = desc.get("metrics", [])
-    if metrics:
-        lines.append("METRICS:")
-        for met in metrics:
-            lines.append(f"  {met['name']}  {_format_metric_summary(met)}")
-            if met.get("description"):
-                lines.append(f"    description: {met['description']}")
-            if met.get("synonyms"):
-                lines.append(f"    synonyms: {', '.join(met['synonyms'])}")
-        lines.append("")
-
-    return "\n".join(lines)
-
-
-@mcp.tool
-def compile_query(
-    model_id: str,
-    dialect: str = "postgres",
-    dimensions: list[str] | None = None,
-    measures: list[str] | None = None,
-    query_json: str | None = None,
-    use_path_names: list[dict[str, str]] | None = None,
-) -> str:
-    """Compile a semantic query to SQL.
-
-    Two modes:
-
-    **Simple mode** — pass ``dimensions`` and ``measures`` lists directly::
-
-        compile_query(model_id="abc12345", dimensions=["Country"], measures=["Revenue"])
-
-    **Full mode** — pass a complete query as JSON via ``query_json``::
-
-        compile_query(
-            model_id="abc12345",
-            query_json='{"select":{"dimensions":["Country"],"measures":["Revenue"]},"where":[{"field":"Country","op":"equals","value":"US"}],"order_by":[{"field":"Revenue","direction":"desc"}],"limit":10}'
-        )
-
-    The full query JSON supports: ``select`` (dimensions + measures), ``where``,
-    ``having``, ``order_by``, ``limit``, ``offset``, ``usePathNames``,
-    ``dimensionsExclude``.
-
-    **Filters** — ``where`` and ``having`` accept leaf filters and filter groups:
-
-    - Leaf filter: ``{"field": "Country", "op": "equals", "value": "US"}``
-    - Filter group (AND/OR/NOT)::
-
-        {"logic": "or", "filters": [
-          {"field": "Country", "op": "equals", "value": "US"},
-          {"field": "Country", "op": "equals", "value": "DE"}
-        ]}
-
-    Groups can be nested and optionally negated:
-    ``{"logic": "and", "negated": true, "filters": [...]}``.
-
-
-    **Filter field syntax** — WHERE filters accept:
-
-    - Dimension name: ``"Country"``
-    - Qualified column: ``"Orders.Order Priority"`` (DataObject.Column — auto-joins if reachable)
-
-    HAVING filters reference a measure name.
-
-    Use ``describe_model`` first to discover available dimension and measure
-    names.  Filter operators: equals, notequals, gt, gte, lt, lte, inlist,
-    notinlist, in, not_in, contains, notcontains, like, notlike, starts_with,
-    ends_with, between, notbetween, set, notset, is_null, is_not_null,
-    relative.
-
-    **dimensionsExclude** — set ``"dimensionsExclude": true`` to return dimension
-    value combinations that do NOT exist in the data (anti-join via EXCEPT).
-    Requires 2+ dimensions on independent branches and no measures.
-
-    For secondary joins, pass ``use_path_names`` (simple mode) or include
-    ``usePathNames`` in query_json (full mode). Each item has ``source``,
-    ``target``, and ``pathName`` keys.
-
-    Args:
-        model_id: The id returned by ``load_model``.
-        dialect: Target SQL dialect (see ``write_query`` prompt for available dialects).
-        dimensions: List of dimension names (simple mode).
-        measures: List of measure names (simple mode).
-        query_json: Full query object as JSON string (full mode).
-        use_path_names: List of {source, target, pathName} dicts for
-            selecting secondary joins (simple mode).
-    """
-    logger.info("compile_query called (model_id=%s, dialect=%s)", model_id, dialect)
-
-    # Build the query object for the API
-    if query_json is not None:
-        try:
-            query = json.loads(query_json)
-        except json.JSONDecodeError as exc:
-            raise ToolError(f"Invalid query JSON: {exc}") from exc
-    elif dimensions is not None or measures is not None:
-        query: dict = {  # type: ignore[no-redef]
-            "select": {
-                "dimensions": dimensions or [],
-                "measures": measures or [],
-            },
-        }
-        if use_path_names:
-            query["usePathNames"] = use_path_names
-    else:
-        raise ToolError(
-            "Provide either dimensions/measures (simple mode) or query_json (full mode)."
-        )
-
-    resp = _session_request(
-        "POST",
-        "/query/sql",
-        json_body={"model_id": model_id, "dialect": dialect, "query": query},
-    )
-    data = _parse_json(resp)
-
-    resolved = data.get("resolved", {})
-    parts = [
-        f"-- Dialect: {data['dialect']}",
-        f"-- Fact tables: {', '.join(resolved.get('fact_tables', []))}",
-        f"-- Dimensions: {', '.join(resolved.get('dimensions', []))}",
-        f"-- Measures: {', '.join(resolved.get('measures', []))}",
-        "",
-        data["sql"],
-    ]
-    if not data.get("sql_valid", True):
-        parts.append("")
-        parts.append("-- WARNING: Generated SQL may not be valid for this dialect")
-    if data.get("explain"):
-        exp = data["explain"]
-        parts.append("")
-        parts.append(f"-- Planner: {exp['planner']} ({exp.get('planner_reason', '')})")
-        parts.append(
-            f"-- Base object: {exp['base_object']} ({exp.get('base_object_reason', '')})"
-        )
-        for j in exp.get("joins", []):
-            parts.append(
-                f"--   Join: {j['from_object']} -> {j['to_object']} ({j.get('reason', '')})"
-            )
-        cfl_legs = exp.get("cfl_legs", [])
-        if cfl_legs:
-            for leg in cfl_legs:
-                measures = ", ".join(leg.get("measures", []))
-                parts.append(
-                    f"--   CFL leg: {leg['measure_source']} "
-                    f"(root: {leg['common_root']}, measures: {measures})"
-                )
-                if leg.get("reason"):
-                    parts.append(f"--     Reason: {leg['reason']}")
-                for jn in leg.get("joins", []):
-                    parts.append(f"--     Join: {jn}")
-        if exp.get("has_totals"):
-            parts.append("-- Totals: yes")
-    if data.get("warnings"):
-        parts.append("")
-        parts.append(f"-- Warnings: {'; '.join(data['warnings'])}")
-    return "\n".join(parts)
-
-
-@mcp.tool
-def execute_query(
-    model_id: str,
-    dialect: str = "postgres",
-    dimensions: list[str] | None = None,
-    measures: list[str] | None = None,
-    query_json: str | None = None,
-    use_path_names: list[dict[str, str]] | None = None,
-) -> str:
-    """Compile and execute a semantic query, returning SQL and result data.
-
-    Requires the API to have ``QUERY_EXECUTE=true`` or ``FLIGHT_ENABLED=true``
-    configured.  Returns the compiled SQL, column metadata, and the actual
-    query results from the database.  Use ``get_settings`` to check
-    availability.
-
-    Two modes (same as ``compile_query``):
-
-    **Simple mode** — pass ``dimensions`` and ``measures`` lists directly::
-
-        execute_query(model_id="abc12345", dimensions=["Country"], measures=["Revenue"])
-
-    **Full mode** — pass a complete query as JSON via ``query_json``::
-
-        execute_query(
-            model_id="abc12345",
-            query_json='{"select":{"dimensions":["Country"],"measures":["Revenue"]},"limit":100}'
-        )
-
-    The full query JSON supports: ``select`` (dimensions + measures), ``where``,
-    ``having``, ``order_by``, ``limit``, ``offset``, ``usePathNames``,
-    ``dimensionsExclude``.  Filters support the same leaf and filter group
-    syntax as ``compile_query`` (see its docstring for details).
-
-    If no ``limit`` is specified, a server-side default row limit is enforced.
-
-    Args:
-        model_id: The id returned by ``load_model``.
-        dialect: Target SQL dialect (see ``write_query`` prompt for available dialects).
-        dimensions: List of dimension names (simple mode).
-        measures: List of measure names (simple mode).
-        query_json: Full query object as JSON string (full mode).
-        use_path_names: List of {source, target, pathName} dicts for
-            selecting secondary joins (simple mode).
-    """
-    logger.info("execute_query called (model_id=%s, dialect=%s)", model_id, dialect)
-
-    # Build the query object (same logic as compile_query)
-    if query_json is not None:
-        try:
-            query = json.loads(query_json)
-        except json.JSONDecodeError as exc:
-            raise ToolError(f"Invalid query JSON: {exc}") from exc
-    elif dimensions is not None or measures is not None:
-        query: dict = {  # type: ignore[no-redef]
-            "select": {
-                "dimensions": dimensions or [],
-                "measures": measures or [],
-            },
-        }
-        if use_path_names:
-            query["usePathNames"] = use_path_names
-    else:
-        raise ToolError(
-            "Provide either dimensions/measures (simple mode) or query_json (full mode)."
-        )
-
-    resp = _session_request(
-        "POST",
-        "/query/execute",
-        json_body={"model_id": model_id, "dialect": dialect, "query": query},
-    )
-    data = _parse_json(resp)
-
-    return json.dumps(data, indent=2)
-
-
-@mcp.tool
-def list_models() -> str:
-    """List all models currently loaded in a session."""
-    resp = _session_request("GET", "/models")
-    models = _parse_json(resp)
-    if not models:
-        return "No models loaded.  Use load_model to load one."
-    lines = ["Loaded models:", ""]
-    for m in models:
-        lines.append(
-            f"  {m['model_id']}  "
-            f"({m['data_objects']} objects, {m['dimensions']} dims, "
-            f"{m['measures']} measures, {m['metrics']} metrics)"
-        )
-    return "\n".join(lines)
 
 
 @mcp.tool
@@ -756,254 +338,6 @@ def list_dialects() -> str:
         if unsupported:
             line += f"  (unsupported aggregations: {', '.join(unsupported)})"
         lines.append(line)
-    return "\n".join(lines)
-
-
-@mcp.tool
-def get_model_diagram(
-    model_id: str,
-    show_columns: bool = True,
-    theme: str = "default",
-) -> str:
-    """Generate a Mermaid ER diagram for a loaded model.
-
-    Returns a Mermaid diagram script that visualises the data objects,
-    columns, and join relationships in the model.
-
-    Args:
-        model_id: The id returned by ``load_model``.
-        show_columns: Whether to include column details in the diagram.
-        theme: Mermaid diagram theme (e.g. "default", "dark", "forest").
-    """
-    params = f"?show_columns={str(show_columns).lower()}&theme={theme}"
-    resp = _session_request("GET", f"/models/{model_id}/diagram/er{params}")
-    data = _parse_json(resp)
-    return data["mermaid"]
-
-
-@mcp.tool
-def remove_model(model_id: str) -> str:
-    """Remove a model from the current session.
-
-    Args:
-        model_id: The id returned by ``load_model``.
-    """
-    _session_request("DELETE", f"/models/{model_id}")
-    return f"Model {model_id} removed."
-
-
-@mcp.tool
-def get_model_schema(model_id: str) -> str:
-    """Get the full model structure as JSON.
-
-    Returns a detailed JSON representation of the model including all data
-    objects (with columns, types, comments, owners), dimensions, measures,
-    metrics, and their synonyms.  More detailed than ``describe_model``.
-
-    Args:
-        model_id: The id returned by ``load_model``.
-    """
-    resp = _session_request("GET", f"/models/{model_id}/schema")
-    return json.dumps(_parse_json(resp), indent=2)
-
-
-@mcp.tool
-def list_dimensions(model_id: str) -> str:
-    """List all dimensions in a model.
-
-    Returns dimension details including data object, column, result type,
-    time grain, and synonyms.
-
-    Args:
-        model_id: The id returned by ``load_model``.
-    """
-    resp = _session_request("GET", f"/models/{model_id}/dimensions")
-    dims = _parse_json(resp)
-    if not dims:
-        return "No dimensions in this model."
-    lines = ["Dimensions:", ""]
-    for d in dims:
-        grain = f"  grain={d['time_grain']}" if d.get("time_grain") else ""
-        lines.append(
-            f"  {d['name']}  ({d['result_type']}, {d['data_object']}.{d['column']}{grain})"
-        )
-        if d.get("description"):
-            lines.append(f"    description: {d['description']}")
-        if d.get("synonyms"):
-            lines.append(f"    synonyms: {', '.join(d['synonyms'])}")
-    return "\n".join(lines)
-
-
-@mcp.tool
-def get_dimension(model_id: str, name: str) -> str:
-    """Get a single dimension by name.
-
-    Args:
-        model_id: The id returned by ``load_model``.
-        name: The dimension name.
-    """
-    resp = _session_request("GET", f"/models/{model_id}/dimensions/{quote(name, safe='')}")
-    return json.dumps(_parse_json(resp), indent=2)
-
-
-@mcp.tool
-def list_measures(model_id: str) -> str:
-    """List all measures in a model.
-
-    Returns measure details including aggregation type, expression, result
-    type, and synonyms.
-
-    Args:
-        model_id: The id returned by ``load_model``.
-    """
-    resp = _session_request("GET", f"/models/{model_id}/measures")
-    measures = _parse_json(resp)
-    if not measures:
-        return "No measures in this model."
-    lines = ["Measures:", ""]
-    for m in measures:
-        expr = f"  expr: {m['expression']}" if m.get("expression") else ""
-        lines.append(f"  {m['name']}  ({m['result_type']}, {m['aggregation']}{expr})")
-        if m.get("description"):
-            lines.append(f"    description: {m['description']}")
-        if m.get("synonyms"):
-            lines.append(f"    synonyms: {', '.join(m['synonyms'])}")
-    return "\n".join(lines)
-
-
-@mcp.tool
-def get_measure(model_id: str, name: str) -> str:
-    """Get a single measure by name.
-
-    Args:
-        model_id: The id returned by ``load_model``.
-        name: The measure name.
-    """
-    resp = _session_request("GET", f"/models/{model_id}/measures/{quote(name, safe='')}")
-    return json.dumps(_parse_json(resp), indent=2)
-
-
-@mcp.tool
-def list_metrics(model_id: str) -> str:
-    """List all metrics in a model.
-
-    Returns metric details including expression, component measures, and
-    synonyms.
-
-    Args:
-        model_id: The id returned by ``load_model``.
-    """
-    resp = _session_request("GET", f"/models/{model_id}/metrics")
-    metrics = _parse_json(resp)
-    if not metrics:
-        return "No metrics in this model."
-    lines = ["Metrics:", ""]
-    for met in metrics:
-        components = ", ".join(met.get("component_measures", []))
-        lines.append(f"  {met['name']}  {_format_metric_summary(met)}")
-        if met.get("description"):
-            lines.append(f"    description: {met['description']}")
-        if components:
-            lines.append(f"    components: {components}")
-        if met.get("synonyms"):
-            lines.append(f"    synonyms: {', '.join(met['synonyms'])}")
-    return "\n".join(lines)
-
-
-@mcp.tool
-def get_metric(model_id: str, name: str) -> str:
-    """Get a single metric by name.
-
-    Args:
-        model_id: The id returned by ``load_model``.
-        name: The metric name.
-    """
-    resp = _session_request("GET", f"/models/{model_id}/metrics/{quote(name, safe='')}")
-    return json.dumps(_parse_json(resp), indent=2)
-
-
-@mcp.tool
-def explain_artefact(model_id: str, name: str) -> str:
-    """Explain the lineage of a dimension, measure, or metric.
-
-    Traces the composition chain from the named artefact down to the
-    underlying data objects and columns.  Useful for understanding how a
-    measure is computed or where a dimension originates.
-
-    Args:
-        model_id: The id returned by ``load_model``.
-        name: The dimension, measure, or metric name to explain.
-    """
-    resp = _session_request("GET", f"/models/{model_id}/explain/{quote(name, safe='')}")
-    data = _parse_json(resp)
-    lines = [f"Explain: {data['name']}  (type: {data['type']})", ""]
-    for item in data.get("lineage", []):
-        detail = f"  — {item['detail']}" if item.get("detail") else ""
-        lines.append(f"  [{item['type']}] {item['name']}{detail}")
-    return "\n".join(lines)
-
-
-@mcp.tool
-def find_artefacts(
-    model_id: str,
-    query: str,
-    types: list[str] | None = None,
-) -> str:
-    """Search across model artefacts by name or synonym.
-
-    Finds dimensions, measures, metrics, and data objects whose name or
-    synonym matches the search query (case-insensitive substring match).
-
-    Args:
-        model_id: The id returned by ``load_model``.
-        query: Search term (matched against names and synonyms).
-        types: Object types to search.  Defaults to all types:
-            dimension, measure, metric, data_object.
-    """
-    body: dict = {"query": query}
-    if types is not None:
-        body["types"] = types
-    resp = _session_request("POST", f"/models/{model_id}/find", json_body=body)
-    data = _parse_json(resp)
-    results = data.get("results", [])
-    if not results:
-        return f"No artefacts found matching '{query}'."
-    lines = [f"Search results for '{query}':", ""]
-    for r in results:
-        lines.append(f"  [{r['type']}] {r['name']}  (matched on {r['match_field']})")
-    return "\n".join(lines)
-
-
-@mcp.tool
-def get_join_graph(model_id: str) -> str:
-    """Return the join graph as an adjacency list.
-
-    Shows the data object nodes and join edges (with cardinality and join
-    columns) in the model.  Useful for understanding table relationships.
-
-    Args:
-        model_id: The id returned by ``load_model``.
-    """
-    resp = _session_request("GET", f"/models/{model_id}/join-graph")
-    data = _parse_json(resp)
-    lines = [f"Nodes: {', '.join(data.get('nodes', []))}", ""]
-    edges = data.get("edges", [])
-    if edges:
-        lines.append("Edges:")
-        for e in edges:
-            cols = (
-                f"  on ({', '.join(e['columns_from'])}) = ({', '.join(e['columns_to'])})"
-                if e.get("columns_from")
-                else ""
-            )
-            secondary = " [secondary]" if e.get("secondary") else ""
-            path = f" path={e['path_name']}" if e.get("path_name") else ""
-            lines.append(
-                f"  {e['from_object']} --[{e['cardinality']}]--> "
-                f"{e['to_object']}{cols}{secondary}{path}"
-            )
-    else:
-        lines.append("No joins defined.")
     return "\n".join(lines)
 
 
@@ -1107,6 +441,1027 @@ def convert_obml_to_osi(
     if validation.get("semantic_warnings"):
         parts.append(f"\nValidation warnings: {'; '.join(validation['semantic_warnings'])}")
     return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Implementation functions (shared logic for both modes)
+# ---------------------------------------------------------------------------
+
+
+def _format_metric_summary(met: dict) -> str:
+    """Format a one-line summary for a metric (derived, cumulative, or PoP)."""
+    met_type = met.get("type", "derived")
+    if met_type == "cumulative":
+        parts = [f"type: cumulative, measure: {met.get('measure', '?')}"]
+        if met.get("time_dimension"):
+            parts.append(f"timeDimension: {met['time_dimension']}")
+        if met.get("cumulative_type") and met["cumulative_type"] != "sum":
+            parts.append(f"cumulativeType: {met['cumulative_type']}")
+        if met.get("window"):
+            parts.append(f"window: {met['window']}")
+        if met.get("grain_to_date"):
+            parts.append(f"grainToDate: {met['grain_to_date']}")
+        return ", ".join(parts)
+    if met_type == "period_over_period":
+        parts = [f"type: period_over_period, expr: {met.get('expression', '?')}"]
+        pop = met.get("period_over_period") or {}
+        if pop.get("time_dimension"):
+            parts.append(f"timeDimension: {pop['time_dimension']}")
+        if pop.get("grain"):
+            parts.append(f"grain: {pop['grain']}")
+        if pop.get("offset_grain"):
+            parts.append(f"offsetGrain: {pop['offset_grain']}")
+        if pop.get("comparison"):
+            parts.append(f"comparison: {pop['comparison']}")
+        return ", ".join(parts)
+    return f"expr: {met.get('expression', '?')}"
+
+
+def _impl_describe_model(model_id: str | None = None) -> str:
+    """Describe the contents of a loaded model (shared implementation)."""
+    if model_id is None:
+        # Single-model shortcut — GET /v1/schema returns SchemaResponse
+        resp = _shortcut_request("GET", "/schema")
+        desc = _parse_json(resp)
+        mid = desc.get("model_id", "default")
+    else:
+        resp = _session_request("GET", f"/models/{model_id}")
+        desc = _parse_json(resp)
+        mid = model_id
+
+    lines: list[str] = [f"Model {mid}:", ""]
+
+    # Data objects
+    lines.append("DATA OBJECTS:")
+    for obj in desc.get("data_objects", []):
+        # SchemaResponse uses 'name'; ModelDescription uses 'label'
+        obj_name = obj.get("label", obj.get("name", "?"))
+        lines.append(f"  {obj_name}  (code: {obj['code']})")
+        if obj.get("description"):
+            lines.append(f"    description: {obj['description']}")
+        # SchemaResponse: columns is list[ColumnDetail dict]; describe: list[str]
+        cols = obj.get("columns", [])
+        col_names = [c["name"] for c in cols] if cols and isinstance(cols[0], dict) else cols
+        lines.append(f"    columns: {', '.join(col_names)}")
+        if obj.get("join_targets"):
+            lines.append(f"    joins to: {', '.join(obj['join_targets'])}")
+        if obj.get("synonyms"):
+            lines.append(f"    synonyms: {', '.join(obj['synonyms'])}")
+    lines.append("")
+
+    # Dimensions
+    lines.append("DIMENSIONS:")
+    for dim in desc.get("dimensions", []):
+        grain = f"  grain={dim['time_grain']}" if dim.get("time_grain") else ""
+        lines.append(
+            f"  {dim['name']}  ({dim['result_type']}, {dim['data_object']}.{dim['column']}{grain})"
+        )
+        if dim.get("description"):
+            lines.append(f"    description: {dim['description']}")
+        if dim.get("synonyms"):
+            lines.append(f"    synonyms: {', '.join(dim['synonyms'])}")
+    lines.append("")
+
+    # Measures
+    lines.append("MEASURES:")
+    for m in desc.get("measures", []):
+        expr = f"  expr: {m['expression']}" if m.get("expression") else ""
+        lines.append(f"  {m['name']}  ({m['result_type']}, {m['aggregation']}{expr})")
+        if m.get("description"):
+            lines.append(f"    description: {m['description']}")
+        if m.get("synonyms"):
+            lines.append(f"    synonyms: {', '.join(m['synonyms'])}")
+    lines.append("")
+
+    # Metrics
+    metrics = desc.get("metrics", [])
+    if metrics:
+        lines.append("METRICS:")
+        for met in metrics:
+            lines.append(f"  {met['name']}  {_format_metric_summary(met)}")
+            if met.get("description"):
+                lines.append(f"    description: {met['description']}")
+            if met.get("synonyms"):
+                lines.append(f"    synonyms: {', '.join(met['synonyms'])}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _build_query_object(
+    dimensions: list[str] | None,
+    measures: list[str] | None,
+    query_json: str | None,
+    use_path_names: list[dict[str, str]] | None,
+) -> dict:
+    """Build a query dict from tool arguments (shared by compile/execute)."""
+    if query_json is not None:
+        try:
+            return json.loads(query_json)
+        except json.JSONDecodeError as exc:
+            raise ToolError(f"Invalid query JSON: {exc}") from exc
+    elif dimensions is not None or measures is not None:
+        query: dict = {
+            "select": {
+                "dimensions": dimensions or [],
+                "measures": measures or [],
+            },
+        }
+        if use_path_names:
+            query["usePathNames"] = use_path_names
+        return query
+    else:
+        raise ToolError(
+            "Provide either dimensions/measures (simple mode) or query_json (full mode)."
+        )
+
+
+def _format_compile_result(data: dict) -> str:
+    """Format compile_query API response into human-readable output."""
+    resolved = data.get("resolved", {})
+    parts = [
+        f"-- Dialect: {data['dialect']}",
+        f"-- Fact tables: {', '.join(resolved.get('fact_tables', []))}",
+        f"-- Dimensions: {', '.join(resolved.get('dimensions', []))}",
+        f"-- Measures: {', '.join(resolved.get('measures', []))}",
+        "",
+        data["sql"],
+    ]
+    if not data.get("sql_valid", True):
+        parts.append("")
+        parts.append("-- WARNING: Generated SQL may not be valid for this dialect")
+    if data.get("explain"):
+        exp = data["explain"]
+        parts.append("")
+        parts.append(f"-- Planner: {exp['planner']} ({exp.get('planner_reason', '')})")
+        parts.append(f"-- Base object: {exp['base_object']} ({exp.get('base_object_reason', '')})")
+        for j in exp.get("joins", []):
+            parts.append(
+                f"--   Join: {j['from_object']} -> {j['to_object']} ({j.get('reason', '')})"
+            )
+        cfl_legs = exp.get("cfl_legs", [])
+        if cfl_legs:
+            for leg in cfl_legs:
+                measures = ", ".join(leg.get("measures", []))
+                parts.append(
+                    f"--   CFL leg: {leg['measure_source']} "
+                    f"(root: {leg['common_root']}, measures: {measures})"
+                )
+                if leg.get("reason"):
+                    parts.append(f"--     Reason: {leg['reason']}")
+                for jn in leg.get("joins", []):
+                    parts.append(f"--     Join: {jn}")
+        if exp.get("has_totals"):
+            parts.append("-- Totals: yes")
+    if data.get("warnings"):
+        parts.append("")
+        parts.append(f"-- Warnings: {'; '.join(data['warnings'])}")
+    return "\n".join(parts)
+
+
+def _impl_compile_query(
+    model_id: str | None,
+    dialect: str,
+    dimensions: list[str] | None,
+    measures: list[str] | None,
+    query_json: str | None,
+    use_path_names: list[dict[str, str]] | None,
+) -> str:
+    """Compile a semantic query (shared implementation)."""
+    logger.info("compile_query called (model_id=%s, dialect=%s)", model_id, dialect)
+    query = _build_query_object(dimensions, measures, query_json, use_path_names)
+
+    if model_id is None:
+        # Single-model shortcut — query body goes directly, dialect as param
+        resp = _shortcut_request("POST", "/query/sql", json_body=query, params={"dialect": dialect})
+    else:
+        resp = _session_request(
+            "POST",
+            "/query/sql",
+            json_body={"model_id": model_id, "dialect": dialect, "query": query},
+        )
+
+    return _format_compile_result(_parse_json(resp))
+
+
+def _impl_execute_query(
+    model_id: str | None,
+    dialect: str,
+    dimensions: list[str] | None,
+    measures: list[str] | None,
+    query_json: str | None,
+    use_path_names: list[dict[str, str]] | None,
+) -> str:
+    """Compile and execute a semantic query (shared implementation)."""
+    logger.info("execute_query called (model_id=%s, dialect=%s)", model_id, dialect)
+    query = _build_query_object(dimensions, measures, query_json, use_path_names)
+
+    if model_id is None:
+        # Single-model shortcut — query body goes directly, dialect as param
+        resp = _shortcut_request(
+            "POST", "/query/execute", json_body=query, params={"dialect": dialect}
+        )
+    else:
+        resp = _session_request(
+            "POST",
+            "/query/execute",
+            json_body={"model_id": model_id, "dialect": dialect, "query": query},
+        )
+
+    return json.dumps(_parse_json(resp), indent=2)
+
+
+def _impl_get_model_diagram(model_id: str | None, show_columns: bool, theme: str) -> str:
+    """Generate a Mermaid ER diagram (shared implementation)."""
+    if model_id is None:
+        resp = _shortcut_request(
+            "GET",
+            "/diagram/er",
+            params={"show_columns": str(show_columns).lower(), "theme": theme},
+        )
+    else:
+        params = f"?show_columns={str(show_columns).lower()}&theme={theme}"
+        resp = _session_request("GET", f"/models/{model_id}/diagram/er{params}")
+    return _parse_json(resp)["mermaid"]
+
+
+def _impl_get_model_schema(model_id: str | None) -> str:
+    """Get the full model structure as JSON (shared implementation)."""
+    if model_id is None:
+        resp = _shortcut_request("GET", "/schema")
+    else:
+        resp = _session_request("GET", f"/models/{model_id}/schema")
+    return json.dumps(_parse_json(resp), indent=2)
+
+
+def _impl_list_dimensions(model_id: str | None) -> str:
+    """List all dimensions (shared implementation)."""
+    if model_id is None:
+        resp = _shortcut_request("GET", "/dimensions")
+    else:
+        resp = _session_request("GET", f"/models/{model_id}/dimensions")
+    dims = _parse_json(resp)
+    if not dims:
+        return "No dimensions in this model."
+    lines = ["Dimensions:", ""]
+    for d in dims:
+        grain = f"  grain={d['time_grain']}" if d.get("time_grain") else ""
+        lines.append(
+            f"  {d['name']}  ({d['result_type']}, {d['data_object']}.{d['column']}{grain})"
+        )
+        if d.get("description"):
+            lines.append(f"    description: {d['description']}")
+        if d.get("synonyms"):
+            lines.append(f"    synonyms: {', '.join(d['synonyms'])}")
+    return "\n".join(lines)
+
+
+def _impl_get_dimension(model_id: str | None, name: str) -> str:
+    """Get a single dimension by name (shared implementation)."""
+    encoded = quote(name, safe="")
+    if model_id is None:
+        resp = _shortcut_request("GET", f"/dimensions/{encoded}")
+    else:
+        resp = _session_request("GET", f"/models/{model_id}/dimensions/{encoded}")
+    return json.dumps(_parse_json(resp), indent=2)
+
+
+def _impl_list_measures(model_id: str | None) -> str:
+    """List all measures (shared implementation)."""
+    if model_id is None:
+        resp = _shortcut_request("GET", "/measures")
+    else:
+        resp = _session_request("GET", f"/models/{model_id}/measures")
+    measures = _parse_json(resp)
+    if not measures:
+        return "No measures in this model."
+    lines = ["Measures:", ""]
+    for m in measures:
+        expr = f"  expr: {m['expression']}" if m.get("expression") else ""
+        lines.append(f"  {m['name']}  ({m['result_type']}, {m['aggregation']}{expr})")
+        if m.get("description"):
+            lines.append(f"    description: {m['description']}")
+        if m.get("synonyms"):
+            lines.append(f"    synonyms: {', '.join(m['synonyms'])}")
+    return "\n".join(lines)
+
+
+def _impl_get_measure(model_id: str | None, name: str) -> str:
+    """Get a single measure by name (shared implementation)."""
+    encoded = quote(name, safe="")
+    if model_id is None:
+        resp = _shortcut_request("GET", f"/measures/{encoded}")
+    else:
+        resp = _session_request("GET", f"/models/{model_id}/measures/{encoded}")
+    return json.dumps(_parse_json(resp), indent=2)
+
+
+def _impl_list_metrics(model_id: str | None) -> str:
+    """List all metrics (shared implementation)."""
+    if model_id is None:
+        resp = _shortcut_request("GET", "/metrics")
+    else:
+        resp = _session_request("GET", f"/models/{model_id}/metrics")
+    metrics = _parse_json(resp)
+    if not metrics:
+        return "No metrics in this model."
+    lines = ["Metrics:", ""]
+    for met in metrics:
+        components = ", ".join(met.get("component_measures", []))
+        lines.append(f"  {met['name']}  {_format_metric_summary(met)}")
+        if met.get("description"):
+            lines.append(f"    description: {met['description']}")
+        if components:
+            lines.append(f"    components: {components}")
+        if met.get("synonyms"):
+            lines.append(f"    synonyms: {', '.join(met['synonyms'])}")
+    return "\n".join(lines)
+
+
+def _impl_get_metric(model_id: str | None, name: str) -> str:
+    """Get a single metric by name (shared implementation)."""
+    encoded = quote(name, safe="")
+    if model_id is None:
+        resp = _shortcut_request("GET", f"/metrics/{encoded}")
+    else:
+        resp = _session_request("GET", f"/models/{model_id}/metrics/{encoded}")
+    return json.dumps(_parse_json(resp), indent=2)
+
+
+def _impl_explain_artefact(model_id: str | None, name: str) -> str:
+    """Explain the lineage of a dimension, measure, or metric (shared impl)."""
+    encoded = quote(name, safe="")
+    if model_id is None:
+        resp = _shortcut_request("GET", f"/explain/{encoded}")
+    else:
+        resp = _session_request("GET", f"/models/{model_id}/explain/{encoded}")
+    data = _parse_json(resp)
+    lines = [f"Explain: {data['name']}  (type: {data['type']})", ""]
+    for item in data.get("lineage", []):
+        detail = f"  — {item['detail']}" if item.get("detail") else ""
+        lines.append(f"  [{item['type']}] {item['name']}{detail}")
+    return "\n".join(lines)
+
+
+def _impl_find_artefacts(model_id: str | None, query: str, types: list[str] | None) -> str:
+    """Search across model artefacts (shared implementation)."""
+    body: dict = {"query": query}
+    if types is not None:
+        body["types"] = types
+    if model_id is None:
+        resp = _shortcut_request("POST", "/find", json_body=body)
+    else:
+        resp = _session_request("POST", f"/models/{model_id}/find", json_body=body)
+    data = _parse_json(resp)
+    results = data.get("results", [])
+    if not results:
+        return f"No artefacts found matching '{query}'."
+    lines = [f"Search results for '{query}':", ""]
+    for r in results:
+        lines.append(f"  [{r['type']}] {r['name']}  (matched on {r['match_field']})")
+    return "\n".join(lines)
+
+
+def _impl_get_join_graph(model_id: str | None) -> str:
+    """Return the join graph as an adjacency list (shared implementation)."""
+    if model_id is None:
+        resp = _shortcut_request("GET", "/join-graph")
+    else:
+        resp = _session_request("GET", f"/models/{model_id}/join-graph")
+    data = _parse_json(resp)
+    lines = [f"Nodes: {', '.join(data.get('nodes', []))}", ""]
+    edges = data.get("edges", [])
+    if edges:
+        lines.append("Edges:")
+        for e in edges:
+            cols = (
+                f"  on ({', '.join(e['columns_from'])}) = ({', '.join(e['columns_to'])})"
+                if e.get("columns_from")
+                else ""
+            )
+            secondary = " [secondary]" if e.get("secondary") else ""
+            path = f" path={e['path_name']}" if e.get("path_name") else ""
+            lines.append(
+                f"  {e['from_object']} --[{e['cardinality']}]--> "
+                f"{e['to_object']}{cols}{secondary}{path}"
+            )
+    else:
+        lines.append("No joins defined.")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Tool registration (mode-dependent)
+# ---------------------------------------------------------------------------
+
+
+def _register_single_model_tools() -> None:
+    """Register tools for single-model mode (no model_id, shortcut endpoints)."""
+
+    @mcp.tool
+    def get_model() -> str:
+        """Get the pre-loaded OBML YAML model source.
+
+        Returns the original OBML YAML that was loaded into the API at startup.
+        Useful for understanding the model definition in the author's terms.
+        """
+        resp = _api_request("GET", f"{_API_V1}/settings", retry_on_expired=False)
+        data = _parse_json(resp)
+        yaml_content = data.get("model_yaml")
+        if not yaml_content:
+            raise ToolError("No model YAML available from the API")
+        return yaml_content
+
+    @mcp.tool
+    def describe_model() -> str:
+        """Describe the pre-loaded model.
+
+        Shows data objects (with columns and joins), dimensions, measures,
+        and metrics.
+        """
+        return _impl_describe_model()
+
+    @mcp.tool
+    def compile_query(
+        dialect: str = "postgres",
+        dimensions: list[str] | None = None,
+        measures: list[str] | None = None,
+        query_json: str | None = None,
+        use_path_names: list[dict[str, str]] | None = None,
+    ) -> str:
+        """Compile a semantic query to SQL.
+
+        Two modes:
+
+        **Simple mode** — pass ``dimensions`` and ``measures`` lists directly::
+
+            compile_query(dimensions=["Country"], measures=["Revenue"])
+
+        **Full mode** — pass a complete query as JSON via ``query_json``::
+
+            compile_query(
+                query_json='{"select":{"dimensions":["Country"],"measures":["Revenue"]}}'
+            )
+
+        The full query JSON supports: ``select``, ``where``, ``having``,
+        ``order_by``, ``limit``, ``offset``, ``usePathNames``,
+        ``dimensionsExclude``.  Use ``describe_model`` first to discover
+        available names.
+
+        Args:
+            dialect: Target SQL dialect.
+            dimensions: List of dimension names (simple mode).
+            measures: List of measure names (simple mode).
+            query_json: Full query object as JSON string (full mode).
+            use_path_names: List of {source, target, pathName} dicts for
+                selecting secondary joins (simple mode).
+        """
+        return _impl_compile_query(None, dialect, dimensions, measures, query_json, use_path_names)
+
+    @mcp.tool
+    def execute_query(
+        dialect: str = "postgres",
+        dimensions: list[str] | None = None,
+        measures: list[str] | None = None,
+        query_json: str | None = None,
+        use_path_names: list[dict[str, str]] | None = None,
+    ) -> str:
+        """Compile and execute a semantic query, returning SQL and result data.
+
+        Requires ``QUERY_EXECUTE=true`` or ``FLIGHT_ENABLED=true``.
+        Use ``get_settings`` to check availability.
+
+        Two modes (same as ``compile_query``):
+
+        **Simple mode**::
+
+            execute_query(dimensions=["Country"], measures=["Revenue"])
+
+        **Full mode**::
+
+            execute_query(
+                query_json='{"select":{"dimensions":["Country"],"measures":["Revenue"]},"limit":100}'
+            )
+
+        If no ``limit`` is specified, a server-side default row limit is enforced.
+
+        Args:
+            dialect: Target SQL dialect.
+            dimensions: List of dimension names (simple mode).
+            measures: List of measure names (simple mode).
+            query_json: Full query object as JSON string (full mode).
+            use_path_names: List of {source, target, pathName} dicts for
+                selecting secondary joins (simple mode).
+        """
+        return _impl_execute_query(None, dialect, dimensions, measures, query_json, use_path_names)
+
+    @mcp.tool
+    def get_model_diagram(
+        show_columns: bool = True,
+        theme: str = "default",
+    ) -> str:
+        """Generate a Mermaid ER diagram for the pre-loaded model.
+
+        Returns a Mermaid diagram script that visualises the data objects,
+        columns, and join relationships in the model.
+
+        Args:
+            show_columns: Whether to include column details in the diagram.
+            theme: Mermaid diagram theme (e.g. "default", "dark", "forest").
+        """
+        return _impl_get_model_diagram(None, show_columns, theme)
+
+    @mcp.tool
+    def get_model_schema() -> str:
+        """Get the full model structure as JSON.
+
+        Returns a detailed JSON representation of the model including all data
+        objects (with columns, types, comments, owners), dimensions, measures,
+        metrics, and their synonyms.  More detailed than ``describe_model``.
+        """
+        return _impl_get_model_schema(None)
+
+    @mcp.tool
+    def list_dimensions() -> str:
+        """List all dimensions in the model.
+
+        Returns dimension details including data object, column, result type,
+        time grain, and synonyms.
+        """
+        return _impl_list_dimensions(None)
+
+    @mcp.tool
+    def get_dimension(name: str) -> str:
+        """Get a single dimension by name.
+
+        Args:
+            name: The dimension name.
+        """
+        return _impl_get_dimension(None, name)
+
+    @mcp.tool
+    def list_measures() -> str:
+        """List all measures in the model.
+
+        Returns measure details including aggregation type, expression, result
+        type, and synonyms.
+        """
+        return _impl_list_measures(None)
+
+    @mcp.tool
+    def get_measure(name: str) -> str:
+        """Get a single measure by name.
+
+        Args:
+            name: The measure name.
+        """
+        return _impl_get_measure(None, name)
+
+    @mcp.tool
+    def list_metrics() -> str:
+        """List all metrics in the model.
+
+        Returns metric details including expression, component measures, and
+        synonyms.
+        """
+        return _impl_list_metrics(None)
+
+    @mcp.tool
+    def get_metric(name: str) -> str:
+        """Get a single metric by name.
+
+        Args:
+            name: The metric name.
+        """
+        return _impl_get_metric(None, name)
+
+    @mcp.tool
+    def explain_artefact(name: str) -> str:
+        """Explain the lineage of a dimension, measure, or metric.
+
+        Traces the composition chain from the named artefact down to the
+        underlying data objects and columns.  Useful for understanding how a
+        measure is computed or where a dimension originates.
+
+        Args:
+            name: The dimension, measure, or metric name to explain.
+        """
+        return _impl_explain_artefact(None, name)
+
+    @mcp.tool
+    def find_artefacts(
+        query: str,
+        types: list[str] | None = None,
+    ) -> str:
+        """Search across model artefacts by name or synonym.
+
+        Finds dimensions, measures, metrics, and data objects whose name or
+        synonym matches the search query (case-insensitive substring match).
+
+        Args:
+            query: Search term (matched against names and synonyms).
+            types: Object types to search.  Defaults to all types:
+                dimension, measure, metric, data_object.
+        """
+        return _impl_find_artefacts(None, query, types)
+
+    @mcp.tool
+    def get_join_graph() -> str:
+        """Return the join graph as an adjacency list.
+
+        Shows the data object nodes and join edges (with cardinality and join
+        columns) in the model.  Useful for understanding table relationships.
+        """
+        return _impl_get_join_graph(None)
+
+
+def _register_multi_model_tools() -> None:
+    """Register tools for multi-model mode (requires model_id, session-scoped)."""
+
+    @mcp.tool
+    def load_model(model_yaml: str) -> str:
+        """Load an OBML semantic model into a session.
+
+        IMPORTANT: Before composing OBML YAML, call ``get_obml_reference()``
+        first to learn the correct format.
+
+        Parse, validate, and store the model.  Returns a model_id that you must
+        pass to other tools (describe_model, compile_query, etc.).
+
+        The OBML YAML must start with ``version: 1.0`` and uses YAML **mappings**
+        (not lists) for all sections.  Quick structure::
+
+            version: 1.0
+            dataObjects:
+              <Name>:                    # mapping key = data object name
+                code: <TABLE>
+                database: <DB>
+                schema: <SCHEMA>
+                columns:
+                  <Column Name>:         # unique within this data object
+                    code: <COLUMN>
+                    abstractType: string # see OBML reference for all types
+                joins:                   # optional, on fact tables
+                  - joinType: many-to-one
+                    joinTo: <Target>
+                    columnsFrom: [<local column>]
+                    columnsTo: [<target column>]
+            dimensions:
+              <Dim Name>:
+                dataObject: <Name>       # must match a dataObjects key
+                column: <Column Name>    # must match a column in that object
+                resultType: string
+            measures:
+              <Measure Name>:
+                columns:
+                  - dataObject: <Name>
+                    column: <Column Name>
+                resultType: float
+                aggregation: sum         # see OBML reference for all types
+              <Filtered Measure>:        # measure with filters (CASE WHEN)
+                columns:
+                  - dataObject: <Name>
+                    column: <Column Name>
+                resultType: float
+                aggregation: sum
+                filters:                 # rows not matching are excluded from agg
+                  - column: {dataObject: <Name>, column: <Col>}
+                    operator: equals
+                    values: [{dataType: string, valueString: "value"}]
+            metrics:
+              <Derived Metric>:
+                expression: '{[Measure A]} / {[Measure B]}'
+              <Cumulative Metric>:       # running total / rolling window
+                type: cumulative
+                measure: <Measure Name>
+                timeDimension: <Dim Name>
+                # optional: cumulativeType (sum/avg/min/max/count), window (int),
+                #           grainToDate (year/quarter/month/week)
+              <PoP Metric>:              # period-over-period comparison
+                type: period_over_period
+                expression: '{[Measure Name]}'
+                periodOverPeriod:
+                  timeDimension: <Dim Name>
+                  grain: month           # spine grain
+                  offset: -1
+                  offsetGrain: year      # comparison offset unit
+                  comparison: percentChange  # ratio/difference/previousValue
+
+        Args:
+            model_yaml: Complete OBML YAML content (version 1.0).
+        """
+        logger.info("load_model called (yaml length=%d)", len(model_yaml))
+        resp = _session_request("POST", "/models", json_body={"model_yaml": model_yaml})
+        data = _parse_json(resp)
+
+        parts = [
+            f"Model loaded successfully.  model_id: {data['model_id']}",
+            f"  data objects: {data['data_objects']}",
+            f"  dimensions:   {data['dimensions']}",
+            f"  measures:     {data['measures']}",
+            f"  metrics:      {data['metrics']}",
+        ]
+        if data.get("warnings"):
+            parts.append(f"  warnings: {'; '.join(data['warnings'])}")
+        return "\n".join(parts)
+
+    @mcp.tool
+    def validate_model(model_yaml: str) -> str:
+        """Validate an OBML model without storing it.
+
+        Returns validation errors and warnings.  Useful for checking a model
+        before loading it.
+
+        Args:
+            model_yaml: Complete OBML YAML content.
+        """
+        logger.info("validate_model called (yaml length=%d)", len(model_yaml))
+        resp = _session_request("POST", "/validate", json_body={"model_yaml": model_yaml})
+        data = _parse_json(resp)
+
+        if data["valid"]:
+            msg = "Model is valid."
+            if data.get("warnings"):
+                msg += "\nWarnings:"
+                for w in data["warnings"]:
+                    msg += f"\n  [{w['code']}] {w['message']}"
+            return msg
+
+        lines = ["Model has validation errors:"]
+        for e in data.get("errors", []):
+            line = f"  [{e['code']}] {e['message']}"
+            if e.get("path"):
+                line += f"  (at {e['path']})"
+            lines.append(line)
+        if data.get("warnings"):
+            lines.append("Warnings:")
+            for w in data["warnings"]:
+                lines.append(f"  [{w['code']}] {w['message']}")
+        return "\n".join(lines)
+
+    @mcp.tool
+    def describe_model(model_id: str) -> str:
+        """Describe the contents of a loaded model.
+
+        Shows data objects (with columns and joins), dimensions, measures, and
+        metrics.  Use this after ``load_model`` to explore the model.
+
+        Args:
+            model_id: The id returned by ``load_model``.
+        """
+        return _impl_describe_model(model_id)
+
+    @mcp.tool
+    def compile_query(
+        model_id: str,
+        dialect: str = "postgres",
+        dimensions: list[str] | None = None,
+        measures: list[str] | None = None,
+        query_json: str | None = None,
+        use_path_names: list[dict[str, str]] | None = None,
+    ) -> str:
+        """Compile a semantic query to SQL.
+
+        Two modes:
+
+        **Simple mode** — pass ``dimensions`` and ``measures`` lists directly::
+
+            compile_query(model_id="abc12345", dimensions=["Country"], measures=["Revenue"])
+
+        **Full mode** — pass a complete query as JSON via ``query_json``::
+
+            compile_query(
+                model_id="abc12345",
+                query_json='{"select":{"dimensions":["Country"],"measures":["Revenue"]}}'
+            )
+
+        The full query JSON supports: ``select``, ``where``, ``having``,
+        ``order_by``, ``limit``, ``offset``, ``usePathNames``,
+        ``dimensionsExclude``.  Use ``describe_model`` first to discover
+        available names.
+
+        Args:
+            model_id: The id returned by ``load_model``.
+            dialect: Target SQL dialect.
+            dimensions: List of dimension names (simple mode).
+            measures: List of measure names (simple mode).
+            query_json: Full query object as JSON string (full mode).
+            use_path_names: List of {source, target, pathName} dicts for
+                selecting secondary joins (simple mode).
+        """
+        return _impl_compile_query(
+            model_id, dialect, dimensions, measures, query_json, use_path_names
+        )
+
+    @mcp.tool
+    def execute_query(
+        model_id: str,
+        dialect: str = "postgres",
+        dimensions: list[str] | None = None,
+        measures: list[str] | None = None,
+        query_json: str | None = None,
+        use_path_names: list[dict[str, str]] | None = None,
+    ) -> str:
+        """Compile and execute a semantic query, returning SQL and result data.
+
+        Requires ``QUERY_EXECUTE=true`` or ``FLIGHT_ENABLED=true``.
+        Use ``get_settings`` to check availability.
+
+        Two modes (same as ``compile_query``):
+
+        **Simple mode**::
+
+            execute_query(model_id="abc12345", dimensions=["Country"], measures=["Revenue"])
+
+        **Full mode**::
+
+            execute_query(
+                model_id="abc12345",
+                query_json='{"select":{"dimensions":["Country"],"measures":["Revenue"]},"limit":100}'
+            )
+
+        If no ``limit`` is specified, a server-side default row limit is enforced.
+
+        Args:
+            model_id: The id returned by ``load_model``.
+            dialect: Target SQL dialect.
+            dimensions: List of dimension names (simple mode).
+            measures: List of measure names (simple mode).
+            query_json: Full query object as JSON string (full mode).
+            use_path_names: List of {source, target, pathName} dicts for
+                selecting secondary joins (simple mode).
+        """
+        return _impl_execute_query(
+            model_id, dialect, dimensions, measures, query_json, use_path_names
+        )
+
+    @mcp.tool
+    def list_models() -> str:
+        """List all models currently loaded in a session."""
+        resp = _session_request("GET", "/models")
+        models = _parse_json(resp)
+        if not models:
+            return "No models loaded.  Use load_model to load one."
+        lines = ["Loaded models:", ""]
+        for m in models:
+            lines.append(
+                f"  {m['model_id']}  "
+                f"({m['data_objects']} objects, {m['dimensions']} dims, "
+                f"{m['measures']} measures, {m['metrics']} metrics)"
+            )
+        return "\n".join(lines)
+
+    @mcp.tool
+    def get_model_diagram(
+        model_id: str,
+        show_columns: bool = True,
+        theme: str = "default",
+    ) -> str:
+        """Generate a Mermaid ER diagram for a loaded model.
+
+        Returns a Mermaid diagram script that visualises the data objects,
+        columns, and join relationships in the model.
+
+        Args:
+            model_id: The id returned by ``load_model``.
+            show_columns: Whether to include column details in the diagram.
+            theme: Mermaid diagram theme (e.g. "default", "dark", "forest").
+        """
+        return _impl_get_model_diagram(model_id, show_columns, theme)
+
+    @mcp.tool
+    def remove_model(model_id: str) -> str:
+        """Remove a model from the current session.
+
+        Args:
+            model_id: The id returned by ``load_model``.
+        """
+        _session_request("DELETE", f"/models/{model_id}")
+        return f"Model {model_id} removed."
+
+    @mcp.tool
+    def get_model_schema(model_id: str) -> str:
+        """Get the full model structure as JSON.
+
+        Returns a detailed JSON representation of the model including all data
+        objects (with columns, types, comments, owners), dimensions, measures,
+        metrics, and their synonyms.  More detailed than ``describe_model``.
+
+        Args:
+            model_id: The id returned by ``load_model``.
+        """
+        return _impl_get_model_schema(model_id)
+
+    @mcp.tool
+    def list_dimensions(model_id: str) -> str:
+        """List all dimensions in a model.
+
+        Returns dimension details including data object, column, result type,
+        time grain, and synonyms.
+
+        Args:
+            model_id: The id returned by ``load_model``.
+        """
+        return _impl_list_dimensions(model_id)
+
+    @mcp.tool
+    def get_dimension(model_id: str, name: str) -> str:
+        """Get a single dimension by name.
+
+        Args:
+            model_id: The id returned by ``load_model``.
+            name: The dimension name.
+        """
+        return _impl_get_dimension(model_id, name)
+
+    @mcp.tool
+    def list_measures(model_id: str) -> str:
+        """List all measures in a model.
+
+        Returns measure details including aggregation type, expression, result
+        type, and synonyms.
+
+        Args:
+            model_id: The id returned by ``load_model``.
+        """
+        return _impl_list_measures(model_id)
+
+    @mcp.tool
+    def get_measure(model_id: str, name: str) -> str:
+        """Get a single measure by name.
+
+        Args:
+            model_id: The id returned by ``load_model``.
+            name: The measure name.
+        """
+        return _impl_get_measure(model_id, name)
+
+    @mcp.tool
+    def list_metrics(model_id: str) -> str:
+        """List all metrics in a model.
+
+        Returns metric details including expression, component measures, and
+        synonyms.
+
+        Args:
+            model_id: The id returned by ``load_model``.
+        """
+        return _impl_list_metrics(model_id)
+
+    @mcp.tool
+    def get_metric(model_id: str, name: str) -> str:
+        """Get a single metric by name.
+
+        Args:
+            model_id: The id returned by ``load_model``.
+            name: The metric name.
+        """
+        return _impl_get_metric(model_id, name)
+
+    @mcp.tool
+    def explain_artefact(model_id: str, name: str) -> str:
+        """Explain the lineage of a dimension, measure, or metric.
+
+        Traces the composition chain from the named artefact down to the
+        underlying data objects and columns.  Useful for understanding how a
+        measure is computed or where a dimension originates.
+
+        Args:
+            model_id: The id returned by ``load_model``.
+            name: The dimension, measure, or metric name to explain.
+        """
+        return _impl_explain_artefact(model_id, name)
+
+    @mcp.tool
+    def find_artefacts(
+        model_id: str,
+        query: str,
+        types: list[str] | None = None,
+    ) -> str:
+        """Search across model artefacts by name or synonym.
+
+        Finds dimensions, measures, metrics, and data objects whose name or
+        synonym matches the search query (case-insensitive substring match).
+
+        Args:
+            model_id: The id returned by ``load_model``.
+            query: Search term (matched against names and synonyms).
+            types: Object types to search.  Defaults to all types:
+                dimension, measure, metric, data_object.
+        """
+        return _impl_find_artefacts(model_id, query, types)
+
+    @mcp.tool
+    def get_join_graph(model_id: str) -> str:
+        """Return the join graph as an adjacency list.
+
+        Shows the data object nodes and join edges (with cardinality and join
+        columns) in the model.  Useful for understanding table relationships.
+
+        Args:
+            model_id: The id returned by ``load_model``.
+        """
+        return _impl_get_join_graph(model_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1339,21 +1694,28 @@ from the query's join graph.
 4. Once valid, use `load_model(model_yaml)` to load it.
 """
 
+
 @mcp.prompt
 def write_obml_model() -> str:
     """OBML syntax reference — how to write a semantic model in YAML."""
     return _fetch_obml_reference()
+
+
 @mcp.prompt
 def write_query() -> str:
     """How to use the compile_query tool — simple and full modes."""
     dialect_list = ", ".join(f"`{d}`" for d in _fetch_dialect_names())
     return _WRITE_QUERY_TEXT.replace("{dialects}", dialect_list)
-mcp.add_prompt(StaticPrompt(
-    name="debug_validation",
-    description="All OBML validation error codes with causes and fixes.",
-    text=_DEBUG_VALIDATION_TEXT,
-    meta={"text": _DEBUG_VALIDATION_TEXT},
-))
+
+
+mcp.add_prompt(
+    StaticPrompt(
+        name="debug_validation",
+        description="All OBML validation error codes with causes and fixes.",
+        text=_DEBUG_VALIDATION_TEXT,
+        meta={"text": _DEBUG_VALIDATION_TEXT},
+    )
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1379,8 +1741,23 @@ def _check_api_health() -> None:
         raise SystemExit(1) from None
 
 
+def _detect_single_model_mode() -> bool:
+    """Query the API to detect whether single-model mode is active."""
+    client = _get_client()
+    try:
+        resp = client.get(f"{_API_V1}/settings")
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("single_model_mode", False)
+    except Exception:
+        logger.warning("Could not detect single-model mode — defaulting to multi-model")
+        return False
+
+
 def main() -> None:
     """Run the MCP server using settings from environment / .env file."""
+    global _single_model_mode
+
     logging.basicConfig(level=settings.log_level.upper())
     logger.info(
         "OrionBelt MCP Server (thin client) starting (transport=%s, api=%s)",
@@ -1389,6 +1766,15 @@ def main() -> None:
     )
 
     _check_api_health()
+
+    # Detect mode and register appropriate tools
+    _single_model_mode = _detect_single_model_mode()
+    if _single_model_mode:
+        logger.info("Single-model mode detected — using shortcut endpoints")
+        _register_single_model_tools()
+    else:
+        logger.info("Multi-model mode — using session-scoped endpoints")
+        _register_multi_model_tools()
 
     try:
         if settings.mcp_transport == "stdio":
