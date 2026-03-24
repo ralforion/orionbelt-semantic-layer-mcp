@@ -7,7 +7,7 @@
 
 <p align="center"><strong>Thin MCP server that delegates to the OrionBelt Semantic Layer REST API</strong></p>
 
-[![Version 1.1.0](https://img.shields.io/badge/version-1.1.0-purple.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/releases)
+[![Version 1.2.0](https://img.shields.io/badge/version-1.2.0-purple.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/releases)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/blob/main/LICENSE)
 [![FastMCP](https://img.shields.io/badge/FastMCP-3.1+-8A2BE2)](https://gofastmcp.com)
@@ -43,8 +43,9 @@ The OrionBelt Semantic Layer platform has two deployment modes. This MCP server 
 ```
 
 - **No business logic** — all tool calls delegate to the REST API (v1 endpoints)
-- **Auto-session management** — creates an API session on first tool call, caches the ID
-- **23 tools** for model loading, validation, querying, execution, discovery, diagrams, and format conversion
+- **Dual-mode** — auto-detects single-model or multi-model API mode at startup
+- **Auto-session management** — creates an API session on first tool call, caches the ID (multi-model mode)
+- **20 tools** (single-model mode) or **23 tools** (multi-model mode) for querying, execution, discovery, diagrams, and format conversion
 - **3 prompts + 1 resource** for OBML reference and usage guidance
 
 <p align="center">
