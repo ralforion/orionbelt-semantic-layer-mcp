@@ -91,7 +91,7 @@ def _get_client() -> httpx.Client:
                 _http_client = httpx.Client(
                     base_url=settings.api_base_url,
                     timeout=settings.api_timeout,
-                    headers={"User-Agent": "OrionBelt-MCP/1.0"},
+                    headers={"User-Agent": "OrionBelt-MCP/1.2"},
                 )
     return _http_client
 
