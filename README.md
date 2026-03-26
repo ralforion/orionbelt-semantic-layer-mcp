@@ -174,6 +174,20 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 4. **Query** — call `compile_query(model_id, dimensions=[...], measures=[...])` to generate SQL
 5. **Execute** — call `execute_query(model_id, dimensions=[...], measures=[...])` to run SQL and get results (requires `FLIGHT_ENABLED=true` on the API)
 
+## Integration Guides
+
+Use the OrionBelt Semantic Layer MCP server with popular AI agent frameworks and automation platforms:
+
+| Framework | Transport | Guide |
+|-----------|-----------|-------|
+| **OpenAI Agents SDK** | stdio, HTTP, SSE | [docs/integrations/openai-agents-sdk.md](docs/integrations/openai-agents-sdk.md) |
+| **LangChain** | stdio, HTTP | [docs/integrations/langchain.md](docs/integrations/langchain.md) |
+| **Google ADK** | stdio, HTTP, SSE | [docs/integrations/google-adk.md](docs/integrations/google-adk.md) |
+| **n8n** | HTTP, SSE | [docs/integrations/n8n.md](docs/integrations/n8n.md) |
+| **CrewAI** | stdio, HTTP | [docs/integrations/crewai.md](docs/integrations/crewai.md) |
+
+Each guide includes quick-start examples, multi-agent patterns, and connection options for both the hosted demo and self-hosted deployments.
+
 ## Development
 
 ```bash
