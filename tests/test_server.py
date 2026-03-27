@@ -623,6 +623,52 @@ def test_execute_query_single_model_mode(mock_api: respx.MockRouter):
     assert len(session_calls) == 0
 
 
+def test_execute_query_multi_model_mode(mock_api: respx.MockRouter):
+    """execute_query uses session-scoped POST in multi-model mode."""
+    _mock_create_session(mock_api)
+    mock_api.post("/v1/sessions/test-session-1/query/execute").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "sql": "SELECT country, SUM(amount) FROM orders GROUP BY 1",
+                "dialect": "postgres",
+                "columns": [
+                    {"name": "country", "type": "string"},
+                    {"name": "sum_amount", "type": "float"},
+                ],
+                "rows": [["US", 1000.0], ["DE", 500.0]],
+                "row_count": 2,
+                "execution_time_ms": 42,
+            },
+        )
+    )
+
+    result = server._impl_execute_query(
+        model_id="m001",
+        dialect="postgres",
+        dimensions=["Country"],
+        measures=["Revenue"],
+        query_json=None,
+        use_path_names=None,
+    )
+    assert '"sql"' in result
+    assert '"rows"' in result
+
+    # Verify the request body contains model_id and dialect
+    execute_calls = [
+        call
+        for call in mock_api.calls
+        if call.request.url.path == "/v1/sessions/test-session-1/query/execute"
+    ]
+    assert len(execute_calls) == 1
+    import json
+
+    body = json.loads(execute_calls[0].request.content)
+    assert body["model_id"] == "m001"
+    assert body["dialect"] == "postgres"
+    assert "select" in body["query"]
+
+
 # ---------------------------------------------------------------------------
 # list_models (multi-model mode)
 # ---------------------------------------------------------------------------
@@ -1414,6 +1460,33 @@ def test_convert_osi_to_obml(mock_api: respx.MockRouter):
     assert "version: 1.0" in result
 
 
+def test_convert_osi_to_obml_with_validation_errors(mock_api: respx.MockRouter):
+    """convert_osi_to_obml appends warnings and validation errors to output."""
+    mock_api.post("/v1/convert/osi-to-obml").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "output_yaml": "version: 1.0\ndataObjects: {}",
+                "warnings": ["Column 'foo' unmapped"],
+                "validation": {
+                    "schema_valid": False,
+                    "semantic_valid": False,
+                    "schema_errors": ["Missing required field 'code'"],
+                    "semantic_errors": ["Unknown column reference 'bar'"],
+                    "semantic_warnings": ["Unused dimension 'baz'"],
+                },
+            },
+        )
+    )
+
+    result = server.convert_osi_to_obml("osi_yaml_content")
+    assert "version: 1.0" in result
+    assert "Warnings: Column 'foo' unmapped" in result
+    assert "Missing required field 'code'" in result
+    assert "Unknown column reference 'bar'" in result
+    assert "Validation warnings: Unused dimension 'baz'" in result
+
+
 # ---------------------------------------------------------------------------
 # convert_obml_to_osi
 # ---------------------------------------------------------------------------
@@ -1440,6 +1513,32 @@ def test_convert_obml_to_osi(mock_api: respx.MockRouter):
 
     result = server.convert_obml_to_osi("obml_yaml_content")
     assert "semantic_model" in result
+
+
+def test_convert_obml_to_osi_with_validation_errors(mock_api: respx.MockRouter):
+    """convert_obml_to_osi appends warnings and validation errors to output."""
+    mock_api.post("/v1/convert/obml-to-osi").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "output_yaml": "semantic_model:\n  name: test",
+                "warnings": ["Metric 'ratio' uses filtered measures"],
+                "validation": {
+                    "schema_valid": True,
+                    "semantic_valid": False,
+                    "schema_errors": [],
+                    "semantic_errors": ["Invalid expression in metric"],
+                    "semantic_warnings": ["Deprecated aggregation type"],
+                },
+            },
+        )
+    )
+
+    result = server.convert_obml_to_osi("obml_yaml_content")
+    assert "semantic_model" in result
+    assert "Warnings: Metric 'ratio' uses filtered measures" in result
+    assert "Validation errors: Invalid expression in metric" in result
+    assert "Validation warnings: Deprecated aggregation type" in result
 
 
 # ---------------------------------------------------------------------------

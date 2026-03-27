@@ -21,6 +21,7 @@ Entrypoint for Prefect Horizon: ``server.py:mcp``
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import logging
 import threading
@@ -91,7 +92,10 @@ def _get_client() -> httpx.Client:
                 _http_client = httpx.Client(
                     base_url=settings.api_base_url,
                     timeout=settings.api_timeout,
-                    headers={"User-Agent": "OrionBelt-MCP/1.2"},
+                    headers={
+                        "User-Agent": "OrionBelt-MCP/"
+                        + importlib.metadata.version("orionbelt-semantic-layer-mcp")
+                    },
                 )
     return _http_client
 
@@ -190,10 +194,11 @@ def _do_request(
     method: str,
     path: str,
     json_body: dict | None,
+    params: dict[str, str] | None = None,
 ) -> httpx.Response:
     """Execute a single HTTP request, wrapping connection/timeout errors."""
     try:
-        return client.request(method, path, json=json_body)
+        return client.request(method, path, json=json_body, params=params)
     except httpx.ConnectError:
         raise ToolError(
             f"Cannot connect to OrionBelt Semantic Layer API at {settings.api_base_url}"
@@ -260,14 +265,7 @@ def _shortcut_request(
     """
     client = _get_client()
     full_path = f"{_API_V1}{path}"
-    try:
-        resp = client.request(method, full_path, json=json_body, params=params)
-    except httpx.ConnectError:
-        raise ToolError(
-            f"Cannot connect to OrionBelt Semantic Layer API at {settings.api_base_url}"
-        ) from None
-    except httpx.TimeoutException:
-        raise ToolError("API request timed out") from None
+    resp = _do_request(client, method, full_path, json_body, params=params)
     if resp.status_code >= 400:
         _raise_api_error(resp)
     return resp
@@ -285,9 +283,13 @@ def _fetch_obml_reference() -> str:
     """Fetch and cache the OBML reference from the API."""
     global _obml_reference_cache
     if _obml_reference_cache is None:
-        resp = _api_request("GET", f"{_API_V1}/reference/obml", retry_on_expired=False)
-        data = _parse_json(resp)
-        _obml_reference_cache = data["reference"]
+        with _state_lock:
+            if _obml_reference_cache is None:  # double-check under lock
+                resp = _api_request(
+                    "GET", f"{_API_V1}/reference/obml", retry_on_expired=False
+                )
+                data = _parse_json(resp)
+                _obml_reference_cache = data["reference"]
     return _obml_reference_cache
 
 
@@ -295,9 +297,13 @@ def _fetch_dialect_names() -> list[str]:
     """Fetch and cache the list of supported dialect names from the API."""
     global _dialect_names_cache
     if _dialect_names_cache is None:
-        resp = _api_request("GET", f"{_API_V1}/dialects", retry_on_expired=False)
-        data = _parse_json(resp)
-        _dialect_names_cache = [d["name"] for d in data.get("dialects", [])]
+        with _state_lock:
+            if _dialect_names_cache is None:  # double-check under lock
+                resp = _api_request(
+                    "GET", f"{_API_V1}/dialects", retry_on_expired=False
+                )
+                data = _parse_json(resp)
+                _dialect_names_cache = [d["name"] for d in data.get("dialects", [])]
     return _dialect_names_cache
 
 
@@ -496,7 +502,7 @@ def _impl_describe_model(model_id: str | None = None) -> str:
     for obj in desc.get("data_objects", []):
         # SchemaResponse uses 'name'; ModelDescription uses 'label'
         obj_name = obj.get("label", obj.get("name", "?"))
-        lines.append(f"  {obj_name}  (code: {obj['code']})")
+        lines.append(f"  {obj_name}  (code: {obj.get('code', '?')})")
         if obj.get("description"):
             lines.append(f"    description: {obj['description']}")
         # SchemaResponse: columns is list[ColumnDetail dict]; describe: list[str]
@@ -513,9 +519,11 @@ def _impl_describe_model(model_id: str | None = None) -> str:
     lines.append("DIMENSIONS:")
     for dim in desc.get("dimensions", []):
         grain = f"  grain={dim['time_grain']}" if dim.get("time_grain") else ""
-        lines.append(
-            f"  {dim['name']}  ({dim['result_type']}, {dim['data_object']}.{dim['column']}{grain})"
-        )
+        d_name = dim.get("name", "?")
+        d_type = dim.get("result_type", "?")
+        d_obj = dim.get("data_object", "?")
+        d_col = dim.get("column", "?")
+        lines.append(f"  {d_name}  ({d_type}, {d_obj}.{d_col}{grain})")
         if dim.get("description"):
             lines.append(f"    description: {dim['description']}")
         if dim.get("synonyms"):
@@ -526,7 +534,10 @@ def _impl_describe_model(model_id: str | None = None) -> str:
     lines.append("MEASURES:")
     for m in desc.get("measures", []):
         expr = f"  expr: {m['expression']}" if m.get("expression") else ""
-        lines.append(f"  {m['name']}  ({m['result_type']}, {m['aggregation']}{expr})")
+        m_name = m.get("name", "?")
+        m_type = m.get("result_type", "?")
+        m_agg = m.get("aggregation", "?")
+        lines.append(f"  {m_name}  ({m_type}, {m_agg}{expr})")
         if m.get("description"):
             lines.append(f"    description: {m['description']}")
         if m.get("synonyms"):
@@ -538,7 +549,7 @@ def _impl_describe_model(model_id: str | None = None) -> str:
     if metrics:
         lines.append("METRICS:")
         for met in metrics:
-            lines.append(f"  {met['name']}  {_format_metric_summary(met)}")
+            lines.append(f"  {met.get('name', '?')}  {_format_metric_summary(met)}")
             if met.get("description"):
                 lines.append(f"    description: {met['description']}")
             if met.get("synonyms"):
@@ -680,7 +691,7 @@ def _impl_get_model_diagram(model_id: str | None, show_columns: bool, theme: str
             params={"show_columns": str(show_columns).lower(), "theme": theme},
         )
     else:
-        params = f"?show_columns={str(show_columns).lower()}&theme={theme}"
+        params = f"?show_columns={str(show_columns).lower()}&theme={quote(theme, safe='')}"
         resp = _session_request("GET", f"/models/{model_id}/diagram/er{params}")
     return _parse_json(resp)["mermaid"]
 
@@ -706,9 +717,11 @@ def _impl_list_dimensions(model_id: str | None) -> str:
     lines = ["Dimensions:", ""]
     for d in dims:
         grain = f"  grain={d['time_grain']}" if d.get("time_grain") else ""
-        lines.append(
-            f"  {d['name']}  ({d['result_type']}, {d['data_object']}.{d['column']}{grain})"
-        )
+        d_name = d.get("name", "?")
+        d_type = d.get("result_type", "?")
+        d_obj = d.get("data_object", "?")
+        d_col = d.get("column", "?")
+        lines.append(f"  {d_name}  ({d_type}, {d_obj}.{d_col}{grain})")
         if d.get("description"):
             lines.append(f"    description: {d['description']}")
         if d.get("synonyms"):
@@ -738,7 +751,10 @@ def _impl_list_measures(model_id: str | None) -> str:
     lines = ["Measures:", ""]
     for m in measures:
         expr = f"  expr: {m['expression']}" if m.get("expression") else ""
-        lines.append(f"  {m['name']}  ({m['result_type']}, {m['aggregation']}{expr})")
+        m_name = m.get("name", "?")
+        m_type = m.get("result_type", "?")
+        m_agg = m.get("aggregation", "?")
+        lines.append(f"  {m_name}  ({m_type}, {m_agg}{expr})")
         if m.get("description"):
             lines.append(f"    description: {m['description']}")
         if m.get("synonyms"):
@@ -1749,7 +1765,7 @@ def _detect_single_model_mode() -> bool:
         resp.raise_for_status()
         data = resp.json()
         return data.get("single_model_mode", False)
-    except Exception:
+    except (httpx.HTTPError, ValueError, KeyError):
         logger.warning("Could not detect single-model mode — defaulting to multi-model")
         return False
 
