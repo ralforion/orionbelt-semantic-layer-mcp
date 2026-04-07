@@ -1,6 +1,6 @@
 <!-- mcp-name: io.github.ralfbecher/orionbelt-semantic-layer-mcp -->
 <p align="center">
-  <img src="docs/assets/ORIONBELT_Logo.png" alt="OrionBelt Logo" width="400">
+  <img src="https://raw.githubusercontent.com/ralfbecher/orionbelt-semantic-layer-mcp/main/docs/assets/ORIONBELT_Logo.png" alt="OrionBelt Logo" width="400">
 </p>
 
 <h1 align="center">OrionBelt Semantic Layer MCP</h1>
@@ -51,7 +51,7 @@ The OrionBelt Semantic Layer platform has two deployment modes. This MCP server 
 - **3 prompts + 1 resource** for OBML reference and usage guidance
 
 <p align="center">
-  <img src="docs/assets/architecture.png" alt="OrionBelt Analytics Architecture" width="900">
+  <img src="https://raw.githubusercontent.com/ralfbecher/orionbelt-semantic-layer-mcp/main/docs/assets/architecture.png" alt="OrionBelt Analytics Architecture" width="900">
 </p>
 
 ## Live Demo
@@ -230,6 +230,6 @@ Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for detai
 
 <p align="center">
   <a href="https://ralforion.com">
-    <img src="docs/assets/RALFORION_doo_Logo.png" alt="RALFORION d.o.o." width="200">
+    <img src="https://raw.githubusercontent.com/ralfbecher/orionbelt-semantic-layer-mcp/main/docs/assets/RALFORION_doo_Logo.png" alt="RALFORION d.o.o." width="200">
   </a>
 </p>
