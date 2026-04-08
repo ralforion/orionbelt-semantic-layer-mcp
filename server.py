@@ -843,6 +843,41 @@ def _impl_find_artefacts(model_id: str | None, query: str, types: list[str] | No
     return "\n".join(lines)
 
 
+def _impl_get_graph(model_id: str | None) -> str:
+    """Return the OBSL-Core RDF graph as Turtle (shared implementation)."""
+    if model_id is None:
+        resp = _shortcut_request("GET", "/graph")
+    else:
+        resp = _session_request("GET", f"/models/{model_id}/graph")
+    return resp.text
+
+
+def _impl_sparql_query(model_id: str | None, query: str) -> str:
+    """Execute a read-only SPARQL query (shared implementation)."""
+    body: dict = {"query": query}
+    if model_id is None:
+        resp = _shortcut_request("POST", "/sparql", json_body=body)
+    else:
+        resp = _session_request("POST", f"/models/{model_id}/sparql", json_body=body)
+    data = _parse_json(resp)
+
+    query_type = data.get("type", "select")
+    if query_type == "ask":
+        return f"ASK result: {data.get('boolean', False)}"
+
+    variables = data.get("variables", [])
+    results = data.get("results", [])
+    if not results:
+        return "SPARQL query returned no results."
+
+    # Format as a readable table
+    lines = [" | ".join(variables)]
+    lines.append(" | ".join("---" for _ in variables))
+    for row in results:
+        lines.append(" | ".join(str(row.get(v, "")) for v in variables))
+    return "\n".join(lines)
+
+
 def _impl_get_join_graph(model_id: str | None) -> str:
     """Return the join graph as an adjacency list (shared implementation)."""
     if model_id is None:
@@ -1094,6 +1129,62 @@ def _register_single_model_tools() -> None:
         columns) in the model.  Useful for understanding table relationships.
         """
         return _impl_get_join_graph(None)
+
+    @mcp.tool
+    def get_graph() -> str:
+        """Get the OBSL-Core RDF graph for the model as Turtle.
+
+        Returns the semantic model's RDF graph serialized in Turtle format.
+        The graph follows the OBSL-Core ontology and can be used for
+        semantic web integration or further analysis.
+        """
+        return _impl_get_graph(None)
+
+    @mcp.tool
+    def sparql_query(query: str) -> str:
+        """Execute a read-only SPARQL query against the model's RDF graph.
+
+        Supports SELECT and ASK queries only (no INSERT/DELETE/UPDATE).
+        The graph uses the OBSL-Core ontology.
+
+        Args:
+            query: SPARQL query string (SELECT or ASK).
+        """
+        return _impl_sparql_query(None, query)
+
+    @mcp.tool
+    def validate_model(model_yaml: str) -> str:
+        """Validate an OBML model without storing it.
+
+        Returns validation errors and warnings.  Useful for checking a model
+        before loading it.  This is a stateless operation.
+
+        Args:
+            model_yaml: Complete OBML YAML content.
+        """
+        logger.info("validate_model called (yaml length=%d)", len(model_yaml))
+        resp = _shortcut_request("POST", "/validate", json_body={"model_yaml": model_yaml})
+        data = _parse_json(resp)
+
+        if data["valid"]:
+            msg = "Model is valid."
+            if data.get("warnings"):
+                msg += "\nWarnings:"
+                for w in data["warnings"]:
+                    msg += f"\n  [{w['code']}] {w['message']}"
+            return msg
+
+        lines = ["Model has validation errors:"]
+        for e in data.get("errors", []):
+            line = f"  [{e['code']}] {e['message']}"
+            if e.get("path"):
+                line += f"  (at {e['path']})"
+            lines.append(line)
+        if data.get("warnings"):
+            lines.append("Warnings:")
+            for w in data["warnings"]:
+                lines.append(f"  [{w['code']}] {w['message']}")
+        return "\n".join(lines)
 
 
 def _register_multi_model_tools() -> None:
@@ -1483,6 +1574,32 @@ def _register_multi_model_tools() -> None:
             model_id: The id returned by ``load_model``.
         """
         return _impl_get_join_graph(model_id)
+
+    @mcp.tool
+    def get_graph(model_id: str) -> str:
+        """Get the OBSL-Core RDF graph for a loaded model as Turtle.
+
+        Returns the semantic model's RDF graph serialized in Turtle format.
+        The graph follows the OBSL-Core ontology and can be used for
+        semantic web integration or further analysis.
+
+        Args:
+            model_id: The id returned by ``load_model``.
+        """
+        return _impl_get_graph(model_id)
+
+    @mcp.tool
+    def sparql_query(model_id: str, query: str) -> str:
+        """Execute a read-only SPARQL query against a model's RDF graph.
+
+        Supports SELECT and ASK queries only (no INSERT/DELETE/UPDATE).
+        The graph uses the OBSL-Core ontology.
+
+        Args:
+            model_id: The id returned by ``load_model``.
+            query: SPARQL query string (SELECT or ASK).
+        """
+        return _impl_sparql_query(model_id, query)
 
 
 # ---------------------------------------------------------------------------

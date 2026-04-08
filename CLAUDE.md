@@ -13,8 +13,8 @@ LLM Client  ──MCP──▶  server.py  ──HTTP──▶  OrionBelt Semant
 
 - **No business logic** — all tool calls delegate to the REST API
 - **Two modes** — auto-detected at startup via `GET /v1/settings`
-  - **Multi-model mode**: 23 tools with `model_id`, session-scoped endpoints
-  - **Single-model mode**: 20 tools (no `load_model`/`remove_model`/`list_models`/`validate_model`; adds `get_model`; no `model_id`), shortcut endpoints
+  - **Multi-model mode**: 25 tools with `model_id`, session-scoped endpoints
+  - **Single-model mode**: 23 tools (no `load_model`/`remove_model`/`list_models`; adds `get_model`; no `model_id`), shortcut endpoints
 - **3 prompts + 1 resource** — `write_obml_model` fetched from API; others static
 
 ## Commands
@@ -81,6 +81,8 @@ All API endpoints use the `/v1/` prefix (since API v1.0.0).
 | `explain_artefact(model_id, name)` | `GET /v1/sessions/{id}/models/{mid}/explain/{name}` | Lineage trace |
 | `find_artefacts(model_id, query)` | `POST /v1/sessions/{id}/models/{mid}/find` | Name/synonym search |
 | `get_join_graph(model_id)` | `GET /v1/sessions/{id}/models/{mid}/join-graph` | Adjacency list |
+| `get_graph(model_id)` | `GET /v1/sessions/{id}/models/{mid}/graph` | OBSL-Core RDF as Turtle |
+| `sparql_query(model_id, query)` | `POST /v1/sessions/{id}/models/{mid}/sparql` | Read-only SPARQL (SELECT/ASK) |
 | `get_settings()` | `GET /v1/settings` | No session needed |
 | `convert_osi_to_obml(...)` | `POST /v1/convert/osi-to-obml` | No session needed |
 | `convert_obml_to_osi(...)` | `POST /v1/convert/obml-to-osi` | No session needed |
@@ -108,6 +110,9 @@ When `GET /v1/settings` returns `single_model_mode: true`, the server registers 
 | `explain_artefact(name)` | `GET /v1/explain/{name}` | Lineage trace |
 | `find_artefacts(query)` | `POST /v1/find` | Name/synonym search |
 | `get_join_graph()` | `GET /v1/join-graph` | Adjacency list |
+| `get_graph()` | `GET /v1/graph` | OBSL-Core RDF as Turtle |
+| `sparql_query(query)` | `POST /v1/sparql` | Read-only SPARQL (SELECT/ASK) |
+| `validate_model(model_yaml)` | `POST /v1/validate` | Stateless validation |
 
 ## Semantic Features
 
@@ -131,7 +136,7 @@ All features are handled by the API — the MCP server passes through OBML YAML 
 
 **Single-model mode** — no sessions created.  The API has a `__default__` session
 with the pre-loaded model.  Shortcut endpoints auto-resolve.  `validate_model`
-is not registered (model is pre-loaded and immutable).
+uses the stateless `POST /v1/validate` shortcut.
 
 ## Code Structure
 
