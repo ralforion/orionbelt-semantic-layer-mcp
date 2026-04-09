@@ -1617,7 +1617,7 @@ class StaticPrompt(_BasePrompt):
         result.text = self.text  # type: ignore[attr-defined]  # extra="allow"
         return result
 
-    async def render(self, arguments=None):  # type: ignore[override]
+    async def render(self, _arguments=None):  # type: ignore[override]
         return self.text
 
 
