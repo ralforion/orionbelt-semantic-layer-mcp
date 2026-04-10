@@ -1909,3 +1909,173 @@ def test_shutdown_resets_global_state(mock_api):
     client_after = server._get_client()
     assert isinstance(client_after, httpx.Client)
     assert client_after is not client_before
+
+
+# ---------------------------------------------------------------------------
+# get_graph
+# ---------------------------------------------------------------------------
+
+_MOCK_TURTLE = """\
+@prefix obsl: <https://orionbelt.dev/ontology/obsl-core#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+obsl:Orders a obsl:DataObject ;
+    rdfs:label "Orders" .
+"""
+
+
+def test_get_graph(mock_api: respx.MockRouter):
+    """get_graph returns RDF Turtle from session-scoped endpoint."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/graph").mock(
+        return_value=httpx.Response(200, text=_MOCK_TURTLE, headers={"content-type": "text/turtle"})
+    )
+
+    result = server._impl_get_graph("m001")
+    assert "@prefix obsl:" in result
+    assert "Orders" in result
+
+
+def test_get_graph_single_model_mode(mock_api: respx.MockRouter):
+    """get_graph uses shortcut GET /v1/graph in single-model mode."""
+    server._single_model_mode = True
+    mock_api.get("/v1/graph").mock(
+        return_value=httpx.Response(200, text=_MOCK_TURTLE, headers={"content-type": "text/turtle"})
+    )
+
+    result = server._impl_get_graph(None)
+    assert "@prefix obsl:" in result
+    assert "Orders" in result
+
+
+# ---------------------------------------------------------------------------
+# sparql_query
+# ---------------------------------------------------------------------------
+
+
+def test_sparql_query_select(mock_api: respx.MockRouter):
+    """sparql_query formats SELECT results as a table."""
+    _mock_create_session(mock_api)
+    mock_api.post("/v1/sessions/test-session-1/models/m001/sparql").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "type": "select",
+                "variables": ["name", "type"],
+                "results": [
+                    {"name": "Revenue", "type": "measure"},
+                    {"name": "Country", "type": "dimension"},
+                ],
+                "boolean": None,
+            },
+        )
+    )
+
+    result = server._impl_sparql_query("m001", "SELECT ?name ?type WHERE { ?s ?p ?o }")
+    assert "name | type" in result
+    assert "Revenue | measure" in result
+    assert "Country | dimension" in result
+
+
+def test_sparql_query_ask(mock_api: respx.MockRouter):
+    """sparql_query formats ASK results."""
+    _mock_create_session(mock_api)
+    mock_api.post("/v1/sessions/test-session-1/models/m001/sparql").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "type": "ask",
+                "variables": [],
+                "results": [],
+                "boolean": True,
+            },
+        )
+    )
+
+    result = server._impl_sparql_query("m001", "ASK { ?s a obsl:DataObject }")
+    assert "ASK result: True" in result
+
+
+def test_sparql_query_no_results(mock_api: respx.MockRouter):
+    """sparql_query handles empty SELECT results."""
+    _mock_create_session(mock_api)
+    mock_api.post("/v1/sessions/test-session-1/models/m001/sparql").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "type": "select",
+                "variables": ["name"],
+                "results": [],
+                "boolean": None,
+            },
+        )
+    )
+
+    result = server._impl_sparql_query("m001", "SELECT ?name WHERE { ?s ?p ?o }")
+    assert "no results" in result.lower()
+
+
+def test_sparql_query_single_model_mode(mock_api: respx.MockRouter):
+    """sparql_query uses shortcut POST /v1/sparql in single-model mode."""
+    server._single_model_mode = True
+    mock_api.post("/v1/sparql").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "type": "select",
+                "variables": ["label"],
+                "results": [{"label": "Orders"}],
+                "boolean": None,
+            },
+        )
+    )
+
+    result = server._impl_sparql_query(None, "SELECT ?label WHERE { ?s rdfs:label ?label }")
+    assert "Orders" in result
+
+
+# ---------------------------------------------------------------------------
+# validate_model (single-model mode)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_model_single_model_mode_valid(mock_api: respx.MockRouter):
+    """validate_model uses stateless POST /v1/validate in single-model mode."""
+    server._single_model_mode = True
+    _register_and_get = server._register_single_model_tools
+    _register_and_get()
+
+    mock_api.post("/v1/validate").mock(
+        return_value=httpx.Response(
+            200,
+            json={"valid": True, "errors": [], "warnings": []},
+        )
+    )
+
+    # Access the tool via the impl-equivalent path (shortcut request)
+    resp = server._shortcut_request("POST", "/validate", json_body={"model_yaml": "version: 1.0"})
+    data = server._parse_json(resp)
+    assert data["valid"] is True
+
+
+def test_validate_model_single_model_mode_errors(mock_api: respx.MockRouter):
+    """validate_model returns errors via stateless shortcut in single-model mode."""
+    server._single_model_mode = True
+
+    mock_api.post("/v1/validate").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "valid": False,
+                "errors": [
+                    {"code": "YAML_PARSE_ERROR", "message": "Invalid YAML", "path": None}
+                ],
+                "warnings": [],
+            },
+        )
+    )
+
+    resp = server._shortcut_request("POST", "/validate", json_body={"model_yaml": "bad yaml"})
+    data = server._parse_json(resp)
+    assert data["valid"] is False
+    assert data["errors"][0]["code"] == "YAML_PARSE_ERROR"
