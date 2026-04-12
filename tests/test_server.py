@@ -1370,6 +1370,9 @@ def test_get_settings(mock_api: respx.MockRouter):
                 "single_model_mode": False,
                 "model_yaml": None,
                 "session_ttl_seconds": 1800,
+                "session_max_age_seconds": 86400,
+                "max_sessions": 500,
+                "max_models_per_session": 10,
             },
         )
     )
@@ -1377,6 +1380,9 @@ def test_get_settings(mock_api: respx.MockRouter):
     result = server.get_settings()
     assert "Single-model mode: False" in result
     assert "Session TTL: 1800s" in result
+    assert "Session max age: 86400s" in result
+    assert "Max sessions: 500" in result
+    assert "Max models/session: 10" in result
 
 
 def test_get_settings_single_model(mock_api: respx.MockRouter):
@@ -1388,6 +1394,9 @@ def test_get_settings_single_model(mock_api: respx.MockRouter):
                 "single_model_mode": True,
                 "model_yaml": "version: 1.0\ndataObjects: ...",
                 "session_ttl_seconds": 3600,
+                "session_max_age_seconds": 86400,
+                "max_sessions": 500,
+                "max_models_per_session": 10,
             },
         )
     )
@@ -1601,6 +1610,58 @@ def test_session_retry_on_404(mock_api: respx.MockRouter):
     result = server._impl_list_dimensions("m001")
     assert "No dimensions" in result
     assert server._api_session_id == "session-new"
+
+
+def test_session_retry_on_410(mock_api: respx.MockRouter):
+    """When session returns 410 (Gone/expired), a new session is created and retried."""
+    _mock_create_session(mock_api, session_id="session-old")
+
+    server._api_session_id = "session-old"
+
+    # First call returns 410 (session expired — new API behavior)
+    mock_api.get("/v1/sessions/session-old/models/m001/dimensions").mock(
+        return_value=httpx.Response(410, json={"detail": "Session has expired"})
+    )
+
+    # New session creation after invalidation
+    mock_api.post("/v1/sessions").mock(
+        return_value=httpx.Response(
+            201,
+            json={
+                "session_id": "session-new",
+                "created_at": "2025-01-01T00:00:00",
+                "last_accessed_at": "2025-01-01T00:00:00",
+                "model_count": 0,
+                "metadata": {},
+            },
+        )
+    )
+
+    # Retry call succeeds with new session
+    mock_api.get("/v1/sessions/session-new/models/m001/dimensions").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+
+    result = server._impl_list_dimensions("m001")
+    assert "No dimensions" in result
+    assert server._api_session_id == "session-new"
+
+
+def test_session_create_429_rate_limited(mock_api: respx.MockRouter):
+    """429 on session creation surfaces a clear rate-limit error."""
+    from fastmcp.exceptions import ToolError
+
+    server._api_session_id = None
+    mock_api.post("/v1/sessions").mock(
+        return_value=httpx.Response(
+            429,
+            json={"detail": "Rate limit exceeded: max 10 session creations per 60s"},
+            headers={"Retry-After": "60"},
+        )
+    )
+
+    with pytest.raises(ToolError, match="rate-limited"):
+        server._ensure_session()
 
 
 # ---------------------------------------------------------------------------

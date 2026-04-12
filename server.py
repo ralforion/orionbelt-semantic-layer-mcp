@@ -118,6 +118,12 @@ def _create_api_session() -> str:
     except httpx.TimeoutException:
         raise ToolError("API request timed out while creating session") from None
     except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 429:
+            detail = _parse_error_detail(exc.response)
+            retry_after = exc.response.headers.get("Retry-After", "60")
+            raise ToolError(
+                f"Session creation rate-limited: {detail} (retry after {retry_after}s)"
+            ) from None
         _raise_api_error(exc.response)
     data = _parse_json(resp)
     return data["session_id"]
@@ -177,9 +183,12 @@ def _raise_api_error(response: httpx.Response, detail: str | None = None) -> NoR
 def _is_session_expired(response: httpx.Response) -> bool:
     """Return True if the API error indicates an expired/missing session.
 
-    Checks for a structured ``code`` field first, then falls back to string
-    matching on the detail message.
+    Matches 410 (Gone) for explicitly expired sessions, and 404 with
+    session-related detail for backwards compatibility with older API versions.
     """
+    # 410 Gone — API >= 1.4 uses this for expired sessions
+    if response.status_code == 410:
+        return True
     if response.status_code != 404:
         return False
     try:
@@ -222,7 +231,7 @@ def _api_request(
 ) -> httpx.Response:
     """Make an API request with auto-session retry.
 
-    If the session returns 404 and retry_on_expired is True,
+    If the session returns 404/410 and retry_on_expired is True,
     re-create the session and retry once.  When *path_suffix* is provided,
     the retry reconstructs the path from the new session ID.
     """
@@ -364,6 +373,12 @@ def get_settings() -> str:
     lines = ["API Settings:", ""]
     lines.append(f"  Single-model mode: {data.get('single_model_mode', False)}")
     lines.append(f"  Session TTL: {data.get('session_ttl_seconds', 'N/A')}s")
+    if data.get("session_max_age_seconds"):
+        lines.append(f"  Session max age: {data['session_max_age_seconds']}s")
+    if data.get("max_sessions"):
+        lines.append(f"  Max sessions: {data['max_sessions']}")
+    if data.get("max_models_per_session"):
+        lines.append(f"  Max models/session: {data['max_models_per_session']}")
     if data.get("model_yaml"):
         lines.append(f"  Pre-loaded model: yes ({len(data['model_yaml'])} chars)")
     query_exec = data.get("query_execute", False)

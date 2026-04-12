@@ -131,8 +131,9 @@ All features are handled by the API — the MCP server passes through OBML YAML 
 **Multi-model mode** — sessions are fully internal (LLM never sees session IDs):
 1. On first API call, `POST /v1/sessions` creates one
 2. Session ID is cached in `_api_session_id`
-3. On 404 (expired), auto-recreates and retries once
-4. Best-effort cleanup on shutdown via `DELETE /v1/sessions/{id}`
+3. On 410 (expired) or 404 (session not found), auto-recreates and retries once
+4. 429 on session creation surfaces rate-limit / capacity error to the LLM
+5. Best-effort cleanup on shutdown via `DELETE /v1/sessions/{id}`
 
 **Single-model mode** — no sessions created.  The API has a `__default__` session
 with the pre-loaded model.  Shortcut endpoints auto-resolve.  `validate_model`
