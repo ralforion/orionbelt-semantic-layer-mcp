@@ -1167,115 +1167,18 @@ def _register_single_model_tools() -> None:
         """
         return _impl_sparql_query(None, query)
 
-    @mcp.tool
-    def validate_model(model_yaml: str) -> str:
-        """Validate OBML YAML content for errors without loading it.
-
-        Takes the complete OBML YAML source as input and returns any
-        validation errors and warnings.  Always requires model_yaml.
-
-        Args:
-            model_yaml: Complete OBML YAML content to validate.
-        """
-        logger.info("validate_model called (yaml length=%d)", len(model_yaml))
-        resp = _shortcut_request("POST", "/validate", json_body={"model_yaml": model_yaml})
-        data = _parse_json(resp)
-
-        if data["valid"]:
-            msg = "Model is valid."
-            if data.get("warnings"):
-                msg += "\nWarnings:"
-                for w in data["warnings"]:
-                    msg += f"\n  [{w['code']}] {w['message']}"
-            return msg
-
-        lines = ["Model has validation errors:"]
-        for e in data.get("errors", []):
-            line = f"  [{e['code']}] {e['message']}"
-            if e.get("path"):
-                line += f"  (at {e['path']})"
-            lines.append(line)
-        if data.get("warnings"):
-            lines.append("Warnings:")
-            for w in data["warnings"]:
-                lines.append(f"  [{w['code']}] {w['message']}")
-        return "\n".join(lines)
-
-
 def _register_multi_model_tools() -> None:
     """Register tools for multi-model mode (requires model_id, session-scoped)."""
 
     @mcp.tool
     def load_model(model_yaml: str) -> str:
-        """Load an OBML semantic model into a session.
+        """Load an OBML YAML model into the session.
 
-        IMPORTANT: Before composing OBML YAML, call ``get_obml_reference()``
-        first to learn the correct format.
-
-        Parse, validate, and store the model.  Returns a model_id that you must
-        pass to other tools (describe_model, compile_query, etc.).
-
-        The OBML YAML must start with ``version: 1.0`` and uses YAML **mappings**
-        (not lists) for all sections.  Quick structure::
-
-            version: 1.0
-            dataObjects:
-              <Name>:                    # mapping key = data object name
-                code: <TABLE>
-                database: <DB>
-                schema: <SCHEMA>
-                columns:
-                  <Column Name>:         # unique within this data object
-                    code: <COLUMN>
-                    abstractType: string # see OBML reference for all types
-                joins:                   # optional, on fact tables
-                  - joinType: many-to-one
-                    joinTo: <Target>
-                    columnsFrom: [<local column>]
-                    columnsTo: [<target column>]
-            dimensions:
-              <Dim Name>:
-                dataObject: <Name>       # must match a dataObjects key
-                column: <Column Name>    # must match a column in that object
-                resultType: string
-            measures:
-              <Measure Name>:
-                columns:
-                  - dataObject: <Name>
-                    column: <Column Name>
-                resultType: float
-                aggregation: sum         # see OBML reference for all types
-              <Filtered Measure>:        # measure with filters (CASE WHEN)
-                columns:
-                  - dataObject: <Name>
-                    column: <Column Name>
-                resultType: float
-                aggregation: sum
-                filters:                 # rows not matching are excluded from agg
-                  - column: {dataObject: <Name>, column: <Col>}
-                    operator: equals
-                    values: [{dataType: string, valueString: "value"}]
-            metrics:
-              <Derived Metric>:
-                expression: '{[Measure A]} / {[Measure B]}'
-              <Cumulative Metric>:       # running total / rolling window
-                type: cumulative
-                measure: <Measure Name>
-                timeDimension: <Dim Name>
-                # optional: cumulativeType (sum/avg/min/max/count), window (int),
-                #           grainToDate (year/quarter/month/week)
-              <PoP Metric>:              # period-over-period comparison
-                type: period_over_period
-                expression: '{[Measure Name]}'
-                periodOverPeriod:
-                  timeDimension: <Dim Name>
-                  grain: month           # spine grain
-                  offset: -1
-                  offsetGrain: year      # comparison offset unit
-                  comparison: percentChange  # ratio/difference/previousValue
+        Call ``get_obml_reference()`` first to learn the OBML format before
+        composing the YAML.  Returns a model_id for use with other tools.
 
         Args:
-            model_yaml: Complete OBML YAML content (version 1.0).
+            model_yaml: Complete OBML YAML content (must start with version: 1.0).
         """
         logger.info("load_model called (yaml length=%d)", len(model_yaml))
         resp = _session_request("POST", "/models", json_body={"model_yaml": model_yaml})
@@ -1291,40 +1194,6 @@ def _register_multi_model_tools() -> None:
         if data.get("warnings"):
             parts.append(f"  warnings: {'; '.join(data['warnings'])}")
         return "\n".join(parts)
-
-    @mcp.tool
-    def validate_model(model_yaml: str) -> str:
-        """Validate OBML YAML content for errors without loading it.
-
-        Takes the complete OBML YAML source as input and returns any
-        validation errors and warnings.  Always requires model_yaml.
-
-        Args:
-            model_yaml: Complete OBML YAML content to validate.
-        """
-        logger.info("validate_model called (yaml length=%d)", len(model_yaml))
-        resp = _session_request("POST", "/validate", json_body={"model_yaml": model_yaml})
-        data = _parse_json(resp)
-
-        if data["valid"]:
-            msg = "Model is valid."
-            if data.get("warnings"):
-                msg += "\nWarnings:"
-                for w in data["warnings"]:
-                    msg += f"\n  [{w['code']}] {w['message']}"
-            return msg
-
-        lines = ["Model has validation errors:"]
-        for e in data.get("errors", []):
-            line = f"  [{e['code']}] {e['message']}"
-            if e.get("path"):
-                line += f"  (at {e['path']})"
-            lines.append(line)
-        if data.get("warnings"):
-            lines.append("Warnings:")
-            for w in data["warnings"]:
-                lines.append(f"  [{w['code']}] {w['message']}")
-        return "\n".join(lines)
 
     @mcp.tool
     def describe_model(model_id: str) -> str:
@@ -1841,10 +1710,9 @@ from the query's join graph.
 
 ## Debugging Steps
 
-1. Run `validate_model(model_yaml)` to check for errors.
+1. Run `load_model(model_yaml)` — it validates and returns any errors.
 2. Read the error code and message carefully.
-3. Fix the YAML and re-validate.
-4. Once valid, use `load_model(model_yaml)` to load it.
+3. Fix the YAML and re-load.
 """
 
 
@@ -1924,6 +1792,26 @@ def main() -> None:
     _single_model_mode = _detect_single_model_mode()
     if _single_model_mode:
         logger.info("Single-model mode detected — using shortcut endpoints")
+        # Verify the pre-loaded model is valid and reachable (fail fast)
+        client = _get_client()
+        try:
+            resp = client.get(f"{_API_V1}/schema")
+            resp.raise_for_status()
+            data = resp.json()
+            logger.info(
+                "Pre-loaded model validated: %d data objects, %d dimensions, "
+                "%d measures, %d metrics",
+                len(data.get("data_objects", [])),
+                len(data.get("dimensions", [])),
+                len(data.get("measures", [])),
+                len(data.get("metrics", [])),
+            )
+        except httpx.HTTPStatusError as exc:
+            logger.error("Pre-loaded model not available: %s", exc.response.text)
+            raise SystemExit(1) from None
+        except httpx.HTTPError as exc:
+            logger.error("Cannot reach API to validate pre-loaded model: %s", exc)
+            raise SystemExit(1) from None
         _register_single_model_tools()
     else:
         logger.info("Multi-model mode — using session-scoped endpoints")

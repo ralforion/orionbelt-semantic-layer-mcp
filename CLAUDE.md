@@ -14,7 +14,7 @@ LLM Client  ──MCP──▶  server.py  ──HTTP──▶  OrionBelt Semant
 - **No business logic** — all tool calls delegate to the REST API
 - **Two modes** — auto-detected at startup via `GET /v1/settings`
   - **Multi-model mode**: 25 tools with `model_id`, session-scoped endpoints
-  - **Single-model mode**: 23 tools (no `load_model`/`remove_model`/`list_models`; adds `get_model`; no `model_id`), shortcut endpoints
+  - **Single-model mode**: 22 tools (no `load_model`/`remove_model`/`list_models`/`validate_model`; adds `get_model`; no `model_id`), shortcut endpoints
 - **3 prompts + 1 resource** — `write_obml_model` fetched from API; others static
 
 ## Commands
@@ -91,7 +91,7 @@ All API endpoints use the `/v1/` prefix (since API v1.0.0).
 
 When `GET /v1/settings` returns `single_model_mode: true`, the server registers tools
 **without** `model_id` and uses shortcut endpoints that auto-resolve session/model.
-`load_model`, `remove_model`, and `list_models` are **not registered**.
+`load_model`, `remove_model`, `list_models`, and `validate_model` are **not registered**.
 
 | MCP Tool | Shortcut Endpoint | Notes |
 |----------|------------------|-------|
@@ -112,7 +112,6 @@ When `GET /v1/settings` returns `single_model_mode: true`, the server registers 
 | `get_join_graph()` | `GET /v1/join-graph` | Adjacency list |
 | `get_graph()` | `GET /v1/graph` | OBSL-Core RDF as Turtle |
 | `sparql_query(query)` | `POST /v1/sparql` | Read-only SPARQL (SELECT/ASK) |
-| `validate_model(model_yaml)` | `POST /v1/validate` | Stateless validation |
 
 ## Semantic Features
 
@@ -136,8 +135,7 @@ All features are handled by the API — the MCP server passes through OBML YAML 
 5. Best-effort cleanup on shutdown via `DELETE /v1/sessions/{id}`
 
 **Single-model mode** — no sessions created.  The API has a `__default__` session
-with the pre-loaded model.  Shortcut endpoints auto-resolve.  `validate_model`
-uses the stateless `POST /v1/validate` shortcut.
+with the pre-loaded model.  Shortcut endpoints auto-resolve.
 
 ## Code Structure
 
