@@ -1169,13 +1169,13 @@ def _register_single_model_tools() -> None:
 
     @mcp.tool
     def validate_model(model_yaml: str) -> str:
-        """Validate an OBML model without storing it.
+        """Validate OBML YAML content for errors without loading it.
 
-        Returns validation errors and warnings.  Useful for checking a model
-        before loading it.  This is a stateless operation.
+        Takes the complete OBML YAML source as input and returns any
+        validation errors and warnings.  Always requires model_yaml.
 
         Args:
-            model_yaml: Complete OBML YAML content.
+            model_yaml: Complete OBML YAML content to validate.
         """
         logger.info("validate_model called (yaml length=%d)", len(model_yaml))
         resp = _shortcut_request("POST", "/validate", json_body={"model_yaml": model_yaml})
@@ -1294,13 +1294,13 @@ def _register_multi_model_tools() -> None:
 
     @mcp.tool
     def validate_model(model_yaml: str) -> str:
-        """Validate an OBML model without storing it.
+        """Validate OBML YAML content for errors without loading it.
 
-        Returns validation errors and warnings.  Useful for checking a model
-        before loading it.
+        Takes the complete OBML YAML source as input and returns any
+        validation errors and warnings.  Always requires model_yaml.
 
         Args:
-            model_yaml: Complete OBML YAML content.
+            model_yaml: Complete OBML YAML content to validate.
         """
         logger.info("validate_model called (yaml length=%d)", len(model_yaml))
         resp = _session_request("POST", "/validate", json_body={"model_yaml": model_yaml})
