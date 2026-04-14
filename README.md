@@ -7,11 +7,11 @@
 
 <p align="center"><strong>Thin MCP server that delegates to the OrionBelt Semantic Layer REST API</strong></p>
 
-[![Version 1.3.0](https://img.shields.io/badge/version-1.3.0-purple.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/releases)
-[![OrionBelt Semantic Layer 1.3](https://img.shields.io/badge/OrionBelt_Semantic_Layer-1.3-0054A6.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer)
+[![Version 1.4.0](https://img.shields.io/badge/version-1.4.0-purple.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/releases)
+[![OrionBelt Semantic Layer 1.4](https://img.shields.io/badge/OrionBelt_Semantic_Layer-1.4-0054A6.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/blob/main/LICENSE)
-[![FastMCP](https://img.shields.io/badge/FastMCP-3.1+-8A2BE2)](https://gofastmcp.com)
+[![FastMCP](https://img.shields.io/badge/FastMCP-3.2+-8A2BE2)](https://gofastmcp.com)
 [![Pydantic v2](https://img.shields.io/badge/Pydantic-v2-E92063.svg?logo=pydantic&logoColor=white)](https://docs.pydantic.dev)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://docs.astral.sh/ruff/)
 
@@ -47,7 +47,7 @@ The OrionBelt Semantic Layer platform has two deployment modes. This MCP server 
 - **No business logic** — all tool calls delegate to the REST API (v1 endpoints)
 - **Dual-mode** — auto-detects single-model or multi-model API mode at startup
 - **Auto-session management** — creates an API session on first tool call, caches the ID (multi-model mode)
-- **23 tools** (single-model mode) or **25 tools** (multi-model mode) for querying, execution, discovery, diagrams, RDF/SPARQL, and format conversion
+- **22 tools** (single-model mode) or **25 tools** (multi-model mode) for querying, execution, discovery, diagrams, RDF/SPARQL, and format conversion
 - **3 prompts + 1 resource** for OBML reference and usage guidance
 
 <p align="center">
