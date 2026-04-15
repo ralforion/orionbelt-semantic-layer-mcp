@@ -1786,8 +1786,13 @@ def main() -> None:
     global _single_model_mode
 
     logging.basicConfig(level=settings.log_level.upper())
+    try:
+        _version = importlib.metadata.version("orionbelt-semantic-layer-mcp")
+    except importlib.metadata.PackageNotFoundError:
+        _version = "dev"
     logger.info(
-        "OrionBelt MCP Server (thin client) starting (transport=%s, api=%s)",
+        "OrionBelt MCP Server v%s starting (transport=%s, api=%s)",
+        _version,
         settings.mcp_transport,
         settings.api_base_url,
     )
