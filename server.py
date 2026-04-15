@@ -1791,7 +1791,7 @@ def main() -> None:
     except importlib.metadata.PackageNotFoundError:
         _version = "dev"
     logger.info(
-        "OrionBelt MCP Server v%s starting (transport=%s, api=%s)",
+        "OrionBelt Semantic Layer MCP Server v%s starting (transport=%s, api=%s)",
         _version,
         settings.mcp_transport,
         settings.api_base_url,
