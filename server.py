@@ -1790,12 +1790,11 @@ def main() -> None:
         _version = importlib.metadata.version("orionbelt-semantic-layer-mcp")
     except importlib.metadata.PackageNotFoundError:
         _version = "dev"
-    logger.info(
-        "OrionBelt Semantic Layer MCP Server v%s starting (transport=%s, api=%s)",
-        _version,
-        settings.mcp_transport,
-        settings.api_base_url,
-    )
+
+    logger.info("=" * 60)
+    logger.info("OrionBelt Semantic Layer MCP Server v%s", _version)
+    logger.info("Thin MCP server — delegates to OrionBelt Semantic Layer REST API")
+    logger.info("=" * 60)
 
     _check_api_health()
 
@@ -1824,9 +1823,25 @@ def main() -> None:
             logger.error("Cannot reach API to validate pre-loaded model: %s", exc)
             raise SystemExit(1) from None
         _register_single_model_tools()
+        tool_count = 22
     else:
         logger.info("Multi-model mode — using session-scoped endpoints")
         _register_multi_model_tools()
+        tool_count = 25
+
+    logger.info("")
+    logger.info("Configuration:")
+    logger.info("  API URL:    %s", settings.api_base_url)
+    logger.info("  Transport:  %s", settings.mcp_transport)
+    if settings.mcp_transport != "stdio":
+        logger.info("  Host:       %s", settings.mcp_server_host)
+        logger.info("  Port:       %s", settings.mcp_server_port)
+    logger.info("  Log Level:  %s", settings.log_level)
+    logger.info("  Timeout:    %ss", settings.api_timeout)
+    logger.info("")
+    logger.info("Registered %d MCP tools (%s mode)", tool_count,
+                "single-model" if _single_model_mode else "multi-model")
+    logger.info("")
 
     try:
         if settings.mcp_transport == "stdio":
