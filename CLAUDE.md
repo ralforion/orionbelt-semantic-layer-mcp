@@ -121,6 +121,7 @@ The API supports three **metric types** and **measure filters**:
 - **Cumulative metrics** — running total, rolling window (`window: N`), or grain-to-date (`grainToDate: month`)
 - **Period-over-Period (PoP) metrics** — compare a measure across time periods (YoY, MoM, QoQ) with configurable comparison (`percentChange`, `difference`, `ratio`, `previousValue`)
 - **Measure filters** — restrict aggregation to matching rows via `CASE WHEN` wrapping; supports leaf filters and nested AND/OR/NOT groups
+- **Static model filters** — model-level WHERE filters applied to every query; defined via `filters` array with `dataObject`, `column`, `operator`, `value`/`values`; duplicate query-time filters are auto-deduplicated; dates coerced to ISO 8601
 - **Ratio pattern** — derived metrics referencing filtered measures (e.g. `{[US Revenue]} / {[Revenue]}`)
 
 All features are handled by the API — the MCP server passes through OBML YAML and query parameters unchanged.

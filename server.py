@@ -576,6 +576,25 @@ def _impl_describe_model(model_id: str | None = None) -> str:
                 lines.append(f"    synonyms: {', '.join(met['synonyms'])}")
         lines.append("")
 
+    # Static filters
+    filters = desc.get("filters", [])
+    if filters:
+        lines.append("STATIC FILTERS (applied to every query):")
+        for f in filters:
+            val = f.get("value")
+            vals = f.get("values")
+            if vals:
+                val_str = f"values: {vals}"
+            elif val is not None:
+                val_str = f"value: {val}"
+            else:
+                val_str = ""
+            lines.append(
+                f"  {f.get('data_object', '?')}.{f.get('column', '?')} "
+                f"{f.get('operator', '?')} {val_str}"
+            )
+        lines.append("")
+
     return "\n".join(lines)
 
 
@@ -1646,6 +1665,10 @@ _DEBUG_VALIDATION_TEXT = """\
 - `MEASURE_FILTER_PARSE_ERROR`: Cannot parse a measure filter.
   Fix: Each filter needs `column` ({dataObject, column}), `operator`, and
   `values`.  Filter groups need `logic` (and/or) and `filters` array.
+- `FILTER_PARSE_ERROR`: Cannot parse a static model filter.
+  Fix: Each static filter needs `dataObject`, `column`, and `operator`.
+  Use `value` for single-value operators, `values` for list operators (inlist, between).
+  Dates must be ISO 8601 strings (e.g. '2026-01-01').
 
 ## Reference Errors
 
