@@ -1697,10 +1697,6 @@ references unknown column.
 
 ## Semantic Errors
 
-- `UNKNOWN_FILTER_DATA_OBJECT`: Measure filter references non-existent data object.
-  Fix: Check `column.dataObject` value matches a data object name.
-- `UNKNOWN_FILTER_COLUMN`: Measure filter references non-existent column.
-  Fix: Check `column.column` value matches a column in the referenced data object.
 - `DUPLICATE_IDENTIFIER`: Duplicate name across data objects, dimensions, measures, or metrics.
   Fix: All names must be unique across the model.
 - `CYCLIC_JOIN`: Join graph contains a cycle.
@@ -1729,9 +1725,6 @@ references unknown column.
   Fix: Check unit (day/week/month/year), count, direction, include_current.
 - `UNKNOWN_FILTER_FIELD`: Filter field is not a dimension (WHERE) or measure (HAVING).
   Fix: Check field name matches a dimension or measure in the model.
-- `UNREACHABLE_FILTER_FIELD`: Filter dimension's data object is not reachable \
-from the query's join graph.
-  Fix: Ensure the data object is connected via joins to the queried tables.
 - `UNKNOWN_ORDER_BY_FIELD`: ORDER BY field is not a dimension or measure in the query's SELECT.
   Fix: Use a field name from `select.dimensions` or `select.measures`, or a numeric position.
 - `INVALID_ORDER_BY_POSITION`: Numeric ORDER BY position is out of range.
