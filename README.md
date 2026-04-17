@@ -7,7 +7,7 @@
 
 <p align="center"><strong>Thin MCP server that delegates to the OrionBelt Semantic Layer REST API</strong></p>
 
-[![Version 1.5.4](https://img.shields.io/badge/version-1.5.4-purple.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/releases)
+[![Version 1.5.5](https://img.shields.io/badge/version-1.5.5-purple.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/releases)
 [![OrionBelt Semantic Layer 1.5](https://img.shields.io/badge/OrionBelt_Semantic_Layer-1.5-0054A6.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/blob/main/LICENSE)
@@ -179,7 +179,7 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 2. **Load model** — call `load_model(model_yaml)` to get a `model_id`
 3. **Explore** — call `describe_model(model_id)` or use discovery tools (`list_dimensions`, `find_artefacts`, `explain_artefact`, etc.)
 4. **Query** — call `compile_query(model_id, dimensions=[...], measures=[...])` to generate SQL
-5. **Execute** — call `execute_query(model_id, dimensions=[...], measures=[...])` to run SQL and get results (requires `FLIGHT_ENABLED=true` on the API)
+5. **Execute** — call `execute_query(model_id, dimensions=[...], measures=[...])` to run SQL and get results (requires `QUERY_EXECUTE=true` on the API)
 
 ## Integration Guides
 

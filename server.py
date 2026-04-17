@@ -396,7 +396,7 @@ def get_settings() -> str:
     """Get API configuration settings.
 
     Returns whether the API is in single-model mode, the session TTL,
-    Flight SQL status, and any pre-loaded model YAML.
+    query execution status, and any pre-loaded model YAML.
     """
     resp = _api_request("GET", f"{_API_V1}/settings", retry_on_expired=False)
     data = _parse_json(resp)
@@ -411,15 +411,7 @@ def get_settings() -> str:
         lines.append(f"  Max models/session: {data['max_models_per_session']}")
     if data.get("model_yaml"):
         lines.append(f"  Pre-loaded model: yes ({len(data['model_yaml'])} chars)")
-    query_exec = data.get("query_execute", False)
-    flight = data.get("flight")
-    if flight:
-        lines.append(f"  Flight SQL: enabled (port {flight.get('port', 'N/A')})")
-        lines.append(f"  DB vendor: {flight.get('db_vendor', 'N/A')}")
-        lines.append(f"  Auth mode: {flight.get('auth_mode', 'none')}")
-    else:
-        lines.append("  Flight SQL: not enabled")
-    if query_exec or flight:
+    if data.get("query_execute", False):
         lines.append("  Query execution: available (use execute_query tool)")
     else:
         lines.append("  Query execution: not available")
@@ -1848,7 +1840,7 @@ def _detect_api_mode() -> tuple[bool, bool]:
         resp.raise_for_status()
         data = resp.json()
         single = data.get("single_model_mode", False)
-        can_execute = bool(data.get("query_execute", False) or data.get("flight"))
+        can_execute = bool(data.get("query_execute", False))
         return single, can_execute
     except (httpx.HTTPError, ValueError, KeyError):
         logger.warning("Could not detect API mode — defaulting to multi-model, no execute")

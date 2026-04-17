@@ -68,7 +68,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ### Added
 - **`execute_query` tool** — compile and execute a query in one call,
   returning SQL plus result data (`POST /v1/sessions/{id}/query/execute`).
-  Requires `QUERY_EXECUTE` or `FLIGHT_ENABLED` on the API
+  Requires `QUERY_EXECUTE` on the API
 - Flight SQL capability information surfaced via `get_settings`
 - OBML language features: filter groups (nested AND/OR/NOT), qualified
   column references, description fields on artefacts, and `numClass`

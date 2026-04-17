@@ -1850,8 +1850,8 @@ def test_detect_api_mode_query_execute(mock_api: respx.MockRouter):
     assert execute is True
 
 
-def test_detect_api_mode_flight_enabled(mock_api: respx.MockRouter):
-    """_detect_api_mode returns query_execute=True when flight is configured."""
+def test_detect_api_mode_flight_alone_not_enough(mock_api: respx.MockRouter):
+    """_detect_api_mode returns query_execute=False when only flight is configured."""
     mock_api.get("/v1/settings").mock(
         return_value=httpx.Response(
             200,
@@ -1861,7 +1861,7 @@ def test_detect_api_mode_flight_enabled(mock_api: respx.MockRouter):
 
     single, execute = server._detect_api_mode()
     assert single is False
-    assert execute is True
+    assert execute is False
 
 
 def test_detect_api_mode_fallback(monkeypatch):
