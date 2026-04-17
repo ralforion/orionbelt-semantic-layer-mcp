@@ -25,6 +25,7 @@ import importlib.metadata
 import json
 import logging
 import threading
+from contextlib import asynccontextmanager
 from typing import Literal, NoReturn
 from urllib.parse import quote
 
@@ -67,7 +68,34 @@ _API_V1 = "/v1"
 # FastMCP server instance
 # ---------------------------------------------------------------------------
 
-mcp = FastMCP("OrionBelt Semantic Layer")
+
+@asynccontextmanager
+async def _server_lifespan(server):
+    """Register mode-dependent tools when the server starts.
+
+    Runs at actual server startup (not import time), guaranteeing the API
+    is reachable for mode detection.  Used by both ``mcp.run()`` and
+    Horizon's entrypoint (``server.py:mcp``).
+    """
+    _setup_mode_tools()
+    yield
+    # Best-effort session cleanup on shutdown
+    global _http_client, _api_session_id
+    if _api_session_id is not None:
+        try:
+            client = _get_client()
+            client.delete(f"{_API_V1}/sessions/{_api_session_id}")
+            logger.info("Cleaned up API session: %s", _api_session_id)
+        except Exception:
+            logger.debug("Session cleanup failed (API TTL will handle it)")
+        finally:
+            _api_session_id = None
+    if _http_client is not None:
+        _http_client.close()
+        _http_client = None
+
+
+mcp = FastMCP("OrionBelt Semantic Layer", lifespan=_server_lifespan)
 
 # ---------------------------------------------------------------------------
 # Internal state
@@ -1778,15 +1806,6 @@ mcp.add_prompt(
 
 
 # ---------------------------------------------------------------------------
-# Import-time tool registration (for Horizon entrypoint ``server.py:mcp``)
-# ---------------------------------------------------------------------------
-
-try:
-    _setup_mode_tools()
-except Exception:
-    logger.debug("Deferred tool registration to main() — API not yet available")
-
-# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -1892,23 +1911,6 @@ def main() -> None:
             )
     except KeyboardInterrupt:
         logger.info("Shutting down…")
-    finally:
-        global _http_client, _api_session_id
-
-        # Best-effort session cleanup
-        if _api_session_id is not None:
-            try:
-                client = _get_client()
-                client.delete(f"{_API_V1}/sessions/{_api_session_id}")
-                logger.info("Cleaned up API session: %s", _api_session_id)
-            except Exception:
-                logger.debug("Session cleanup failed (API TTL will handle it)")
-            finally:
-                _api_session_id = None
-
-        if _http_client is not None:
-            _http_client.close()
-            _http_client = None
 
 
 if __name__ == "__main__":
