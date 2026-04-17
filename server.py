@@ -105,6 +105,7 @@ _state_lock = threading.RLock()
 _api_session_id: str | None = None
 _http_client: httpx.Client | None = None
 _single_model_mode: bool = False
+_query_execute_enabled: bool = False
 _tools_registered: bool = False
 
 # ---------------------------------------------------------------------------
@@ -1038,43 +1039,6 @@ def _register_single_model_tools() -> None:
         return _impl_compile_query(None, dialect, dimensions, measures, query_json, use_path_names)
 
     @mcp.tool
-    def execute_query(
-        dialect: str = "postgres",
-        dimensions: list[str] | None = None,
-        measures: list[str] | None = None,
-        query_json: str | None = None,
-        use_path_names: list[dict[str, str]] | None = None,
-    ) -> str:
-        """Compile and execute a semantic query, returning SQL and result data.
-
-        Requires ``QUERY_EXECUTE=true`` or ``FLIGHT_ENABLED=true``.
-        Use ``get_settings`` to check availability.
-
-        Two modes (same as ``compile_query``):
-
-        **Simple mode**::
-
-            execute_query(dimensions=["Country"], measures=["Revenue"])
-
-        **Full mode**::
-
-            execute_query(
-                query_json='{"select":{"dimensions":["Country"],"measures":["Revenue"]},"limit":100}'
-            )
-
-        If no ``limit`` is specified, a server-side default row limit is enforced.
-
-        Args:
-            dialect: Target SQL dialect.
-            dimensions: List of dimension names (simple mode).
-            measures: List of measure names (simple mode).
-            query_json: Full query object as JSON string (full mode).
-            use_path_names: List of {source, target, pathName} dicts for
-                selecting secondary joins (simple mode).
-        """
-        return _impl_execute_query(None, dialect, dimensions, measures, query_json, use_path_names)
-
-    @mcp.tool
     def get_model_diagram(
         show_columns: bool = True,
         theme: str = "default",
@@ -1217,16 +1181,19 @@ def _register_single_model_tools() -> None:
 
 def _setup_mode_tools() -> None:
     """Detect API mode and register the appropriate tool set. Idempotent."""
-    global _single_model_mode, _tools_registered
+    global _single_model_mode, _query_execute_enabled, _tools_registered
     if _tools_registered:
         return
-    _single_model_mode = _detect_single_model_mode()
+    _single_model_mode, _query_execute_enabled = _detect_api_mode()
     if _single_model_mode:
         logger.info("Single-model mode detected — using shortcut endpoints")
         _register_single_model_tools()
     else:
         logger.info("Multi-model mode — using session-scoped endpoints")
         _register_multi_model_tools()
+    if _query_execute_enabled:
+        logger.info("Query execution enabled — registering execute_query tool")
+        _register_execute_query_tool()
     _tools_registered = True
 
 
@@ -1315,48 +1282,6 @@ def _register_multi_model_tools() -> None:
                 selecting secondary joins (simple mode).
         """
         return _impl_compile_query(
-            model_id, dialect, dimensions, measures, query_json, use_path_names
-        )
-
-    @mcp.tool
-    def execute_query(
-        model_id: str,
-        dialect: str = "postgres",
-        dimensions: list[str] | None = None,
-        measures: list[str] | None = None,
-        query_json: str | None = None,
-        use_path_names: list[dict[str, str]] | None = None,
-    ) -> str:
-        """Compile and execute a semantic query, returning SQL and result data.
-
-        Requires ``QUERY_EXECUTE=true`` or ``FLIGHT_ENABLED=true``.
-        Use ``get_settings`` to check availability.
-
-        Two modes (same as ``compile_query``):
-
-        **Simple mode**::
-
-            execute_query(model_id="abc12345", dimensions=["Country"], measures=["Revenue"])
-
-        **Full mode**::
-
-            execute_query(
-                model_id="abc12345",
-                query_json='{"select":{"dimensions":["Country"],"measures":["Revenue"]},"limit":100}'
-            )
-
-        If no ``limit`` is specified, a server-side default row limit is enforced.
-
-        Args:
-            model_id: The id returned by ``load_model``.
-            dialect: Target SQL dialect.
-            dimensions: List of dimension names (simple mode).
-            measures: List of measure names (simple mode).
-            query_json: Full query object as JSON string (full mode).
-            use_path_names: List of {source, target, pathName} dicts for
-                selecting secondary joins (simple mode).
-        """
-        return _impl_execute_query(
             model_id, dialect, dimensions, measures, query_json, use_path_names
         )
 
@@ -1553,6 +1478,89 @@ def _register_multi_model_tools() -> None:
             query: SPARQL query string (SELECT or ASK).
         """
         return _impl_sparql_query(model_id, query)
+
+
+def _register_execute_query_tool() -> None:
+    """Register execute_query tool (only when query execution is available)."""
+
+    if _single_model_mode:
+
+        @mcp.tool
+        def execute_query(
+            dialect: str = "postgres",
+            dimensions: list[str] | None = None,
+            measures: list[str] | None = None,
+            query_json: str | None = None,
+            use_path_names: list[dict[str, str]] | None = None,
+        ) -> str:
+            """Compile and execute a semantic query, returning SQL and result data.
+
+            Two modes (same as ``compile_query``):
+
+            **Simple mode**::
+
+                execute_query(dimensions=["Country"], measures=["Revenue"])
+
+            **Full mode**::
+
+                execute_query(
+                    query_json='{"select":{"dimensions":["Country"],"measures":["Revenue"]},"limit":100}'
+                )
+
+            If no ``limit`` is specified, a server-side default row limit is enforced.
+
+            Args:
+                dialect: Target SQL dialect.
+                dimensions: List of dimension names (simple mode).
+                measures: List of measure names (simple mode).
+                query_json: Full query object as JSON string (full mode).
+                use_path_names: List of {source, target, pathName} dicts for
+                    selecting secondary joins (simple mode).
+            """
+            return _impl_execute_query(
+                None, dialect, dimensions, measures, query_json, use_path_names
+            )
+
+    else:
+
+        @mcp.tool
+        def execute_query(
+            model_id: str,
+            dialect: str = "postgres",
+            dimensions: list[str] | None = None,
+            measures: list[str] | None = None,
+            query_json: str | None = None,
+            use_path_names: list[dict[str, str]] | None = None,
+        ) -> str:
+            """Compile and execute a semantic query, returning SQL and result data.
+
+            Two modes (same as ``compile_query``):
+
+            **Simple mode**::
+
+                execute_query(model_id="abc12345", dimensions=["Country"], measures=["Revenue"])
+
+            **Full mode**::
+
+                execute_query(
+                    model_id="abc12345",
+                    query_json='{"select":{"dimensions":["Country"],"measures":["Revenue"]},"limit":100}'
+                )
+
+            If no ``limit`` is specified, a server-side default row limit is enforced.
+
+            Args:
+                model_id: The id returned by ``load_model``.
+                dialect: Target SQL dialect.
+                dimensions: List of dimension names (simple mode).
+                measures: List of measure names (simple mode).
+                query_json: Full query object as JSON string (full mode).
+                use_path_names: List of {source, target, pathName} dicts for
+                    selecting secondary joins (simple mode).
+            """
+            return _impl_execute_query(
+                model_id, dialect, dimensions, measures, query_json, use_path_names
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1828,17 +1836,23 @@ def _check_api_health() -> None:
         raise SystemExit(1) from None
 
 
-def _detect_single_model_mode() -> bool:
-    """Query the API to detect whether single-model mode is active."""
+def _detect_api_mode() -> tuple[bool, bool]:
+    """Query the API to detect single-model mode and query execution support.
+
+    Returns:
+        (single_model_mode, query_execute_enabled)
+    """
     client = _get_client()
     try:
         resp = client.get(f"{_API_V1}/settings")
         resp.raise_for_status()
         data = resp.json()
-        return data.get("single_model_mode", False)
+        single = data.get("single_model_mode", False)
+        can_execute = bool(data.get("query_execute", False) or data.get("flight"))
+        return single, can_execute
     except (httpx.HTTPError, ValueError, KeyError):
-        logger.warning("Could not detect single-model mode — defaulting to multi-model")
-        return False
+        logger.warning("Could not detect API mode — defaulting to multi-model, no execute")
+        return False, False
 
 
 def main() -> None:
@@ -1881,9 +1895,9 @@ def main() -> None:
         except httpx.HTTPError as exc:
             logger.error("Cannot reach API to validate pre-loaded model: %s", exc)
             raise SystemExit(1) from None
-        tool_count = 22
+        tool_count = 22 if _query_execute_enabled else 21
     else:
-        tool_count = 25
+        tool_count = 25 if _query_execute_enabled else 24
 
     logger.info("")
     logger.info("Configuration:")
