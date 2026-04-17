@@ -1808,8 +1808,8 @@ def test_health_check_server_error(mock_api: respx.MockRouter):
 # ---------------------------------------------------------------------------
 
 
-def test_detect_single_model_mode_true(mock_api: respx.MockRouter):
-    """_detect_single_model_mode returns True when API says so."""
+def test_detect_api_mode_single_model(mock_api: respx.MockRouter):
+    """_detect_api_mode returns (True, False) for single-model without execute."""
     mock_api.get("/v1/settings").mock(
         return_value=httpx.Response(
             200,
@@ -1817,11 +1817,13 @@ def test_detect_single_model_mode_true(mock_api: respx.MockRouter):
         )
     )
 
-    assert server._detect_single_model_mode() is True
+    single, execute = server._detect_api_mode()
+    assert single is True
+    assert execute is False
 
 
-def test_detect_single_model_mode_false(mock_api: respx.MockRouter):
-    """_detect_single_model_mode returns False for multi-model."""
+def test_detect_api_mode_multi_model(mock_api: respx.MockRouter):
+    """_detect_api_mode returns (False, False) for multi-model without execute."""
     mock_api.get("/v1/settings").mock(
         return_value=httpx.Response(
             200,
@@ -1829,14 +1831,46 @@ def test_detect_single_model_mode_false(mock_api: respx.MockRouter):
         )
     )
 
-    assert server._detect_single_model_mode() is False
+    single, execute = server._detect_api_mode()
+    assert single is False
+    assert execute is False
 
 
-def test_detect_single_model_mode_fallback(monkeypatch):
-    """_detect_single_model_mode defaults to False on error."""
+def test_detect_api_mode_query_execute(mock_api: respx.MockRouter):
+    """_detect_api_mode returns query_execute=True when QUERY_EXECUTE is set."""
+    mock_api.get("/v1/settings").mock(
+        return_value=httpx.Response(
+            200,
+            json={"single_model_mode": False, "query_execute": True},
+        )
+    )
+
+    single, execute = server._detect_api_mode()
+    assert single is False
+    assert execute is True
+
+
+def test_detect_api_mode_flight_enabled(mock_api: respx.MockRouter):
+    """_detect_api_mode returns query_execute=True when flight is configured."""
+    mock_api.get("/v1/settings").mock(
+        return_value=httpx.Response(
+            200,
+            json={"single_model_mode": False, "flight": {"port": 8815}},
+        )
+    )
+
+    single, execute = server._detect_api_mode()
+    assert single is False
+    assert execute is True
+
+
+def test_detect_api_mode_fallback(monkeypatch):
+    """_detect_api_mode defaults to (False, False) on error."""
     monkeypatch.setattr(server.settings, "api_base_url", "http://127.0.0.1:1")
 
-    assert server._detect_single_model_mode() is False
+    single, execute = server._detect_api_mode()
+    assert single is False
+    assert execute is False
 
 
 # ---------------------------------------------------------------------------
