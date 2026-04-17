@@ -77,6 +77,7 @@ _state_lock = threading.RLock()
 _api_session_id: str | None = None
 _http_client: httpx.Client | None = None
 _single_model_mode: bool = False
+_tools_registered: bool = False
 
 # ---------------------------------------------------------------------------
 # HTTP client & session management
@@ -1186,6 +1187,21 @@ def _register_single_model_tools() -> None:
         """
         return _impl_sparql_query(None, query)
 
+def _setup_mode_tools() -> None:
+    """Detect API mode and register the appropriate tool set. Idempotent."""
+    global _single_model_mode, _tools_registered
+    if _tools_registered:
+        return
+    _single_model_mode = _detect_single_model_mode()
+    if _single_model_mode:
+        logger.info("Single-model mode detected — using shortcut endpoints")
+        _register_single_model_tools()
+    else:
+        logger.info("Multi-model mode — using session-scoped endpoints")
+        _register_multi_model_tools()
+    _tools_registered = True
+
+
 def _register_multi_model_tools() -> None:
     """Register tools for multi-model mode (requires model_id, session-scoped)."""
 
@@ -1762,6 +1778,15 @@ mcp.add_prompt(
 
 
 # ---------------------------------------------------------------------------
+# Import-time tool registration (for Horizon entrypoint ``server.py:mcp``)
+# ---------------------------------------------------------------------------
+
+try:
+    _setup_mode_tools()
+except Exception:
+    logger.debug("Deferred tool registration to main() — API not yet available")
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -1814,10 +1839,9 @@ def main() -> None:
 
     _check_api_health()
 
-    # Detect mode and register appropriate tools
-    _single_model_mode = _detect_single_model_mode()
+    _setup_mode_tools()
+
     if _single_model_mode:
-        logger.info("Single-model mode detected — using shortcut endpoints")
         # Verify the pre-loaded model is valid and reachable (fail fast)
         client = _get_client()
         try:
@@ -1838,11 +1862,8 @@ def main() -> None:
         except httpx.HTTPError as exc:
             logger.error("Cannot reach API to validate pre-loaded model: %s", exc)
             raise SystemExit(1) from None
-        _register_single_model_tools()
         tool_count = 22
     else:
-        logger.info("Multi-model mode — using session-scoped endpoints")
-        _register_multi_model_tools()
         tool_count = 25
 
     logger.info("")
