@@ -630,11 +630,27 @@ def _impl_describe_model(model_id: str | None = None) -> str:
     return "\n".join(lines)
 
 
+def _parse_json_param(value: str | None, name: str) -> list | dict | None:
+    """Parse an optional JSON string parameter."""
+    if value is None:
+        return None
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ToolError(f"Invalid {name} JSON: {exc}") from exc
+
+
 def _build_query_object(
     dimensions: list[str] | None,
     measures: list[str] | None,
     query_json: str | None,
     use_path_names: list[dict[str, str]] | None,
+    where: str | None = None,
+    having: str | None = None,
+    order_by: str | None = None,
+    limit: int | None = None,
+    offset: int | None = None,
+    dimensions_exclude: bool | None = None,
 ) -> dict:
     """Build a query dict from tool arguments (shared by compile/execute)."""
     if query_json is not None:
@@ -651,10 +667,25 @@ def _build_query_object(
         }
         if use_path_names:
             query["usePathNames"] = use_path_names
+        parsed_where = _parse_json_param(where, "where")
+        if parsed_where is not None:
+            query["where"] = parsed_where
+        parsed_having = _parse_json_param(having, "having")
+        if parsed_having is not None:
+            query["having"] = parsed_having
+        parsed_order = _parse_json_param(order_by, "order_by")
+        if parsed_order is not None:
+            query["order_by"] = parsed_order
+        if limit is not None:
+            query["limit"] = limit
+        if offset is not None:
+            query["offset"] = offset
+        if dimensions_exclude is not None:
+            query["dimensionsExclude"] = dimensions_exclude
         return query
     else:
         raise ToolError(
-            "Provide either dimensions/measures (simple mode) or query_json (full mode)."
+            "Provide either dimensions/measures or query_json."
         )
 
 
@@ -708,10 +739,20 @@ def _impl_compile_query(
     measures: list[str] | None,
     query_json: str | None,
     use_path_names: list[dict[str, str]] | None,
+    where: str | None = None,
+    having: str | None = None,
+    order_by: str | None = None,
+    limit: int | None = None,
+    offset: int | None = None,
+    dimensions_exclude: bool | None = None,
 ) -> str:
     """Compile a semantic query (shared implementation)."""
     logger.info("compile_query called (model_id=%s, dialect=%s)", model_id, dialect)
-    query = _build_query_object(dimensions, measures, query_json, use_path_names)
+    query = _build_query_object(
+        dimensions, measures, query_json, use_path_names,
+        where=where, having=having, order_by=order_by,
+        limit=limit, offset=offset, dimensions_exclude=dimensions_exclude,
+    )
 
     if model_id is None:
         # Single-model shortcut — query body goes directly, dialect as param
@@ -733,10 +774,20 @@ def _impl_execute_query(
     measures: list[str] | None,
     query_json: str | None,
     use_path_names: list[dict[str, str]] | None,
+    where: str | None = None,
+    having: str | None = None,
+    order_by: str | None = None,
+    limit: int | None = None,
+    offset: int | None = None,
+    dimensions_exclude: bool | None = None,
 ) -> str:
     """Compile and execute a semantic query (shared implementation)."""
     logger.info("execute_query called (model_id=%s, dialect=%s)", model_id, dialect)
-    query = _build_query_object(dimensions, measures, query_json, use_path_names)
+    query = _build_query_object(
+        dimensions, measures, query_json, use_path_names,
+        where=where, having=having, order_by=order_by,
+        limit=limit, offset=offset, dimensions_exclude=dimensions_exclude,
+    )
 
     if model_id is None:
         # Single-model shortcut — query body goes directly, dialect as param
@@ -1008,37 +1059,53 @@ def _register_single_model_tools() -> None:
         dialect: str = "postgres",
         dimensions: list[str] | None = None,
         measures: list[str] | None = None,
+        where: str | None = None,
+        having: str | None = None,
+        order_by: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+        dimensions_exclude: bool | None = None,
         query_json: str | None = None,
         use_path_names: list[dict[str, str]] | None = None,
     ) -> str:
         """Compile a semantic query to SQL.
 
-        Two modes:
-
-        **Simple mode** — pass ``dimensions`` and ``measures`` lists directly::
-
-            compile_query(dimensions=["Country"], measures=["Revenue"])
-
-        **Full mode** — pass a complete query as JSON via ``query_json``::
+        Pass ``dimensions`` and/or ``measures`` with optional filtering,
+        ordering, and pagination::
 
             compile_query(
-                query_json='{"select":{"dimensions":["Country"],"measures":["Revenue"]}}'
+                dimensions=["Country"],
+                measures=["Revenue"],
+                where='[{"field": "Country", "op": "equals", "value": "US"}]',
+                order_by='[{"field": "Revenue", "direction": "desc"}]',
+                limit=10,
             )
 
-        The full query JSON supports: ``select``, ``where``, ``having``,
-        ``order_by``, ``limit``, ``offset``, ``usePathNames``,
-        ``dimensionsExclude``.  Use ``describe_model`` first to discover
-        available names.
+        Alternatively, pass a complete query as JSON via ``query_json``
+        (overrides all other query parameters).
+
+        Use ``describe_model`` first to discover available names.
 
         Args:
             dialect: Target SQL dialect.
-            dimensions: List of dimension names (simple mode).
-            measures: List of measure names (simple mode).
-            query_json: Full query object as JSON string (full mode).
+            dimensions: List of dimension names.
+            measures: List of measure names.
+            where: Filters as JSON array of filter objects.
+            having: Measure filters as JSON array of filter objects.
+            order_by: Ordering as JSON array of {field, direction} objects.
+            limit: Maximum number of rows to return.
+            offset: Number of rows to skip.
+            dimensions_exclude: If true, return dimension combinations that
+                do NOT exist (anti-join).
+            query_json: Complete query as JSON string (overrides above).
             use_path_names: List of {source, target, pathName} dicts for
-                selecting secondary joins (simple mode).
+                selecting secondary joins.
         """
-        return _impl_compile_query(None, dialect, dimensions, measures, query_json, use_path_names)
+        return _impl_compile_query(
+            None, dialect, dimensions, measures, query_json, use_path_names,
+            where=where, having=having, order_by=order_by,
+            limit=limit, offset=offset, dimensions_exclude=dimensions_exclude,
+        )
 
     @mcp.tool
     def get_model_diagram(
@@ -1204,34 +1271,74 @@ def _register_multi_model_tools() -> None:
 
     @mcp.tool
     def load_model(
-        model_yaml: str | None = None,
-        extends: list[str] | None = None,
+        model: dict | str | None = None,
+        extends: list[dict] | str | None = None,
         inherits: str | None = None,
     ) -> str:
-        """Parse and store user-provided OBML YAML. Returns a model_id.
+        """Load a semantic model definition. Returns a model_id.
 
-        ``model_yaml`` is mandatory. Do NOT call this tool unless the user or
-        LLM has provided OBML YAML content in the conversation.
-        Call ``get_obml_reference()`` to learn the format.
+        ``model`` is mandatory — pass the OBML model as a JSON object::
+
+            load_model(model={
+                "version": 1.0,
+                "dataObjects": {
+                    "Sales": {
+                        "code": "sales", "schema": "public",
+                        "columns": {"Amount": {"abstractType": "float"}}
+                    }
+                },
+                "dimensions": {
+                    "Country": {
+                        "dataObject": "Sales", "column": "Country",
+                        "resultType": "string"
+                    }
+                },
+                "measures": {
+                    "Revenue": {
+                        "aggregation": "SUM", "resultType": "float",
+                        "columns": [{"dataObject": "Sales", "column": "Amount"}]
+                    }
+                }
+            })
+
+        Keys use camelCase: ``dataObjects``, ``joinType``, ``columnsFrom``,
+        ``resultType``, ``abstractType``, ``timeGrain``.
+
+        Column ``abstractType`` values: string, int, float, date, boolean.
+        Aggregation values: SUM, COUNT, AVG, MIN, MAX, count_distinct, any_value.
+        Measure expressions: ``{[DataObject].[Column]}`` syntax.
+        Metric expressions: ``{[MeasureName]}`` syntax.
+
+        Call ``get_obml_reference()`` for the full specification.
 
         Args:
-            model_yaml: (mandatory) Complete OBML YAML string (starts with version: 1.0).
-            extends: Optional list of OBML YAML strings with analytical
-                fragments (dimensions, measures, metrics) to merge into the
-                model before loading.
+            model: (mandatory) OBML model as a JSON object (top-level keys:
+                version, dataObjects, dimensions, measures, metrics, joins).
+            extends: Optional list of analytical fragment objects (dimensions,
+                measures, metrics) to merge into the model before loading.
             inherits: Optional model_id of an already-loaded parent model in
                 the session.  The child model inherits the parent's data
                 objects and joins, adding or overriding analytical artefacts.
         """
-        if not model_yaml:
+        if not model:
             raise ToolError(
-                "model_yaml is mandatory — provide the complete OBML YAML content. "
-                "Call get_obml_reference() first to learn the correct format."
+                "model is mandatory — provide the OBML model as a JSON object. "
+                "Call get_obml_reference() first to learn the structure."
             )
-        logger.info("load_model called (yaml length=%d)", len(model_yaml))
-        body: dict = {"model_yaml": model_yaml}
+        if isinstance(model, str):
+            try:
+                model = json.loads(model)
+            except json.JSONDecodeError as exc:
+                raise ToolError(f"Invalid model JSON string: {exc}") from exc
+        logger.info("load_model called")
+        body: dict = {"model_json": model}
         if extends:
-            body["extends"] = extends
+            if isinstance(extends, str):
+                try:
+                    extends = json.loads(extends)
+                except json.JSONDecodeError as exc:
+                    raise ToolError(f"Invalid extends JSON string: {exc}") from exc
+            body["extends_json"] = extends
         if inherits:
             body["inherits"] = inherits
         resp = _session_request("POST", "/models", json_body=body)
@@ -1266,40 +1373,54 @@ def _register_multi_model_tools() -> None:
         dialect: str = "postgres",
         dimensions: list[str] | None = None,
         measures: list[str] | None = None,
+        where: str | None = None,
+        having: str | None = None,
+        order_by: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+        dimensions_exclude: bool | None = None,
         query_json: str | None = None,
         use_path_names: list[dict[str, str]] | None = None,
     ) -> str:
         """Compile a semantic query to SQL.
 
-        Two modes:
-
-        **Simple mode** — pass ``dimensions`` and ``measures`` lists directly::
-
-            compile_query(model_id="abc12345", dimensions=["Country"], measures=["Revenue"])
-
-        **Full mode** — pass a complete query as JSON via ``query_json``::
+        Pass ``dimensions`` and/or ``measures`` with optional filtering,
+        ordering, and pagination::
 
             compile_query(
                 model_id="abc12345",
-                query_json='{"select":{"dimensions":["Country"],"measures":["Revenue"]}}'
+                dimensions=["Country"],
+                measures=["Revenue"],
+                where='[{"field": "Country", "op": "equals", "value": "US"}]',
+                order_by='[{"field": "Revenue", "direction": "desc"}]',
+                limit=10,
             )
 
-        The full query JSON supports: ``select``, ``where``, ``having``,
-        ``order_by``, ``limit``, ``offset``, ``usePathNames``,
-        ``dimensionsExclude``.  Use ``describe_model`` first to discover
-        available names.
+        Alternatively, pass a complete query as JSON via ``query_json``
+        (overrides all other query parameters).
+
+        Use ``describe_model`` first to discover available names.
 
         Args:
             model_id: The id returned by ``load_model``.
             dialect: Target SQL dialect.
-            dimensions: List of dimension names (simple mode).
-            measures: List of measure names (simple mode).
-            query_json: Full query object as JSON string (full mode).
+            dimensions: List of dimension names.
+            measures: List of measure names.
+            where: Filters as JSON array of filter objects.
+            having: Measure filters as JSON array of filter objects.
+            order_by: Ordering as JSON array of {field, direction} objects.
+            limit: Maximum number of rows to return.
+            offset: Number of rows to skip.
+            dimensions_exclude: If true, return dimension combinations that
+                do NOT exist (anti-join).
+            query_json: Complete query as JSON string (overrides above).
             use_path_names: List of {source, target, pathName} dicts for
-                selecting secondary joins (simple mode).
+                selecting secondary joins.
         """
         return _impl_compile_query(
-            model_id, dialect, dimensions, measures, query_json, use_path_names
+            model_id, dialect, dimensions, measures, query_json, use_path_names,
+            where=where, having=having, order_by=order_by,
+            limit=limit, offset=offset, dimensions_exclude=dimensions_exclude,
         )
 
     @mcp.tool
@@ -1507,35 +1628,39 @@ def _register_execute_query_tool() -> None:
             dialect: str = "postgres",
             dimensions: list[str] | None = None,
             measures: list[str] | None = None,
+            where: str | None = None,
+            having: str | None = None,
+            order_by: str | None = None,
+            limit: int | None = None,
+            offset: int | None = None,
+            dimensions_exclude: bool | None = None,
             query_json: str | None = None,
             use_path_names: list[dict[str, str]] | None = None,
         ) -> str:
             """Compile and execute a semantic query, returning SQL and result data.
 
-            Two modes (same as ``compile_query``):
-
-            **Simple mode**::
-
-                execute_query(dimensions=["Country"], measures=["Revenue"])
-
-            **Full mode**::
-
-                execute_query(
-                    query_json='{"select":{"dimensions":["Country"],"measures":["Revenue"]},"limit":100}'
-                )
-
-            If no ``limit`` is specified, a server-side default row limit is enforced.
+            Same parameters as ``compile_query``.  If no ``limit`` is
+            specified, a server-side default row limit is enforced.
 
             Args:
                 dialect: Target SQL dialect.
-                dimensions: List of dimension names (simple mode).
-                measures: List of measure names (simple mode).
-                query_json: Full query object as JSON string (full mode).
+                dimensions: List of dimension names.
+                measures: List of measure names.
+                where: Filters as JSON array of filter objects.
+                having: Measure filters as JSON array of filter objects.
+                order_by: Ordering as JSON array of {field, direction} objects.
+                limit: Maximum number of rows to return.
+                offset: Number of rows to skip.
+                dimensions_exclude: If true, return dimension combinations that
+                    do NOT exist (anti-join).
+                query_json: Complete query as JSON string (overrides above).
                 use_path_names: List of {source, target, pathName} dicts for
-                    selecting secondary joins (simple mode).
+                    selecting secondary joins.
             """
             return _impl_execute_query(
-                None, dialect, dimensions, measures, query_json, use_path_names
+                None, dialect, dimensions, measures, query_json, use_path_names,
+                where=where, having=having, order_by=order_by,
+                limit=limit, offset=offset, dimensions_exclude=dimensions_exclude,
             )
 
     else:
@@ -1546,37 +1671,40 @@ def _register_execute_query_tool() -> None:
             dialect: str = "postgres",
             dimensions: list[str] | None = None,
             measures: list[str] | None = None,
+            where: str | None = None,
+            having: str | None = None,
+            order_by: str | None = None,
+            limit: int | None = None,
+            offset: int | None = None,
+            dimensions_exclude: bool | None = None,
             query_json: str | None = None,
             use_path_names: list[dict[str, str]] | None = None,
         ) -> str:
             """Compile and execute a semantic query, returning SQL and result data.
 
-            Two modes (same as ``compile_query``):
-
-            **Simple mode**::
-
-                execute_query(model_id="abc12345", dimensions=["Country"], measures=["Revenue"])
-
-            **Full mode**::
-
-                execute_query(
-                    model_id="abc12345",
-                    query_json='{"select":{"dimensions":["Country"],"measures":["Revenue"]},"limit":100}'
-                )
-
-            If no ``limit`` is specified, a server-side default row limit is enforced.
+            Same parameters as ``compile_query``.  If no ``limit`` is
+            specified, a server-side default row limit is enforced.
 
             Args:
                 model_id: The id returned by ``load_model``.
                 dialect: Target SQL dialect.
-                dimensions: List of dimension names (simple mode).
-                measures: List of measure names (simple mode).
-                query_json: Full query object as JSON string (full mode).
+                dimensions: List of dimension names.
+                measures: List of measure names.
+                where: Filters as JSON array of filter objects.
+                having: Measure filters as JSON array of filter objects.
+                order_by: Ordering as JSON array of {field, direction} objects.
+                limit: Maximum number of rows to return.
+                offset: Number of rows to skip.
+                dimensions_exclude: If true, return dimension combinations that
+                    do NOT exist (anti-join).
+                query_json: Complete query as JSON string (overrides above).
                 use_path_names: List of {source, target, pathName} dicts for
-                    selecting secondary joins (simple mode).
+                    selecting secondary joins.
             """
             return _impl_execute_query(
-                model_id, dialect, dimensions, measures, query_json, use_path_names
+                model_id, dialect, dimensions, measures, query_json, use_path_names,
+                where=where, having=having, order_by=order_by,
+                limit=limit, offset=offset, dimensions_exclude=dimensions_exclude,
             )
 
 
