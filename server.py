@@ -1271,34 +1271,64 @@ def _register_multi_model_tools() -> None:
 
     @mcp.tool
     def load_model(
-        model_yaml: str | None = None,
-        extends: list[str] | None = None,
+        model: dict | None = None,
+        extends: list[dict] | None = None,
         inherits: str | None = None,
     ) -> str:
-        """Parse and store user-provided OBML YAML. Returns a model_id.
+        """Load a semantic model definition. Returns a model_id.
 
-        ``model_yaml`` is mandatory. Do NOT call this tool unless the user or
-        LLM has provided OBML YAML content in the conversation.
-        Call ``get_obml_reference()`` to learn the format.
+        ``model`` is mandatory — pass the OBML model as a JSON object::
+
+            load_model(model={
+                "version": 1.0,
+                "dataObjects": {
+                    "Sales": {
+                        "code": "sales", "schema": "public",
+                        "columns": {"Amount": {"abstractType": "float"}}
+                    }
+                },
+                "dimensions": {
+                    "Country": {
+                        "dataObject": "Sales", "column": "Country",
+                        "resultType": "string"
+                    }
+                },
+                "measures": {
+                    "Revenue": {
+                        "aggregation": "SUM", "resultType": "float",
+                        "columns": [{"dataObject": "Sales", "column": "Amount"}]
+                    }
+                }
+            })
+
+        Keys use camelCase: ``dataObjects``, ``joinType``, ``columnsFrom``,
+        ``resultType``, ``abstractType``, ``timeGrain``.
+
+        Column ``abstractType`` values: string, int, float, date, boolean.
+        Aggregation values: SUM, COUNT, AVG, MIN, MAX, count_distinct, any_value.
+        Measure expressions: ``{[DataObject].[Column]}`` syntax.
+        Metric expressions: ``{[MeasureName]}`` syntax.
+
+        Call ``get_obml_reference()`` for the full specification.
 
         Args:
-            model_yaml: (mandatory) Complete OBML YAML string (starts with version: 1.0).
-            extends: Optional list of OBML YAML strings with analytical
-                fragments (dimensions, measures, metrics) to merge into the
-                model before loading.
+            model: (mandatory) OBML model as a JSON object (top-level keys:
+                version, dataObjects, dimensions, measures, metrics, joins).
+            extends: Optional list of analytical fragment objects (dimensions,
+                measures, metrics) to merge into the model before loading.
             inherits: Optional model_id of an already-loaded parent model in
                 the session.  The child model inherits the parent's data
                 objects and joins, adding or overriding analytical artefacts.
         """
-        if not model_yaml:
+        if not model:
             raise ToolError(
-                "model_yaml is mandatory — provide the complete OBML YAML content. "
-                "Call get_obml_reference() first to learn the correct format."
+                "model is mandatory — provide the OBML model as a JSON object. "
+                "Call get_obml_reference() first to learn the structure."
             )
-        logger.info("load_model called (yaml length=%d)", len(model_yaml))
-        body: dict = {"model_yaml": model_yaml}
+        logger.info("load_model called")
+        body: dict = {"model_json": model}
         if extends:
-            body["extends"] = extends
+            body["extends_json"] = extends
         if inherits:
             body["inherits"] = inherits
         resp = _session_request("POST", "/models", json_body=body)
