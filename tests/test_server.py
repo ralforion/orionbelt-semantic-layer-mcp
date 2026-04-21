@@ -302,6 +302,58 @@ def test_describe_model(mock_api: respx.MockRouter):
     assert "synonyms: sales, income" in result
 
 
+def test_describe_model_with_data_types_and_settings(mock_api: respx.MockRouter):
+    """describe_model shows data_type on measures/metrics and model settings."""
+    _mock_create_session(mock_api)
+    response = {
+        "data_objects": [
+            {
+                "label": "Orders",
+                "code": "ORDERS",
+                "columns": ["Amount"],
+                "join_targets": [],
+                "synonyms": [],
+            }
+        ],
+        "dimensions": [],
+        "measures": [
+            {
+                "name": "Revenue",
+                "result_type": "float",
+                "aggregation": "sum",
+                "expression": None,
+                "data_type": "decimal(18, 4)",
+                "synonyms": [],
+            }
+        ],
+        "metrics": [
+            {
+                "name": "Profit Margin",
+                "type": "derived",
+                "expression": "{[Profit]} / {[Revenue]}",
+                "data_type": "decimal(18, 6)",
+                "synonyms": [],
+            }
+        ],
+        "settings": {
+            "default_numeric_data_type": "decimal(18, 2)",
+            "default_timezone": "Europe/Zagreb",
+            "override_database_timezone": True,
+        },
+    }
+    mock_api.get("/v1/sessions/test-session-1/models/m001").mock(
+        return_value=httpx.Response(200, json=response)
+    )
+
+    result = server._impl_describe_model("m001")
+    assert "dataType: decimal(18, 4)" in result
+    assert "dataType: decimal(18, 6)" in result
+    assert "SETTINGS:" in result
+    assert "defaultNumericDataType: decimal(18, 2)" in result
+    assert "defaultTimezone: Europe/Zagreb" in result
+    assert "overrideDatabaseTimezone: true" in result
+
+
 # ---------------------------------------------------------------------------
 # describe_model (single-model mode — via shortcut /v1/schema)
 # ---------------------------------------------------------------------------
@@ -621,6 +673,38 @@ def test_execute_query_single_model_mode(mock_api: respx.MockRouter):
     # Verify no session was created
     session_calls = [call for call in mock_api.calls if call.request.url.path == "/v1/sessions"]
     assert len(session_calls) == 0
+
+
+def test_execute_query_with_timezone(mock_api: respx.MockRouter):
+    """execute_query passes through the timezone field from the API response."""
+    server._single_model_mode = True
+    mock_api.post("/v1/query/execute").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "sql": "SELECT order_date, SUM(amount) FROM orders GROUP BY 1",
+                "dialect": "postgres",
+                "columns": [
+                    {"name": "order_date", "type": "timestamp"},
+                    {"name": "sum_amount", "type": "float"},
+                ],
+                "rows": [["2025-01-01T00:00:00+01:00", 1000.0]],
+                "row_count": 1,
+                "execution_time_ms": 42,
+                "timezone": "Europe/Zagreb",
+            },
+        )
+    )
+
+    result = server._impl_execute_query(
+        model_id=None,
+        dialect="postgres",
+        dimensions=["Order Date"],
+        measures=["Revenue"],
+        query_json=None,
+        use_path_names=None,
+    )
+    assert '"timezone": "Europe/Zagreb"' in result
 
 
 def test_execute_query_multi_model_mode(mock_api: respx.MockRouter):
@@ -964,6 +1048,30 @@ def test_list_measures(mock_api: respx.MockRouter):
     assert "synonyms: sales" in result
 
 
+def test_list_measures_with_data_type(mock_api: respx.MockRouter):
+    """list_measures shows data_type when present."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/measures").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "name": "Revenue",
+                    "result_type": "float",
+                    "aggregation": "sum",
+                    "expression": None,
+                    "data_type": "decimal(18, 2)",
+                    "synonyms": [],
+                }
+            ],
+        )
+    )
+
+    result = server._impl_list_measures("m001")
+    assert "Revenue" in result
+    assert "dataType: decimal(18, 2)" in result
+
+
 def test_get_measure(mock_api: respx.MockRouter):
     """get_measure returns JSON for a single measure."""
     _mock_create_session(mock_api)
@@ -1007,6 +1115,29 @@ def test_list_metrics(mock_api: respx.MockRouter):
     result = server._impl_list_metrics("m001")
     assert "Profit Margin" in result
     assert "components: Profit, Revenue" in result
+
+
+def test_list_metrics_with_data_type(mock_api: respx.MockRouter):
+    """list_metrics shows data_type when present."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/metrics").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "name": "Profit Margin",
+                    "expression": "{[Profit]} / {[Revenue]}",
+                    "data_type": "decimal(18, 6)",
+                    "component_measures": ["Profit", "Revenue"],
+                    "synonyms": [],
+                }
+            ],
+        )
+    )
+
+    result = server._impl_list_metrics("m001")
+    assert "Profit Margin" in result
+    assert "dataType: decimal(18, 6)" in result
 
 
 def test_list_metrics_cumulative(mock_api: respx.MockRouter):
@@ -1978,9 +2109,7 @@ def test_shutdown_resets_global_state(mock_api):
     server._api_session_id = "session-lifecycle"
 
     # Step 2: simulate shutdown cleanup (the finally block in main())
-    mock_api.delete("/v1/sessions/session-lifecycle").mock(
-        return_value=httpx.Response(204)
-    )
+    mock_api.delete("/v1/sessions/session-lifecycle").mock(return_value=httpx.Response(204))
 
     # Run the cleanup logic directly
     if server._api_session_id is not None:
@@ -2127,5 +2256,3 @@ def test_sparql_query_single_model_mode(mock_api: respx.MockRouter):
 
     result = server._impl_sparql_query(None, "SELECT ?label WHERE { ?s rdfs:label ?label }")
     assert "Orders" in result
-
-

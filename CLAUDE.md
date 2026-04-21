@@ -121,10 +121,16 @@ The API supports three **metric types** and **measure filters**:
 - **Cumulative metrics** — running total, rolling window (`window: N`), or grain-to-date (`grainToDate: month`)
 - **Period-over-Period (PoP) metrics** — compare a measure across time periods (YoY, MoM, QoQ) with configurable comparison (`percentChange`, `difference`, `ratio`, `previousValue`)
 - **Measure filters** — restrict aggregation to matching rows via `CASE WHEN` wrapping; supports leaf filters and nested AND/OR/NOT groups
+- **HAVING filters** — support both measure and metric names (not just measures)
 - **Static model filters** — model-level WHERE filters applied to every query; defined via `filters` array with `dataObject`, `column`, `operator`, `value`/`values`; duplicate query-time filters are auto-deduplicated; dates coerced to ISO 8601
 - **Ratio pattern** — derived metrics referencing filtered measures (e.g. `{[US Revenue]} / {[Revenue]}`)
 - **Extends** — merge analytical fragments (dimensions, measures, metrics) from separate YAML strings into a model via `load_model(extends=[...])`
 - **Inherits** — inherit data objects and joins from an already-loaded parent model via `load_model(inherits="parent_model_id")`
+- **Data types** — measures and metrics support an optional `dataType` field (e.g. `decimal(18, 2)`, `bigint`, `integer`, `double`, `date`, `timestamp`, `time`, `string`, `boolean`) that controls CAST wrapping in generated SQL
+- **Model settings** — optional `settings` block on models:
+  - `defaultNumericDataType` — default decimal type for measures/metrics without explicit `dataType` (must be `decimal(p, s)`)
+  - `defaultTimezone` — IANA timezone name for naive timestamp handling in query execution results
+  - `overrideDatabaseTimezone` — use `defaultTimezone` instead of auto-detected DB session timezone
 
 All features are handled by the API — the MCP server passes through OBML YAML and query parameters unchanged.
 
@@ -146,3 +152,7 @@ with the pre-loaded model.  Shortcut endpoints auto-resolve.
 - Mode-dependent tools: defined in `_register_single_model_tools()` / `_register_multi_model_tools()`
 - Shared logic: `_impl_*` functions accept `model_id: str | None`
 - Registration: `main()` calls `_detect_single_model_mode()` then registers the right set
+
+## Code Review
+
+Code is reviewed with **OpenAI Codex**. Keep code clean, well-structured, and ready for automated review.

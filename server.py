@@ -120,17 +120,13 @@ def _get_client() -> httpx.Client:
         with _state_lock:
             if _http_client is None:  # double-check under lock
                 try:
-                    version = importlib.metadata.version(
-                        "orionbelt-semantic-layer-mcp"
-                    )
+                    version = importlib.metadata.version("orionbelt-semantic-layer-mcp")
                 except importlib.metadata.PackageNotFoundError:
                     version = "dev"
                 _http_client = httpx.Client(
                     base_url=settings.api_base_url,
                     timeout=settings.api_timeout,
-                    headers={
-                        "User-Agent": f"OrionBelt-MCP/{version}"
-                    },
+                    headers={"User-Agent": f"OrionBelt-MCP/{version}"},
                 )
     return _http_client
 
@@ -329,9 +325,7 @@ def _fetch_obml_reference() -> str:
     if _obml_reference_cache is None:
         with _state_lock:
             if _obml_reference_cache is None:  # double-check under lock
-                resp = _api_request(
-                    "GET", f"{_API_V1}/reference/obml", retry_on_expired=False
-                )
+                resp = _api_request("GET", f"{_API_V1}/reference/obml", retry_on_expired=False)
                 data = _parse_json(resp)
                 _obml_reference_cache = data["reference"]
     return _obml_reference_cache
@@ -343,9 +337,7 @@ def _fetch_dialect_names() -> list[str]:
     if _dialect_names_cache is None:
         with _state_lock:
             if _dialect_names_cache is None:  # double-check under lock
-                resp = _api_request(
-                    "GET", f"{_API_V1}/dialects", retry_on_expired=False
-                )
+                resp = _api_request("GET", f"{_API_V1}/dialects", retry_on_expired=False)
                 data = _parse_json(resp)
                 _dialect_names_cache = [d["name"] for d in data.get("dialects", [])]
     return _dialect_names_cache
@@ -589,7 +581,8 @@ def _impl_describe_model(model_id: str | None = None) -> str:
         m_name = m.get("name", "?")
         m_type = m.get("result_type", "?")
         m_agg = m.get("aggregation", "?")
-        lines.append(f"  {m_name}  ({m_type}, {m_agg}{expr})")
+        dtype = f"  dataType: {m['data_type']}" if m.get("data_type") else ""
+        lines.append(f"  {m_name}  ({m_type}, {m_agg}{expr}{dtype})")
         if m.get("description"):
             lines.append(f"    description: {m['description']}")
         if m.get("synonyms"):
@@ -602,10 +595,24 @@ def _impl_describe_model(model_id: str | None = None) -> str:
         lines.append("METRICS:")
         for met in metrics:
             lines.append(f"  {met.get('name', '?')}  {_format_metric_summary(met)}")
+            if met.get("data_type"):
+                lines.append(f"    dataType: {met['data_type']}")
             if met.get("description"):
                 lines.append(f"    description: {met['description']}")
             if met.get("synonyms"):
                 lines.append(f"    synonyms: {', '.join(met['synonyms'])}")
+        lines.append("")
+
+    # Model settings
+    model_settings = desc.get("settings")
+    if model_settings:
+        lines.append("SETTINGS:")
+        if model_settings.get("default_numeric_data_type"):
+            lines.append(f"  defaultNumericDataType: {model_settings['default_numeric_data_type']}")
+        if model_settings.get("default_timezone"):
+            lines.append(f"  defaultTimezone: {model_settings['default_timezone']}")
+        if model_settings.get("override_database_timezone"):
+            lines.append("  overrideDatabaseTimezone: true")
         lines.append("")
 
     # Static filters
@@ -684,9 +691,7 @@ def _build_query_object(
             query["dimensionsExclude"] = dimensions_exclude
         return query
     else:
-        raise ToolError(
-            "Provide either dimensions/measures or query_json."
-        )
+        raise ToolError("Provide either dimensions/measures or query_json.")
 
 
 def _format_compile_result(data: dict) -> str:
@@ -749,9 +754,16 @@ def _impl_compile_query(
     """Compile a semantic query (shared implementation)."""
     logger.info("compile_query called (model_id=%s, dialect=%s)", model_id, dialect)
     query = _build_query_object(
-        dimensions, measures, query_json, use_path_names,
-        where=where, having=having, order_by=order_by,
-        limit=limit, offset=offset, dimensions_exclude=dimensions_exclude,
+        dimensions,
+        measures,
+        query_json,
+        use_path_names,
+        where=where,
+        having=having,
+        order_by=order_by,
+        limit=limit,
+        offset=offset,
+        dimensions_exclude=dimensions_exclude,
     )
 
     if model_id is None:
@@ -784,9 +796,16 @@ def _impl_execute_query(
     """Compile and execute a semantic query (shared implementation)."""
     logger.info("execute_query called (model_id=%s, dialect=%s)", model_id, dialect)
     query = _build_query_object(
-        dimensions, measures, query_json, use_path_names,
-        where=where, having=having, order_by=order_by,
-        limit=limit, offset=offset, dimensions_exclude=dimensions_exclude,
+        dimensions,
+        measures,
+        query_json,
+        use_path_names,
+        where=where,
+        having=having,
+        order_by=order_by,
+        limit=limit,
+        offset=offset,
+        dimensions_exclude=dimensions_exclude,
     )
 
     if model_id is None:
@@ -876,7 +895,8 @@ def _impl_list_measures(model_id: str | None) -> str:
         m_name = m.get("name", "?")
         m_type = m.get("result_type", "?")
         m_agg = m.get("aggregation", "?")
-        lines.append(f"  {m_name}  ({m_type}, {m_agg}{expr})")
+        dtype = f"  dataType: {m['data_type']}" if m.get("data_type") else ""
+        lines.append(f"  {m_name}  ({m_type}, {m_agg}{expr}{dtype})")
         if m.get("description"):
             lines.append(f"    description: {m['description']}")
         if m.get("synonyms"):
@@ -907,6 +927,8 @@ def _impl_list_metrics(model_id: str | None) -> str:
     for met in metrics:
         components = ", ".join(met.get("component_measures", []))
         lines.append(f"  {met['name']}  {_format_metric_summary(met)}")
+        if met.get("data_type"):
+            lines.append(f"    dataType: {met['data_type']}")
         if met.get("description"):
             lines.append(f"    description: {met['description']}")
         if components:
@@ -1091,7 +1113,7 @@ def _register_single_model_tools() -> None:
             dimensions: List of dimension names.
             measures: List of measure names.
             where: Filters as JSON array of filter objects.
-            having: Measure filters as JSON array of filter objects.
+            having: Measure/metric filters as JSON array of filter objects.
             order_by: Ordering as JSON array of {field, direction} objects.
             limit: Maximum number of rows to return.
             offset: Number of rows to skip.
@@ -1102,9 +1124,18 @@ def _register_single_model_tools() -> None:
                 selecting secondary joins.
         """
         return _impl_compile_query(
-            None, dialect, dimensions, measures, query_json, use_path_names,
-            where=where, having=having, order_by=order_by,
-            limit=limit, offset=offset, dimensions_exclude=dimensions_exclude,
+            None,
+            dialect,
+            dimensions,
+            measures,
+            query_json,
+            use_path_names,
+            where=where,
+            having=having,
+            order_by=order_by,
+            limit=limit,
+            offset=offset,
+            dimensions_exclude=dimensions_exclude,
         )
 
     @mcp.tool
@@ -1247,6 +1278,7 @@ def _register_single_model_tools() -> None:
             query: SPARQL query string (SELECT or ASK).
         """
         return _impl_sparql_query(None, query)
+
 
 def _setup_mode_tools() -> None:
     """Detect API mode and register the appropriate tool set. Idempotent."""
@@ -1407,7 +1439,7 @@ def _register_multi_model_tools() -> None:
             dimensions: List of dimension names.
             measures: List of measure names.
             where: Filters as JSON array of filter objects.
-            having: Measure filters as JSON array of filter objects.
+            having: Measure/metric filters as JSON array of filter objects.
             order_by: Ordering as JSON array of {field, direction} objects.
             limit: Maximum number of rows to return.
             offset: Number of rows to skip.
@@ -1418,9 +1450,18 @@ def _register_multi_model_tools() -> None:
                 selecting secondary joins.
         """
         return _impl_compile_query(
-            model_id, dialect, dimensions, measures, query_json, use_path_names,
-            where=where, having=having, order_by=order_by,
-            limit=limit, offset=offset, dimensions_exclude=dimensions_exclude,
+            model_id,
+            dialect,
+            dimensions,
+            measures,
+            query_json,
+            use_path_names,
+            where=where,
+            having=having,
+            order_by=order_by,
+            limit=limit,
+            offset=offset,
+            dimensions_exclude=dimensions_exclude,
         )
 
     @mcp.tool
@@ -1647,7 +1688,7 @@ def _register_execute_query_tool() -> None:
                 dimensions: List of dimension names.
                 measures: List of measure names.
                 where: Filters as JSON array of filter objects.
-                having: Measure filters as JSON array of filter objects.
+                having: Measure/metric filters as JSON array of filter objects.
                 order_by: Ordering as JSON array of {field, direction} objects.
                 limit: Maximum number of rows to return.
                 offset: Number of rows to skip.
@@ -1658,9 +1699,18 @@ def _register_execute_query_tool() -> None:
                     selecting secondary joins.
             """
             return _impl_execute_query(
-                None, dialect, dimensions, measures, query_json, use_path_names,
-                where=where, having=having, order_by=order_by,
-                limit=limit, offset=offset, dimensions_exclude=dimensions_exclude,
+                None,
+                dialect,
+                dimensions,
+                measures,
+                query_json,
+                use_path_names,
+                where=where,
+                having=having,
+                order_by=order_by,
+                limit=limit,
+                offset=offset,
+                dimensions_exclude=dimensions_exclude,
             )
 
     else:
@@ -1691,7 +1741,7 @@ def _register_execute_query_tool() -> None:
                 dimensions: List of dimension names.
                 measures: List of measure names.
                 where: Filters as JSON array of filter objects.
-                having: Measure filters as JSON array of filter objects.
+                having: Measure/metric filters as JSON array of filter objects.
                 order_by: Ordering as JSON array of {field, direction} objects.
                 limit: Maximum number of rows to return.
                 offset: Number of rows to skip.
@@ -1702,9 +1752,18 @@ def _register_execute_query_tool() -> None:
                     selecting secondary joins.
             """
             return _impl_execute_query(
-                model_id, dialect, dimensions, measures, query_json, use_path_names,
-                where=where, having=having, order_by=order_by,
-                limit=limit, offset=offset, dimensions_exclude=dimensions_exclude,
+                model_id,
+                dialect,
+                dimensions,
+                measures,
+                query_json,
+                use_path_names,
+                where=where,
+                having=having,
+                order_by=order_by,
+                limit=limit,
+                offset=offset,
+                dimensions_exclude=dimensions_exclude,
             )
 
 
@@ -1803,7 +1862,7 @@ WHERE filter fields accept three syntaxes:
 - Qualified column: `"Orders.Order Priority"` (DataObject.Column)
 - The data object must be reachable from the query's join graph (auto-joined)
 
-HAVING filter fields reference a measure name.
+HAVING filter fields reference a measure or metric name.
 
 ## dimensionsExclude
 
@@ -2059,8 +2118,11 @@ def main() -> None:
     logger.info("  Log Level:  %s", settings.log_level)
     logger.info("  Timeout:    %ss", settings.api_timeout)
     logger.info("")
-    logger.info("Registered %d MCP tools (%s mode)", tool_count,
-                "single-model" if _single_model_mode else "multi-model")
+    logger.info(
+        "Registered %d MCP tools (%s mode)",
+        tool_count,
+        "single-model" if _single_model_mode else "multi-model",
+    )
     logger.info("")
 
     try:
