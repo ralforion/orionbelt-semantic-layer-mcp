@@ -564,11 +564,12 @@ def _impl_describe_model(model_id: str | None = None) -> str:
     lines.append("DIMENSIONS:")
     for dim in desc.get("dimensions", []):
         grain = f"  grain={dim['time_grain']}" if dim.get("time_grain") else ""
+        via = f"  via {dim['via']}" if dim.get("via") else ""
         d_name = dim.get("name", "?")
         d_type = dim.get("result_type", "?")
         d_obj = dim.get("data_object", "?")
         d_col = dim.get("column", "?")
-        lines.append(f"  {d_name}  ({d_type}, {d_obj}.{d_col}{grain})")
+        lines.append(f"  {d_name}  ({d_type}, {d_obj}.{d_col}{grain}{via})")
         if dim.get("description"):
             lines.append(f"    description: {dim['description']}")
         if dim.get("synonyms"):
@@ -883,11 +884,12 @@ def _impl_list_dimensions(model_id: str | None) -> str:
     lines = ["Dimensions:", ""]
     for d in dims:
         grain = f"  grain={d['time_grain']}" if d.get("time_grain") else ""
+        via = f"  via {d['via']}" if d.get("via") else ""
         d_name = d.get("name", "?")
         d_type = d.get("result_type", "?")
         d_obj = d.get("data_object", "?")
         d_col = d.get("column", "?")
-        lines.append(f"  {d_name}  ({d_type}, {d_obj}.{d_col}{grain})")
+        lines.append(f"  {d_name}  ({d_type}, {d_obj}.{d_col}{grain}{via})")
         if d.get("description"):
             lines.append(f"    description: {d['description']}")
         if d.get("synonyms"):
@@ -1969,6 +1971,35 @@ OBML model definition (not at query time):
 Both are defined in the OBML YAML and passed through to the API.
 Call `get_obml_reference()` for full syntax and examples.
 
+## Role-Playing Dimensions (via)
+
+Dimensions can use `via` to force the join path through a specific intermediate
+data object.  This enables **role-playing dimensions** — the same target table
+accessed through different join paths:
+
+```yaml
+dimensions:
+  SalesEmployee:
+    dataObject: Employees
+    column: Name
+    via: Sales          # reach Employees through Sales
+
+  ReturnEmployee:
+    dataObject: Employees
+    column: Name
+    via: Returns        # reach Employees through Returns
+```
+
+Both dimensions reference `Employees.Name` but produce different results because
+they join through different fact tables.  The `via` data object must be reachable
+from the query's fact table, and the dimension's `dataObject` must be reachable
+from `via` in the directed join graph.
+
+When querying, simply use the role-playing dimension name:
+```
+compile_query(dimensions=["SalesEmployee"], measures=["Revenue"])
+```
+
 ## Tips
 
 - Use `describe_model` first to see available dimension/measure names.
@@ -2046,6 +2077,17 @@ references unknown column.
   Fix: Add a `pathName` to the secondary join.
 - `DUPLICATE_JOIN_PATH_NAME`: Duplicate `pathName` for the same (source, target) pair.
   Fix: Use a unique `pathName` per (source, target) pair.
+
+## Via (Role-Playing Dimension) Errors
+
+- `INVALID_VIA_DATA_OBJECT`: Dimension `via` references an unknown data object, or the
+  dimension's target data object is not reachable from `via` in the directed join graph.
+  Fix: Check that `via` names an existing data object and that the dimension's `dataObject`
+  is reachable from it through primary joins.
+- `MISSING_VIA`: Warning — a dimension's target data object has direct joins from multiple
+  fact tables, which may cause ambiguous join paths.
+  Fix: Add role-playing dimensions with `via` to disambiguate, or ignore if ambiguity is
+  intentional.
 
 ## Grain & Filter Context Errors
 
