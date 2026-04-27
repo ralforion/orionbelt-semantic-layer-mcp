@@ -395,6 +395,10 @@ def get_settings() -> str:
     resp = _api_request("GET", f"{_API_V1}/settings", retry_on_expired=False)
     data = _parse_json(resp)
     lines = ["API Settings:", ""]
+    if data.get("version"):
+        lines.append(f"  API version: {data['version']}")
+    if data.get("api_version"):
+        lines.append(f"  API prefix: {data['api_version']}")
     lines.append(f"  Single-model mode: {data.get('single_model_mode', False)}")
     lines.append(f"  Session TTL: {data.get('session_ttl_seconds', 'N/A')}s")
     if data.get("session_max_age_seconds"):
