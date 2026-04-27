@@ -21,6 +21,7 @@ Entrypoint for Prefect Horizon: ``server.py:mcp``
 
 from __future__ import annotations
 
+import contextlib
 import importlib.metadata
 import json
 import logging
@@ -2283,8 +2284,36 @@ def _check_api_health() -> None:
         )
         raise SystemExit(1) from None
     except httpx.HTTPStatusError as exc:
-        logger.error("API health check failed: %s %s", exc.response.status_code, exc.response.text)
+        logger.error(
+            "API health check failed: %s %s",
+            exc.response.status_code,
+            exc.response.text,
+        )
         raise SystemExit(1) from None
+
+    try:
+        mcp_version = importlib.metadata.version("orionbelt-semantic-layer-mcp")
+    except importlib.metadata.PackageNotFoundError:
+        mcp_version = None
+    api_version = None
+    with contextlib.suppress(ValueError, AttributeError):
+        api_version = resp.json().get("version")
+    if mcp_version and api_version:
+        mcp_major = mcp_version.split(".")[0]
+        api_major = api_version.split(".")[0]
+        if mcp_major != api_major:
+            logger.warning(
+                "Version mismatch: MCP server v%s vs API v%s — "
+                "major version differs, some features may not work correctly",
+                mcp_version,
+                api_version,
+            )
+        elif mcp_version != api_version:
+            logger.warning(
+                "Version mismatch: MCP server v%s vs API v%s",
+                mcp_version,
+                api_version,
+            )
 
 
 def _detect_api_mode() -> tuple[bool, bool]:
