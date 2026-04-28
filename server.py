@@ -253,6 +253,7 @@ def _api_request(
     path: str,
     *,
     json_body: dict | None = None,
+    params: dict[str, str] | None = None,
     retry_on_expired: bool = True,
     path_suffix: str | None = None,
 ) -> httpx.Response:
@@ -263,14 +264,14 @@ def _api_request(
     the retry reconstructs the path from the new session ID.
     """
     client = _get_client()
-    resp = _do_request(client, method, path, json_body)
+    resp = _do_request(client, method, path, json_body, params=params)
 
     if _is_session_expired(resp) and retry_on_expired and path_suffix is not None:
         # Session expired — recreate and retry once
         _invalidate_session()
         sid = _ensure_session()
         new_path = f"{_API_V1}/sessions/{sid}{path_suffix}"
-        resp = _do_request(client, method, new_path, json_body)
+        resp = _do_request(client, method, new_path, json_body, params=params)
 
     if resp.status_code >= 400:
         _raise_api_error(resp)
@@ -283,6 +284,7 @@ def _session_request(
     path_suffix: str,
     *,
     json_body: dict | None = None,
+    params: dict[str, str] | None = None,
 ) -> httpx.Response:
     """Make an API request scoped to the current session.
 
@@ -290,7 +292,9 @@ def _session_request(
     """
     sid = _ensure_session()
     path = f"{_API_V1}/sessions/{sid}{path_suffix}"
-    return _api_request(method, path, json_body=json_body, path_suffix=path_suffix)
+    return _api_request(
+        method, path, json_body=json_body, params=params, path_suffix=path_suffix,
+    )
 
 
 def _shortcut_request(
@@ -686,6 +690,8 @@ def _build_query_object(
     offset: int | None = None,
     dimensions_exclude: bool | None = None,
     coalesce_dimensions: str | None = None,
+    fields: list[str] | None = None,
+    distinct: bool | None = None,
 ) -> dict:
     """Build a query dict from tool arguments (shared by compile/execute)."""
     if query_json is not None:
@@ -693,6 +699,23 @@ def _build_query_object(
             return json.loads(query_json)
         except json.JSONDecodeError as exc:
             raise ToolError(f"Invalid query JSON: {exc}") from exc
+    elif fields is not None:
+        # Raw mode — physical column projection, no aggregation
+        select: dict = {"fields": fields}
+        if distinct is not None:
+            select["distinct"] = distinct
+        query: dict = {"select": select}
+        parsed_where = _parse_json_param(where, "where")
+        if parsed_where is not None:
+            query["where"] = parsed_where
+        parsed_order = _parse_json_param(order_by, "order_by")
+        if parsed_order is not None:
+            query["order_by"] = parsed_order
+        if limit is not None:
+            query["limit"] = limit
+        if offset is not None:
+            query["offset"] = offset
+        return query
     elif dimensions is not None or measures is not None:
         dim_list: list[str | dict] = list(dimensions or [])
         parsed_coalesce = _parse_json_param(coalesce_dimensions, "coalesce_dimensions")
@@ -700,7 +723,7 @@ def _build_query_object(
             if not isinstance(parsed_coalesce, list):
                 raise ToolError("coalesce_dimensions must be a JSON array")
             dim_list.extend(parsed_coalesce)
-        query: dict = {
+        query = {
             "select": {
                 "dimensions": dim_list,
                 "measures": measures or [],
@@ -725,7 +748,9 @@ def _build_query_object(
             query["dimensionsExclude"] = dimensions_exclude
         return query
     else:
-        raise ToolError("Provide either dimensions/measures or query_json.")
+        raise ToolError(
+            "Provide either dimensions/measures, fields, or query_json."
+        )
 
 
 def _format_compile_result(data: dict) -> str:
@@ -789,6 +814,8 @@ def _impl_compile_query(
     offset: int | None = None,
     dimensions_exclude: bool | None = None,
     coalesce_dimensions: str | None = None,
+    fields: list[str] | None = None,
+    distinct: bool | None = None,
 ) -> str:
     """Compile a semantic query (shared implementation)."""
     logger.info("compile_query called (model_id=%s, dialect=%s)", model_id, dialect)
@@ -804,6 +831,8 @@ def _impl_compile_query(
         offset=offset,
         dimensions_exclude=dimensions_exclude,
         coalesce_dimensions=coalesce_dimensions,
+        fields=fields,
+        distinct=distinct,
     )
 
     if model_id is None:
@@ -833,6 +862,12 @@ def _impl_execute_query(
     offset: int | None = None,
     dimensions_exclude: bool | None = None,
     coalesce_dimensions: str | None = None,
+    fields: list[str] | None = None,
+    distinct: bool | None = None,
+    output_format: str = "json",
+    format_values: bool | None = None,
+    locale: str | None = None,
+    timezone: str | None = None,
 ) -> str:
     """Compile and execute a semantic query (shared implementation)."""
     logger.info("execute_query called (model_id=%s, dialect=%s)", model_id, dialect)
@@ -848,20 +883,35 @@ def _impl_execute_query(
         offset=offset,
         dimensions_exclude=dimensions_exclude,
         coalesce_dimensions=coalesce_dimensions,
+        fields=fields,
+        distinct=distinct,
     )
 
+    extra_params: dict[str, str] = {"format": output_format}
+    if format_values is not None:
+        extra_params["format_values"] = str(format_values).lower()
+    if locale is not None:
+        extra_params["locale"] = locale
+    if timezone is not None:
+        extra_params["timezone"] = timezone
+
     if model_id is None:
-        # Single-model shortcut — query body goes directly, dialect as param
         resp = _shortcut_request(
-            "POST", "/query/execute", json_body=query, params={"dialect": dialect}
+            "POST",
+            "/query/execute",
+            json_body=query,
+            params={"dialect": dialect, **extra_params},
         )
     else:
         resp = _session_request(
             "POST",
             "/query/execute",
             json_body={"model_id": model_id, "dialect": dialect, "query": query},
+            params=extra_params,
         )
 
+    if output_format == "tsv":
+        return resp.text
     return json.dumps(_parse_json(resp), indent=2)
 
 
@@ -1127,6 +1177,8 @@ def _register_single_model_tools() -> None:
         dialect: str = "postgres",
         dimensions: list[str] | None = None,
         measures: list[str] | None = None,
+        fields: list[str] | None = None,
+        distinct: bool | None = None,
         where: str | None = None,
         having: str | None = None,
         order_by: str | None = None,
@@ -1139,27 +1191,25 @@ def _register_single_model_tools() -> None:
     ) -> str:
         """Compile a semantic query to SQL.
 
-        Pass ``dimensions`` and/or ``measures`` with optional filtering,
-        ordering, and pagination::
+        **Aggregate mode** — pass ``dimensions`` and/or ``measures``::
 
             compile_query(
                 dimensions=["Country"],
                 measures=["Revenue"],
                 where='[{"field": "Country", "op": "equals", "value": "US"}]',
-                order_by='[{"field": "Revenue", "direction": "desc"}]',
                 limit=10,
             )
 
-        To merge role-playing dimensions into a single column, use
-        ``coalesce_dimensions``::
+        **Raw mode** — pass ``fields`` for un-aggregated column access::
 
             compile_query(
-                measures=["Total Sales", "Total Purchases"],
-                coalesce_dimensions=(
-                    '[{"coalesce": ["SalesEmp", "PurchaseEmp"],'
-                    ' "as": "Employee"}]'
-                ),
+                fields=["Orders.OrderDate", "Orders.Amount"],
+                distinct=True,
+                limit=100,
             )
+
+        Raw mode is mutually exclusive with dimensions, measures,
+        having, and dimensionsExclude.
 
         Alternatively, pass a complete query as JSON via ``query_json``
         (overrides all other query parameters).
@@ -1168,8 +1218,12 @@ def _register_single_model_tools() -> None:
 
         Args:
             dialect: Target SQL dialect.
-            dimensions: List of dimension names.
-            measures: List of measure names.
+            dimensions: List of dimension names (aggregate mode).
+            measures: List of measure names (aggregate mode).
+            fields: List of physical column refs as
+                "DataObject.Column" (raw mode).  Mutually exclusive
+                with dimensions/measures.
+            distinct: Emit SELECT DISTINCT (raw mode only).
             where: Filters as a JSON string, e.g.
                 '[{"field": "Country", "op": "equals", "value": "US"}]'.
             having: Measure/metric filters as a JSON string, e.g.
@@ -1203,6 +1257,8 @@ def _register_single_model_tools() -> None:
             offset=offset,
             dimensions_exclude=dimensions_exclude,
             coalesce_dimensions=coalesce_dimensions,
+            fields=fields,
+            distinct=distinct,
         )
 
     @mcp.tool
@@ -1489,6 +1545,8 @@ def _register_multi_model_tools() -> None:
         dialect: str = "postgres",
         dimensions: list[str] | None = None,
         measures: list[str] | None = None,
+        fields: list[str] | None = None,
+        distinct: bool | None = None,
         where: str | None = None,
         having: str | None = None,
         order_by: str | None = None,
@@ -1501,29 +1559,27 @@ def _register_multi_model_tools() -> None:
     ) -> str:
         """Compile a semantic query to SQL.
 
-        Pass ``dimensions`` and/or ``measures`` with optional filtering,
-        ordering, and pagination::
+        **Aggregate mode** — pass ``dimensions`` and/or ``measures``::
 
             compile_query(
                 model_id="abc12345",
                 dimensions=["Country"],
                 measures=["Revenue"],
                 where='[{"field": "Country", "op": "equals", "value": "US"}]',
-                order_by='[{"field": "Revenue", "direction": "desc"}]',
                 limit=10,
             )
 
-        To merge role-playing dimensions into a single column, use
-        ``coalesce_dimensions``::
+        **Raw mode** — pass ``fields`` for un-aggregated column access::
 
             compile_query(
                 model_id="abc12345",
-                measures=["Total Sales", "Total Purchases"],
-                coalesce_dimensions=(
-                    '[{"coalesce": ["SalesEmp", "PurchaseEmp"],'
-                    ' "as": "Employee"}]'
-                ),
+                fields=["Orders.OrderDate", "Orders.Amount"],
+                distinct=True,
+                limit=100,
             )
+
+        Raw mode is mutually exclusive with dimensions, measures,
+        having, and dimensionsExclude.
 
         Alternatively, pass a complete query as JSON via ``query_json``
         (overrides all other query parameters).
@@ -1533,8 +1589,12 @@ def _register_multi_model_tools() -> None:
         Args:
             model_id: The id returned by ``load_model``.
             dialect: Target SQL dialect.
-            dimensions: List of dimension names.
-            measures: List of measure names.
+            dimensions: List of dimension names (aggregate mode).
+            measures: List of measure names (aggregate mode).
+            fields: List of physical column refs as
+                "DataObject.Column" (raw mode).  Mutually exclusive
+                with dimensions/measures.
+            distinct: Emit SELECT DISTINCT (raw mode only).
             where: Filters as a JSON string, e.g.
                 '[{"field": "Country", "op": "equals", "value": "US"}]'.
             having: Measure/metric filters as a JSON string, e.g.
@@ -1568,6 +1628,8 @@ def _register_multi_model_tools() -> None:
             offset=offset,
             dimensions_exclude=dimensions_exclude,
             coalesce_dimensions=coalesce_dimensions,
+            fields=fields,
+            distinct=distinct,
         )
 
     @mcp.tool
@@ -1775,6 +1837,8 @@ def _register_execute_query_tool() -> None:
             dialect: str = "postgres",
             dimensions: list[str] | None = None,
             measures: list[str] | None = None,
+            fields: list[str] | None = None,
+            distinct: bool | None = None,
             where: str | None = None,
             having: str | None = None,
             order_by: str | None = None,
@@ -1784,33 +1848,37 @@ def _register_execute_query_tool() -> None:
             coalesce_dimensions: str | None = None,
             query_json: str | None = None,
             use_path_names: list[dict[str, str]] | None = None,
+            output_format: str = "json",
+            format_values: bool | None = None,
+            locale: str | None = None,
+            timezone: str | None = None,
         ) -> str:
-            """Compile and execute a semantic query, returning SQL and result data.
+            """Compile and execute a semantic query, returning SQL and results.
 
-            Same parameters as ``compile_query``.  If no ``limit`` is
-            specified, a server-side default row limit is enforced.
+            Same query parameters as ``compile_query`` (aggregate and raw
+            modes).  If no ``limit`` is specified, a server-side default
+            row limit is enforced.
 
             Args:
                 dialect: Target SQL dialect.
-                dimensions: List of dimension names.
-                measures: List of measure names.
-                where: Filters as a JSON string, e.g.
-                    '[{"field": "Country", "op": "equals", "value": "US"}]'.
-                having: Measure/metric filters as a JSON string, e.g.
-                    '[{"field": "Revenue", "op": "gt", "value": 1000}]'.
-                order_by: Ordering as a JSON string, e.g.
-                    '[{"field": "Revenue", "direction": "desc"}]'.
+                dimensions: List of dimension names (aggregate mode).
+                measures: List of measure names (aggregate mode).
+                fields: List of physical column refs as
+                    "DataObject.Column" (raw mode).
+                distinct: Emit SELECT DISTINCT (raw mode only).
+                where: Filters as a JSON string.
+                having: Measure/metric filters as a JSON string.
+                order_by: Ordering as a JSON string.
                 limit: Maximum number of rows to return.
                 offset: Number of rows to skip.
-                dimensions_exclude: If true, return dimension combinations that
-                    do NOT exist (anti-join).
-                coalesce_dimensions: Coalesce groups as a JSON string, e.g.
-                    '[{"coalesce": ["SalesEmp", "PurchaseEmp"], "as": "Employee"}]'.
-                    Merges role-playing dimensions into one output column via
-                    COALESCE.  All members must share the same resultType.
-                query_json: Complete query as JSON string (overrides above).
-                use_path_names: List of {source, target, pathName} dicts for
-                    selecting secondary joins.
+                dimensions_exclude: Anti-join mode (aggregate only).
+                coalesce_dimensions: Coalesce groups as a JSON string.
+                query_json: Complete query as JSON (overrides above).
+                use_path_names: Secondary join path selectors.
+                output_format: Response format — "json" (default) or "tsv".
+                format_values: Format numeric cells as display strings.
+                locale: BCP-47 locale for number formatting (e.g. "de").
+                timezone: IANA timezone (e.g. "Europe/Berlin").
             """
             return _impl_execute_query(
                 None,
@@ -1826,6 +1894,12 @@ def _register_execute_query_tool() -> None:
                 offset=offset,
                 dimensions_exclude=dimensions_exclude,
                 coalesce_dimensions=coalesce_dimensions,
+                fields=fields,
+                distinct=distinct,
+                output_format=output_format,
+                format_values=format_values,
+                locale=locale,
+                timezone=timezone,
             )
 
     else:
@@ -1836,6 +1910,8 @@ def _register_execute_query_tool() -> None:
             dialect: str = "postgres",
             dimensions: list[str] | None = None,
             measures: list[str] | None = None,
+            fields: list[str] | None = None,
+            distinct: bool | None = None,
             where: str | None = None,
             having: str | None = None,
             order_by: str | None = None,
@@ -1845,34 +1921,38 @@ def _register_execute_query_tool() -> None:
             coalesce_dimensions: str | None = None,
             query_json: str | None = None,
             use_path_names: list[dict[str, str]] | None = None,
+            output_format: str = "json",
+            format_values: bool | None = None,
+            locale: str | None = None,
+            timezone: str | None = None,
         ) -> str:
-            """Compile and execute a semantic query, returning SQL and result data.
+            """Compile and execute a semantic query, returning SQL and results.
 
-            Same parameters as ``compile_query``.  If no ``limit`` is
-            specified, a server-side default row limit is enforced.
+            Same query parameters as ``compile_query`` (aggregate and raw
+            modes).  If no ``limit`` is specified, a server-side default
+            row limit is enforced.
 
             Args:
                 model_id: The id returned by ``load_model``.
                 dialect: Target SQL dialect.
-                dimensions: List of dimension names.
-                measures: List of measure names.
-                where: Filters as a JSON string, e.g.
-                    '[{"field": "Country", "op": "equals", "value": "US"}]'.
-                having: Measure/metric filters as a JSON string, e.g.
-                    '[{"field": "Revenue", "op": "gt", "value": 1000}]'.
-                order_by: Ordering as a JSON string, e.g.
-                    '[{"field": "Revenue", "direction": "desc"}]'.
+                dimensions: List of dimension names (aggregate mode).
+                measures: List of measure names (aggregate mode).
+                fields: List of physical column refs as
+                    "DataObject.Column" (raw mode).
+                distinct: Emit SELECT DISTINCT (raw mode only).
+                where: Filters as a JSON string.
+                having: Measure/metric filters as a JSON string.
+                order_by: Ordering as a JSON string.
                 limit: Maximum number of rows to return.
                 offset: Number of rows to skip.
-                dimensions_exclude: If true, return dimension combinations that
-                    do NOT exist (anti-join).
-                coalesce_dimensions: Coalesce groups as a JSON string, e.g.
-                    '[{"coalesce": ["SalesEmp", "PurchaseEmp"], "as": "Employee"}]'.
-                    Merges role-playing dimensions into one output column via
-                    COALESCE.  All members must share the same resultType.
-                query_json: Complete query as JSON string (overrides above).
-                use_path_names: List of {source, target, pathName} dicts for
-                    selecting secondary joins.
+                dimensions_exclude: Anti-join mode (aggregate only).
+                coalesce_dimensions: Coalesce groups as a JSON string.
+                query_json: Complete query as JSON (overrides above).
+                use_path_names: Secondary join path selectors.
+                output_format: Response format — "json" (default) or "tsv".
+                format_values: Format numeric cells as display strings.
+                locale: BCP-47 locale for number formatting (e.g. "de").
+                timezone: IANA timezone (e.g. "Europe/Berlin").
             """
             return _impl_execute_query(
                 model_id,
@@ -1888,6 +1968,12 @@ def _register_execute_query_tool() -> None:
                 offset=offset,
                 dimensions_exclude=dimensions_exclude,
                 coalesce_dimensions=coalesce_dimensions,
+                fields=fields,
+                distinct=distinct,
+                output_format=output_format,
+                format_values=format_values,
+                locale=locale,
+                timezone=timezone,
             )
 
 
@@ -2097,6 +2183,37 @@ Rules:
 - The ``as`` alias must not collide with any model dimension or measure name
 - ``order_by`` may reference the alias directly
 - ``where`` filters use the underlying dimension names (per-leg filtering)
+
+## Raw Mode (Physical Column Access)
+
+Raw mode returns un-aggregated rows — no GROUP BY, no measures, no metrics.
+Pass ``fields`` instead of ``dimensions``/``measures``::
+
+    compile_query(
+        fields=["Orders.OrderDate", "Customers.Country"],
+        distinct=True,
+        where='[{{"field": "Customers.Country", "op": "equals", "value": "US"}}]',
+        limit=100,
+    )
+
+Fields use ``DataObject.Column`` syntax referencing physical columns.
+
+Raw mode is **mutually exclusive** with:
+- ``dimensions`` / ``measures``
+- ``having``
+- ``dimensionsExclude``
+
+``distinct`` is only valid in raw mode.  ``where``, ``order_by``, ``limit``,
+and ``offset`` work in both modes.
+
+## Execute Query — Output Formatting
+
+``execute_query`` supports additional output parameters:
+
+- ``format``: ``"json"`` (default) or ``"tsv"`` (tab-separated text)
+- ``format_values``: Format numeric cells as locale-aware display strings
+- ``locale``: BCP-47 locale tag (e.g. ``"de"``, ``"en-US"``)
+- ``timezone``: IANA timezone (e.g. ``"Europe/Berlin"``)
 
 ## Tips
 

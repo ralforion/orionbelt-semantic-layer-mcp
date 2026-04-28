@@ -4,6 +4,27 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.1.0] — 2026-04-26
+
+### Added
+- **Raw query mode (`fields`)** — `compile_query` and `execute_query` support a
+  new `fields` parameter for un-aggregated physical column access via
+  `select.fields` (e.g. `["Orders.OrderID", "Orders.CustomerName"]`), mutually
+  exclusive with `dimensions`/`measures`
+- **`distinct` parameter** — `compile_query` and `execute_query` support
+  `distinct` to emit `SELECT DISTINCT` (raw mode only)
+- **Execute query output formatting** — `execute_query` gains `output_format`
+  (`"json"` or `"tsv"`), `format_values`, `locale`, and `timezone` parameters
+  for controlling response format and locale-aware number/date rendering
+- **Query prompt** — `write_query` prompt updated with Raw Mode and Execute
+  Query Output Formatting documentation sections
+
+### Changed
+- Version bumped to 2.1.0 (aligned with OrionBelt Semantic Layer API 2.1.0)
+- OrionBelt Semantic Layer badge updated to 2.1
+
+---
+
 ## [2.0.1] — 2026-04-27
 
 ### Added
