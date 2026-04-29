@@ -448,6 +448,10 @@ def get_settings() -> str:
         lines.append(f"  effective: {tz_info.get('effective', 'UTC')}")
         if tz_info.get("override_database_timezone"):
             lines.append("  overrideDatabaseTimezone: true")
+        if tz_info.get("now"):
+            lines.append(f"  now: {tz_info['now']}")
+        if tz_info.get("utc"):
+            lines.append(f"  utc: {tz_info['utc']}")
 
     ms_info = data.get("model_settings")
     if ms_info:
