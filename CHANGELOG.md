@@ -16,8 +16,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - **Execute query output formatting** — `execute_query` gains `output_format`
   (`"json"` or `"tsv"`), `format_values`, `locale`, and `timezone` parameters
   for controlling response format and locale-aware number/date rendering
-- **Query prompt** — `write_query` prompt updated with Raw Mode and Execute
-  Query Output Formatting documentation sections
+- **Optional `dialect`** — `dialect` parameter on `compile_query` and
+  `execute_query` is now optional (was `"postgres"` default); when omitted
+  the API resolves via `model.settings.defaultDialect` → `DB_VENDOR` →
+  `"postgres"`
+- **`defaultDialect` in `describe_model`** — model settings section now
+  surfaces the optional `defaultDialect` field
+- **Filter operators** — `write_query` prompt documents 7 new filter
+  operators: `regex`, `notregex`, `blank`, `notblank`, `length_eq`,
+  `length_gt`, `length_lt`
+- **`get_settings` enriched** — now surfaces dialect resolution chain
+  (`model` / `env` / `effective`), timezone resolution chain (`model` /
+  `host` / `database` / `effective`), and model settings block; in
+  multi-model mode passes `session_id` so the API resolves the loaded
+  model's settings automatically
+- **Validation error codes** — `debug_validation` prompt updated with
+  `INVALID_FILTER_VALUE` error code
+- **Query prompt** — `write_query` prompt updated with Raw Mode, Execute
+  Query Output Formatting, and Default Dialect documentation sections
 
 ### Changed
 - Version bumped to 2.1.0 (aligned with OrionBelt Semantic Layer API 2.1.0)

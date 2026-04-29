@@ -394,9 +394,16 @@ def get_settings() -> str:
     """Get API configuration settings.
 
     Returns whether the API is in single-model mode, the session TTL,
-    query execution status, and any pre-loaded model YAML.
+    query execution status, dialect/timezone resolution, and model
+    settings when a model is loaded.
     """
-    resp = _api_request("GET", f"{_API_V1}/settings", retry_on_expired=False)
+    params: dict[str, str] = {}
+    if not _single_model_mode and _api_session_id is not None:
+        params["session_id"] = _api_session_id
+    resp = _api_request(
+        "GET", f"{_API_V1}/settings", retry_on_expired=False,
+        params=params or None,
+    )
     data = _parse_json(resp)
     lines = ["API Settings:", ""]
     if data.get("version"):
@@ -417,6 +424,46 @@ def get_settings() -> str:
         lines.append("  Query execution: available (use execute_query tool)")
     else:
         lines.append("  Query execution: not available")
+
+    dialect_info = data.get("dialect")
+    if dialect_info:
+        lines.append("")
+        lines.append("Dialect resolution:")
+        if dialect_info.get("model"):
+            lines.append(f"  model (defaultDialect): {dialect_info['model']}")
+        if dialect_info.get("env"):
+            lines.append(f"  env (DB_VENDOR): {dialect_info['env']}")
+        lines.append(f"  effective: {dialect_info.get('effective', 'postgres')}")
+
+    tz_info = data.get("timezone")
+    if tz_info:
+        lines.append("")
+        lines.append("Timezone resolution:")
+        if tz_info.get("model"):
+            lines.append(f"  model (defaultTimezone): {tz_info['model']}")
+        if tz_info.get("host"):
+            lines.append(f"  host: {tz_info['host']}")
+        if tz_info.get("database"):
+            lines.append(f"  database: {tz_info['database']}")
+        lines.append(f"  effective: {tz_info.get('effective', 'UTC')}")
+        if tz_info.get("override_database_timezone"):
+            lines.append("  overrideDatabaseTimezone: true")
+
+    ms_info = data.get("model_settings")
+    if ms_info:
+        lines.append("")
+        lines.append("Model settings:")
+        if ms_info.get("defaultDialect"):
+            lines.append(f"  defaultDialect: {ms_info['defaultDialect']}")
+        if ms_info.get("defaultNumericDataType"):
+            lines.append(
+                f"  defaultNumericDataType: {ms_info['defaultNumericDataType']}"
+            )
+        if ms_info.get("defaultTimezone"):
+            lines.append(f"  defaultTimezone: {ms_info['defaultTimezone']}")
+        if ms_info.get("overrideDatabaseTimezone"):
+            lines.append("  overrideDatabaseTimezone: true")
+
     return "\n".join(lines)
 
 
@@ -638,6 +685,8 @@ def _impl_describe_model(model_id: str | None = None) -> str:
     model_settings = desc.get("settings")
     if model_settings:
         lines.append("SETTINGS:")
+        if model_settings.get("default_dialect"):
+            lines.append(f"  defaultDialect: {model_settings['default_dialect']}")
         if model_settings.get("default_numeric_data_type"):
             lines.append(f"  defaultNumericDataType: {model_settings['default_numeric_data_type']}")
         if model_settings.get("default_timezone"):
@@ -802,7 +851,7 @@ def _format_compile_result(data: dict) -> str:
 
 def _impl_compile_query(
     model_id: str | None,
-    dialect: str,
+    dialect: str | None,
     dimensions: list[str] | None,
     measures: list[str] | None,
     query_json: str | None,
@@ -836,21 +885,22 @@ def _impl_compile_query(
     )
 
     if model_id is None:
-        # Single-model shortcut — query body goes directly, dialect as param
-        resp = _shortcut_request("POST", "/query/sql", json_body=query, params={"dialect": dialect})
+        params: dict[str, str] = {}
+        if dialect is not None:
+            params["dialect"] = dialect
+        resp = _shortcut_request("POST", "/query/sql", json_body=query, params=params or None)
     else:
-        resp = _session_request(
-            "POST",
-            "/query/sql",
-            json_body={"model_id": model_id, "dialect": dialect, "query": query},
-        )
+        body: dict = {"model_id": model_id, "query": query}
+        if dialect is not None:
+            body["dialect"] = dialect
+        resp = _session_request("POST", "/query/sql", json_body=body)
 
     return _format_compile_result(_parse_json(resp))
 
 
 def _impl_execute_query(
     model_id: str | None,
-    dialect: str,
+    dialect: str | None,
     dimensions: list[str] | None,
     measures: list[str] | None,
     query_json: str | None,
@@ -896,17 +946,23 @@ def _impl_execute_query(
         extra_params["timezone"] = timezone
 
     if model_id is None:
+        params: dict[str, str] = {**extra_params}
+        if dialect is not None:
+            params["dialect"] = dialect
         resp = _shortcut_request(
             "POST",
             "/query/execute",
             json_body=query,
-            params={"dialect": dialect, **extra_params},
+            params=params,
         )
     else:
+        body: dict = {"model_id": model_id, "query": query}
+        if dialect is not None:
+            body["dialect"] = dialect
         resp = _session_request(
             "POST",
             "/query/execute",
-            json_body={"model_id": model_id, "dialect": dialect, "query": query},
+            json_body=body,
             params=extra_params,
         )
 
@@ -1174,7 +1230,7 @@ def _register_single_model_tools() -> None:
 
     @mcp.tool
     def compile_query(
-        dialect: str = "postgres",
+        dialect: str | None = None,
         dimensions: list[str] | None = None,
         measures: list[str] | None = None,
         fields: list[str] | None = None,
@@ -1217,7 +1273,8 @@ def _register_single_model_tools() -> None:
         Use ``describe_model`` first to discover available names.
 
         Args:
-            dialect: Target SQL dialect.
+            dialect: Target SQL dialect.  When omitted the API resolves
+                via model.settings.defaultDialect → server default.
             dimensions: List of dimension names (aggregate mode).
             measures: List of measure names (aggregate mode).
             fields: List of physical column refs as
@@ -1542,7 +1599,7 @@ def _register_multi_model_tools() -> None:
     @mcp.tool
     def compile_query(
         model_id: str,
-        dialect: str = "postgres",
+        dialect: str | None = None,
         dimensions: list[str] | None = None,
         measures: list[str] | None = None,
         fields: list[str] | None = None,
@@ -1588,7 +1645,8 @@ def _register_multi_model_tools() -> None:
 
         Args:
             model_id: The id returned by ``load_model``.
-            dialect: Target SQL dialect.
+            dialect: Target SQL dialect.  When omitted the API resolves
+                via model.settings.defaultDialect → server default.
             dimensions: List of dimension names (aggregate mode).
             measures: List of measure names (aggregate mode).
             fields: List of physical column refs as
@@ -1834,7 +1892,7 @@ def _register_execute_query_tool() -> None:
 
         @mcp.tool
         def execute_query(
-            dialect: str = "postgres",
+            dialect: str | None = None,
             dimensions: list[str] | None = None,
             measures: list[str] | None = None,
             fields: list[str] | None = None,
@@ -1860,7 +1918,9 @@ def _register_execute_query_tool() -> None:
             row limit is enforced.
 
             Args:
-                dialect: Target SQL dialect.
+                dialect: Target SQL dialect.  When omitted the API
+                    resolves via model.settings.defaultDialect →
+                    server default.
                 dimensions: List of dimension names (aggregate mode).
                 measures: List of measure names (aggregate mode).
                 fields: List of physical column refs as
@@ -1907,7 +1967,7 @@ def _register_execute_query_tool() -> None:
         @mcp.tool
         def execute_query(
             model_id: str,
-            dialect: str = "postgres",
+            dialect: str | None = None,
             dimensions: list[str] | None = None,
             measures: list[str] | None = None,
             fields: list[str] | None = None,
@@ -1934,7 +1994,9 @@ def _register_execute_query_tool() -> None:
 
             Args:
                 model_id: The id returned by ``load_model``.
-                dialect: Target SQL dialect.
+                dialect: Target SQL dialect.  When omitted the API
+                    resolves via model.settings.defaultDialect →
+                    server default.
                 dimensions: List of dimension names (aggregate mode).
                 measures: List of measure names (aggregate mode).
                 fields: List of physical column refs as
@@ -2006,7 +2068,6 @@ Pass dimension and measure names directly:
 ```
 compile_query(
   model_id="abc12345",
-  dialect="postgres",
   dimensions=["Customer Country"],
   measures=["Total Revenue"]
 )
@@ -2019,7 +2080,6 @@ Pass a complete query as JSON:
 ```
 compile_query(
   model_id="abc12345",
-  dialect="snowflake",
   query_json='{
     "select": {
       "dimensions": ["Customer Country"],
@@ -2043,6 +2103,9 @@ compile_query(
 - Set: `in`, `not_in`, `inlist`, `notinlist`
 - Null: `is_null`, `is_not_null`, `set`, `notset`
 - String: `contains`, `notcontains`, `like`, `notlike`, `starts_with`, `ends_with`
+- Regex: `regex`, `notregex` (per-dialect native syntax)
+- Blank: `blank` (NULL or empty/whitespace), `notblank`
+- Length: `length_eq`, `length_gt`, `length_lt` (value must be integer)
 - Range: `between`, `notbetween`, `relative`
 
 ## Filter Groups (AND/OR/NOT)
@@ -2215,6 +2278,12 @@ and ``offset`` work in both modes.
 - ``locale``: BCP-47 locale tag (e.g. ``"de"``, ``"en-US"``)
 - ``timezone``: IANA timezone (e.g. ``"Europe/Berlin"``)
 
+## Default Dialect
+
+When ``dialect`` is omitted from ``compile_query`` / ``execute_query``, the API
+resolves it via: model ``settings.defaultDialect`` → server ``DB_VENDOR`` env →
+``"postgres"``.  Use ``describe_model`` to see the model's default dialect.
+
 ## Tips
 
 - Use `describe_model` first to see available dimension/measure names.
@@ -2345,7 +2414,10 @@ references unknown column.
 - `INVALID_METRIC_EXPRESSION`: Metric expression could not be parsed.
   Fix: Use `{[Measure Name]}` syntax in metric expressions.
 - `INVALID_FILTER_OPERATOR`: Unrecognised filter operator in query.
-  Fix: Use a supported operator (equals, gt, gte, lt, lte, inlist, etc.).
+  Fix: Use a supported operator (equals, gt, gte, lt, lte, inlist, regex, blank, length_eq, etc.).
+- `INVALID_FILTER_VALUE`: Filter value has the wrong type for the operator.
+  Fix: `regex`/`notregex` require a string pattern; `length_eq`/`length_gt`/`length_lt`
+  require an integer value.
 - `INVALID_RELATIVE_FILTER`: Malformed relative time filter.
   Fix: Check unit (day/week/month/year), count, direction, include_current.
 - `UNKNOWN_FILTER_FIELD`: Filter field is not a dimension (WHERE) or measure (HAVING).
