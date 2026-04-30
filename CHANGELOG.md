@@ -4,6 +4,53 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.1.0] — 2026-04-26
+
+### Added
+- **Raw query mode (`fields`)** — `compile_query` and `execute_query` support a
+  new `fields` parameter for un-aggregated physical column access via
+  `select.fields` (e.g. `["Orders.OrderID", "Orders.CustomerName"]`), mutually
+  exclusive with `dimensions`/`measures`
+- **`distinct` parameter** — `compile_query` and `execute_query` support
+  `distinct` to emit `SELECT DISTINCT` (raw mode only)
+- **Execute query output formatting** — `execute_query` gains `output_format`
+  (`"json"` or `"tsv"`), `format_values`, `locale`, and `timezone` parameters
+  for controlling response format and locale-aware number/date rendering
+- **Optional `dialect`** — `dialect` parameter on `compile_query` and
+  `execute_query` is now optional (was `"postgres"` default); when omitted
+  the API resolves via `model.settings.defaultDialect` → `DB_VENDOR` →
+  `"postgres"`
+- **`defaultDialect` in `describe_model`** — model settings section now
+  surfaces the optional `defaultDialect` field
+- **Filter operators** — `write_query` prompt documents 7 new filter
+  operators: `regex`, `notregex`, `blank`, `notblank`, `length_eq`,
+  `length_gt`, `length_lt`
+- **`get_settings` enriched** — now surfaces dialect resolution chain
+  (`model` / `env` / `effective`), timezone resolution chain (`model` /
+  `host` / `database` / `effective`), and model settings block; in
+  multi-model mode passes `session_id` so the API resolves the loaded
+  model's settings automatically
+- **Validation error codes** — `debug_validation` prompt updated with
+  `INVALID_FILTER_VALUE` error code
+- **Query prompt** — `write_query` prompt updated with Raw Mode, Execute
+  Query Output Formatting, and Default Dialect documentation sections
+
+### Changed
+- Version bumped to 2.1.0 (aligned with OrionBelt Semantic Layer API 2.1.0)
+- OrionBelt Semantic Layer badge updated to 2.1
+
+---
+
+## [2.0.1] — 2026-04-27
+
+### Added
+- **API version check** — startup compares MCP server version against API
+  `/health` version and logs a warning on major or minor mismatch
+- **`get_settings` version info** — now shows API version and API prefix
+  from the `/v1/settings` response
+
+---
+
 ## [2.0.0] — 2026-04-27
 
 ### Added
