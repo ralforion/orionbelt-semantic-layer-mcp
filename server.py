@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     # "console" (pretty), "json" (structured), or "cloudrun" (JSON, GCP severity).
     log_format: Literal["console", "json", "cloudrun"] = "console"
     api_timeout: int = 30
+    # Bearer token for POST /v1/heartbeat. Forwarded as
+    # ``Authorization: Bearer <token>`` only when the heartbeat tool is called.
+    heartbeat_auth_token: str | None = None
 
     @property
     def effective_port(self) -> int:
@@ -546,6 +549,48 @@ def get_settings() -> str:
         if tz_info.get("utc"):
             lines.append(f"  utc: {tz_info['utc']}")
 
+    cache_info = data.get("cache")
+    if cache_info:
+        lines.append("")
+        lines.append("Result cache:")
+        lines.append(f"  backend:           {cache_info.get('backend', '?')}")
+        lines.append(f"  enabled:           {cache_info.get('enabled', False)}")
+        if cache_info.get("min_ttl_seconds") is not None:
+            lines.append(f"  TTL bounds:        {cache_info['min_ttl_seconds']}s")
+            if cache_info.get("max_ttl_seconds") is not None:
+                lines[-1] += f" – {cache_info['max_ttl_seconds']}s"
+        if cache_info.get("unknown_freshness_policy"):
+            lines.append(
+                f"  unknown freshness: {cache_info['unknown_freshness_policy']}  "
+                f"(default TTL: {cache_info.get('unknown_freshness_default_ttl', 0)}s)"
+            )
+        if cache_info.get("max_disk_bytes"):
+            lines.append(f"  max disk:          {cache_info['max_disk_bytes']:,} bytes")
+        if cache_info.get("max_value_bytes"):
+            lines.append(f"  max value size:    {cache_info['max_value_bytes']:,} bytes")
+        if cache_info.get("sweep_interval_seconds") is not None:
+            lines.append(f"  sweep interval:    {cache_info['sweep_interval_seconds']}s")
+        if cache_info.get("heartbeat_endpoint_enabled") is not None:
+            hb_status = (
+                "live"
+                if cache_info["heartbeat_endpoint_enabled"]
+                else "disabled (no token set on API)"
+            )
+            lines.append(f"  heartbeat endpoint: {hb_status}")
+
+    batch_info = data.get("oneshot_batch")
+    if batch_info:
+        lines.append("")
+        lines.append("Oneshot batch limits:")
+        if batch_info.get("max_queries") is not None:
+            lines.append(f"  max queries:      {batch_info['max_queries']}")
+        if batch_info.get("max_parallelism") is not None:
+            lines.append(f"  max parallelism:  {batch_info['max_parallelism']}")
+        if batch_info.get("default_timeout_ms") is not None:
+            lines.append(f"  per-query timeout: {batch_info['default_timeout_ms']}ms")
+        if batch_info.get("batch_timeout_ms") is not None:
+            lines.append(f"  batch timeout:    {batch_info['batch_timeout_ms']}ms")
+
     ms_info = data.get("model_settings")
     if ms_info:
         lines.append("")
@@ -635,9 +680,92 @@ def convert_obml_to_osi(
     return "\n".join(parts)
 
 
+@mcp.tool
+def get_cache_stats() -> str:
+    """Get statistics for the result cache (freshness-driven cache layer).
+
+    Returns the backend (``noop``, ``file``, …), entry count, total / max
+    size, hit / miss counters, oldest entry timestamp, next sweep time, and
+    heartbeat invalidation totals.  Always responds — when caching is
+    disabled the backend is ``noop`` and counters are zero.
+    """
+    return _impl_get_cache_stats()
+
+
+@mcp.tool
+def heartbeat(
+    database: str,
+    schema: str,
+    table: str,
+    timestamp: str | None = None,
+) -> str:
+    """Notify the API that a physical table has been refreshed.
+
+    POSTs to ``/v1/heartbeat`` with ``Authorization: Bearer
+    HEARTBEAT_AUTH_TOKEN``.  The cache invalidates every entry whose
+    dependency set includes ``database.schema.table``.  Use this from ETL
+    job hooks after a table refresh completes.
+
+    Requires ``HEARTBEAT_AUTH_TOKEN`` to be set on the MCP server (must
+    match the API's ``HEARTBEAT_AUTH_TOKEN``).  When the API has the token
+    unset it returns 404; set it to enable this endpoint.
+
+    Args:
+        database: Physical database name.
+        schema: Physical schema name.
+        table: Physical table name.
+        timestamp: Optional ISO 8601 refresh time (defaults to server now;
+            future timestamps are clamped to now).
+    """
+    return _impl_heartbeat(database, schema, table, timestamp)
+
+
 # ---------------------------------------------------------------------------
 # Implementation functions (shared logic for both modes)
 # ---------------------------------------------------------------------------
+
+
+def _format_warning(w: Any) -> str:
+    """Render a single warning. Accepts the structured ``StructuredWarning``
+    shape introduced in API v2.2 (object with ``code``/``severity``/
+    ``message``/``path``/``hint``) and the legacy plain-string shape.
+    """
+    if isinstance(w, str):
+        return w
+    if not isinstance(w, dict):
+        return str(w)
+    parts: list[str] = []
+    code = w.get("code")
+    severity = w.get("severity") or "warning"
+    message = w.get("message", "")
+    if code:
+        parts.append(f"[{severity}:{code}]")
+    elif severity != "warning":
+        parts.append(f"[{severity}]")
+    if message:
+        parts.append(message)
+    if w.get("path"):
+        parts.append(f"(at {w['path']})")
+    if w.get("hint"):
+        parts.append(f"— hint: {w['hint']}")
+    return " ".join(parts)
+
+
+def _format_warnings(items: list | None, indent: str = "  warnings: ") -> list[str]:
+    """Render a list of warnings as one or more output lines.
+
+    Returns an empty list when ``items`` is falsy. The first line uses
+    ``indent``; subsequent warnings get a continuation indent.
+    """
+    if not items:
+        return []
+    rendered = [_format_warning(w) for w in items]
+    if len(rendered) == 1:
+        return [f"{indent}{rendered[0]}"]
+    pad = " " * len(indent)
+    lines = [f"{indent}{rendered[0]}"]
+    lines.extend(f"{pad}{r}" for r in rendered[1:])
+    return lines
 
 
 def _format_metric_summary(met: dict) -> str:
@@ -903,9 +1031,11 @@ def _format_compile_result(data: dict) -> str:
         f"-- Fact tables: {', '.join(resolved.get('fact_tables', []))}",
         f"-- Dimensions: {', '.join(resolved.get('dimensions', []))}",
         f"-- Measures: {', '.join(resolved.get('measures', []))}",
-        "",
-        data["sql"],
     ]
+    physical = data.get("physical_tables") or []
+    if physical:
+        parts.append(f"-- Physical tables: {', '.join(physical)}")
+    parts.extend(["", data["sql"]])
     if not data.get("sql_valid", True):
         parts.append("")
         parts.append("-- WARNING: Generated SQL may not be valid for this dialect")
@@ -938,7 +1068,8 @@ def _format_compile_result(data: dict) -> str:
             parts.append("-- Filter context: yes")
     if data.get("warnings"):
         parts.append("")
-        parts.append(f"-- Warnings: {'; '.join(data['warnings'])}")
+        for w in data["warnings"]:
+            parts.append(f"-- Warning: {_format_warning(w)}")
     return "\n".join(parts)
 
 
@@ -1219,11 +1350,35 @@ def _impl_find_artefacts(model_id: str | None, query: str, types: list[str] | No
         resp = _session_request("POST", f"/models/{model_id}/find", json_body=body)
     data = _parse_json(resp)
     results = data.get("results", [])
-    if not results:
+    fuzzy = data.get("fuzzy_matches", [])
+    exact = data.get("exact_matches")
+    synonym = data.get("synonym_matches")
+    if not results and not fuzzy:
         return f"No artefacts found matching '{query}'."
     lines = [f"Search results for '{query}':", ""]
-    for r in results:
-        lines.append(f"  [{r['type']}] {r['name']}  (matched on {r['match_field']})")
+    if exact or synonym:
+        if exact:
+            lines.append("Exact matches:")
+            for r in exact:
+                lines.append(f"  [{r['type']}] {r['name']}  (matched on {r['match_field']})")
+        if synonym:
+            if exact:
+                lines.append("")
+            lines.append("Synonym matches:")
+            for r in synonym:
+                lines.append(f"  [{r['type']}] {r['name']}  (matched on {r['match_field']})")
+    elif results:
+        for r in results:
+            lines.append(f"  [{r['type']}] {r['name']}  (matched on {r['match_field']})")
+    if fuzzy:
+        if results or exact or synonym:
+            lines.append("")
+        lines.append("Fuzzy matches (no exact or synonym hit):")
+        for f in fuzzy:
+            score = f.get("score")
+            score_str = f"  score={score:.2f}" if isinstance(score, (int, float)) else ""
+            reason = f"  ({f['reason']})" if f.get("reason") else ""
+            lines.append(f"  [{f.get('kind', '?')}] {f.get('name', '?')}{score_str}{reason}")
     return "\n".join(lines)
 
 
@@ -1288,6 +1443,308 @@ def _impl_get_join_graph(model_id: str | None) -> str:
     else:
         lines.append("No joins defined.")
     return "\n".join(lines)
+
+
+def _impl_load_model(
+    model: dict | str | None,
+    extends: list[dict] | str | None,
+    inherits: str | None,
+    dedup: bool,
+) -> str:
+    """Load a model and render the load summary (shared implementation)."""
+    if not model:
+        raise ToolError(
+            "model is mandatory — provide the OBML model as a JSON object. "
+            "Call get_obml_reference() first to learn the structure."
+        )
+    if isinstance(model, str):
+        try:
+            model = json.loads(model)
+        except json.JSONDecodeError as exc:
+            raise ToolError(f"Invalid model JSON string: {exc}") from exc
+    logger.info("load_model called")
+    body: dict = {"model_json": model, "dedup": dedup}
+    if extends:
+        if isinstance(extends, str):
+            try:
+                extends = json.loads(extends)
+            except json.JSONDecodeError as exc:
+                raise ToolError(f"Invalid extends JSON string: {exc}") from exc
+        body["extends_json"] = extends
+    if inherits:
+        body["inherits"] = inherits
+    resp = _session_request("POST", "/models", json_body=body)
+    data = _parse_json(resp)
+
+    load_state = data.get("model_load") or "fresh"
+    header = (
+        f"Model loaded ({load_state}).  model_id: {data['model_id']}"
+        if load_state in ("fresh", "reused")
+        else f"Model loaded successfully.  model_id: {data['model_id']}"
+    )
+    parts = [
+        header,
+        f"  data objects: {data['data_objects']}",
+        f"  dimensions:   {data['dimensions']}",
+        f"  measures:     {data['measures']}",
+        f"  metrics:      {data['metrics']}",
+    ]
+    health = data.get("health")
+    if health:
+        parts.append(
+            f"  health: {health.get('status', 'ok')}  "
+            f"(joins: {health.get('joins', 0)}, "
+            f"warnings: {health.get('warnings_count', 0)})"
+        )
+        orphans = health.get("orphan_data_objects") or []
+        if orphans:
+            parts.append(f"    orphan dataObjects: {', '.join(orphans)}")
+        unreachable = health.get("unreachable_dimensions") or []
+        if unreachable:
+            parts.append(f"    unreachable dimensions: {', '.join(unreachable)}")
+        for risk in health.get("fan_trap_risks") or []:
+            tables = ", ".join(risk.get("tables", []))
+            parts.append(f"    fan-trap risk on [{tables}]: {risk.get('reason', '')}")
+    parts.extend(_format_warnings(data.get("warnings")))
+    return "\n".join(parts)
+
+
+def _impl_get_cache_stats() -> str:
+    """GET /v1/cache/stats — render summary statistics."""
+    resp = _api_request("GET", f"{_API_V1}/cache/stats", retry_on_expired=False)
+    data = _parse_json(resp)
+    backend = data.get("backend", "?")
+    lines = [f"Cache backend: {backend}"]
+    if backend == "noop":
+        lines.append("  (cache is disabled — no entries are stored)")
+        return "\n".join(lines)
+    lines.append(f"  entries:           {data.get('entry_count', 0)}")
+    total = data.get("total_size_bytes", 0)
+    cap = data.get("max_size_bytes", 0)
+    if cap:
+        pct = (total / cap * 100) if cap else 0.0
+        lines.append(f"  size:              {total:,} / {cap:,} bytes ({pct:.1f}%)")
+    else:
+        lines.append(f"  size:              {total:,} bytes")
+    hits = data.get("hit_count_total", 0)
+    misses = data.get("miss_count_total", 0)
+    rate = data.get("hit_rate", 0.0) or 0.0
+    lines.append(f"  hits / misses:     {hits} / {misses}  (hit rate: {rate * 100:.1f}%)")
+    if data.get("oldest_entry"):
+        lines.append(f"  oldest entry:      {data['oldest_entry']}")
+    if data.get("next_sweep_at"):
+        lines.append(f"  next sweep at:     {data['next_sweep_at']}")
+    if data.get("tracked_physical_tables") is not None:
+        lines.append(f"  tracked tables:    {data['tracked_physical_tables']}")
+    if data.get("heartbeat_invalidations_total") is not None:
+        lines.append(f"  heartbeat invals:  {data['heartbeat_invalidations_total']}")
+    return "\n".join(lines)
+
+
+def _impl_heartbeat(
+    database: str,
+    schema: str,
+    table: str,
+    timestamp: str | None,
+) -> str:
+    """POST /v1/heartbeat with bearer auth — invalidate cache for one table."""
+    if not settings.heartbeat_auth_token:
+        raise ToolError(
+            "HEARTBEAT_AUTH_TOKEN is not configured on the MCP server. "
+            "Set it to the same value as the API's HEARTBEAT_AUTH_TOKEN."
+        )
+    body: dict = {"database": database, "schema": schema, "table": table}
+    if timestamp is not None:
+        body["timestamp"] = timestamp
+    client = _get_client()
+    try:
+        resp = client.request(
+            "POST",
+            f"{_API_V1}/heartbeat",
+            json=body,
+            headers={"Authorization": f"Bearer {settings.heartbeat_auth_token}"},
+        )
+    except httpx.ConnectError:
+        raise ToolError(
+            f"Cannot connect to OrionBelt Semantic Layer API at {settings.api_base_url}"
+        ) from None
+    except httpx.TimeoutException:
+        raise ToolError("API request timed out") from None
+    if resp.status_code >= 400:
+        _raise_api_error(resp)
+    data = _parse_json(resp)
+    affected = data.get("affected_data_objects") or []
+    lines = [
+        f"Heartbeat recorded for {data.get('table_ref', '?')}",
+        f"  recorded at:        {data.get('recorded_at', '?')}",
+        f"  cache entries invalidated: {data.get('invalidated_cache_entries', 0)}",
+    ]
+    if affected:
+        lines.append(f"  affected dataObjects: {', '.join(affected)}")
+    return "\n".join(lines)
+
+
+def _impl_plan_query(
+    model_id: str | None,
+    dialect: str | None,
+    dimensions: list[str] | None,
+    measures: list[str] | None,
+    query_json: str | None,
+    use_path_names: list[dict[str, str]] | None,
+    where: str | None = None,
+    having: str | None = None,
+    order_by: str | None = None,
+    limit: int | None = None,
+    offset: int | None = None,
+    dimensions_exclude: bool | None = None,
+    coalesce_dimensions: str | None = None,
+    fields: list[str] | None = None,
+    distinct: bool | None = None,
+    include_database_explain: bool = False,
+) -> str:
+    """Return the planner's understanding of a query without compiling SQL."""
+    logger.info("plan_query called (model_id=%s, dialect=%s)", model_id, dialect)
+    query = _build_query_object(
+        dimensions,
+        measures,
+        query_json,
+        use_path_names,
+        where=where,
+        having=having,
+        order_by=order_by,
+        limit=limit,
+        offset=offset,
+        dimensions_exclude=dimensions_exclude,
+        coalesce_dimensions=coalesce_dimensions,
+        fields=fields,
+        distinct=distinct,
+    )
+    if model_id is None:
+        body = {
+            "query": query,
+            "include_database_explain": include_database_explain,
+        }
+        if dialect is not None:
+            body["dialect"] = dialect
+        resp = _shortcut_request("POST", "/query/plan", json_body=body)
+    else:
+        body = {
+            "model_id": model_id,
+            "query": query,
+            "include_database_explain": include_database_explain,
+        }
+        if dialect is not None:
+            body["dialect"] = dialect
+        resp = _session_request("POST", "/query/plan", json_body=body)
+    data = _parse_json(resp)
+
+    lines = [
+        f"Plan status: {data.get('status', 'ok')}",
+        f"Would compile: {data.get('would_compile', False)}",
+    ]
+    if data.get("planner"):
+        lines.append(f"Planner: {data['planner']} ({data.get('planner_reason', '')})")
+    if data.get("physical_tables"):
+        lines.append(f"Physical tables: {', '.join(data['physical_tables'])}")
+    join_path = data.get("join_path") or []
+    if join_path:
+        lines.append("Join path:")
+        for step in join_path:
+            fk = f" on {step['fk']}" if step.get("fk") else ""
+            lines.append(
+                f"  {step.get('from_object', '?')} --[{step.get('cardinality', '?')}]"
+                f"--> {step.get('to_object', '?')}{fk}"
+            )
+    if data.get("filters_applied") is not None:
+        lines.append(f"Filters applied: {data['filters_applied']}")
+    if data.get("compiled_sql_length_estimate"):
+        lines.append(f"Compiled SQL length estimate: {data['compiled_sql_length_estimate']}")
+    if data.get("warnings"):
+        lines.append("")
+        for w in data["warnings"]:
+            lines.append(f"  warning: {_format_warning(w)}")
+    db_exp = data.get("database_explain")
+    if db_exp:
+        lines.append("")
+        lines.append(f"Database EXPLAIN ({db_exp.get('dialect', '?')}):")
+        lines.append(db_exp.get("explain_output", ""))
+    return "\n".join(lines)
+
+
+def _impl_list_examples(model_id: str | None, intent: str | None) -> str:
+    """List canonical example queries authored alongside the model."""
+    params: dict[str, str] | None = {"intent": intent} if intent else None
+    if model_id is None:
+        resp = _shortcut_request("GET", "/examples", params=params)
+    else:
+        resp = _session_request("GET", f"/models/{model_id}/examples", params=params)
+    data = _parse_json(resp)
+    examples = data.get("examples") or []
+    suggestion = data.get("suggestion")
+    if not examples:
+        if suggestion:
+            return suggestion
+        return "No examples authored on this model."
+    lines = ["Examples:", ""]
+    for ex in examples:
+        tags = ex.get("intent_tags") or []
+        tag_str = f"  [tags: {', '.join(tags)}]" if tags else ""
+        lines.append(f"  {ex['name']}{tag_str}")
+        if ex.get("description"):
+            lines.append(f"    {ex['description']}")
+    if suggestion:
+        lines.append("")
+        lines.append(f"Note: {suggestion}")
+    return "\n".join(lines)
+
+
+def _impl_get_example(model_id: str | None, name: str) -> str:
+    """Return a single example with its query and compiled SQL preview."""
+    encoded = quote(name, safe="")
+    if model_id is None:
+        resp = _shortcut_request("GET", f"/examples/{encoded}")
+    else:
+        resp = _session_request("GET", f"/models/{model_id}/examples/{encoded}")
+    return json.dumps(_parse_json(resp), indent=2)
+
+
+def _impl_run_batch(
+    model_yaml: str | None,
+    model_id: str | None,
+    queries: list[dict],
+    dialect: str | None,
+    execute: bool,
+    max_parallelism: int | None,
+    fail_fast: bool,
+    persist_model: bool,
+    dedup: bool,
+    session_id: str | None,
+) -> str:
+    """POST /v1/oneshot/batch and return a JSON-formatted result."""
+    if not queries:
+        raise ToolError("queries must contain at least one item")
+    body: dict = {
+        "queries": queries,
+        "execute": execute,
+        "fail_fast": fail_fast,
+        "persist_model": persist_model,
+        "dedup": dedup,
+    }
+    if model_yaml:
+        body["model_yaml"] = model_yaml
+    if model_id:
+        body["model_id"] = model_id
+    if dialect is not None:
+        body["dialect"] = dialect
+    if max_parallelism is not None:
+        body["max_parallelism"] = max_parallelism
+    if session_id is not None:
+        body["session_id"] = session_id
+    client = _get_client()
+    resp = _do_request(client, "POST", f"{_API_V1}/oneshot/batch", body)
+    if resp.status_code >= 400:
+        _raise_api_error(resp)
+    return json.dumps(_parse_json(resp), indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -1552,6 +2009,75 @@ def _register_single_model_tools() -> None:
         """
         return _impl_sparql_query(None, query)
 
+    @mcp.tool
+    def plan_query(
+        dialect: str | None = None,
+        dimensions: list[str] | None = None,
+        measures: list[str] | None = None,
+        fields: list[str] | None = None,
+        distinct: bool | None = None,
+        where: str | None = None,
+        having: str | None = None,
+        order_by: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+        dimensions_exclude: bool | None = None,
+        coalesce_dimensions: str | None = None,
+        query_json: str | None = None,
+        use_path_names: list[dict[str, str]] | None = None,
+        include_database_explain: bool = False,
+    ) -> str:
+        """Return the planner's understanding of a query without compiling SQL.
+
+        Cheap by default — no warehouse round trip.  Returns the planner,
+        physical tables, join path, filter count, structured warnings, and a
+        ``would_compile`` flag.  Set ``include_database_explain=True`` to also
+        run the warehouse's ``EXPLAIN`` and include the raw output.
+
+        Same query parameters as ``compile_query``.
+        """
+        return _impl_plan_query(
+            None,
+            dialect,
+            dimensions,
+            measures,
+            query_json,
+            use_path_names,
+            where=where,
+            having=having,
+            order_by=order_by,
+            limit=limit,
+            offset=offset,
+            dimensions_exclude=dimensions_exclude,
+            coalesce_dimensions=coalesce_dimensions,
+            fields=fields,
+            distinct=distinct,
+            include_database_explain=include_database_explain,
+        )
+
+    @mcp.tool
+    def list_examples(intent: str | None = None) -> str:
+        """List canonical example queries authored alongside the model.
+
+        Returns each example's name, description, and intent tags.  Use
+        ``get_example`` for full detail (query payload + compiled SQL preview).
+
+        Args:
+            intent: Optional intent-tag filter.  Falls back through exact →
+                contains → fuzzy tag matching.  When no examples match,
+                the server returns a ``suggestion`` listing available tags.
+        """
+        return _impl_list_examples(None, intent)
+
+    @mcp.tool
+    def get_example(name: str) -> str:
+        """Get a single example by name with its query and compiled SQL preview.
+
+        Args:
+            name: The example's ``name`` field.
+        """
+        return _impl_get_example(None, name)
+
 
 def _setup_mode_tools() -> None:
     """Detect API mode and register the appropriate tool set. Idempotent."""
@@ -1579,6 +2105,7 @@ def _register_multi_model_tools() -> None:
         model: dict | str | None = None,
         extends: list[dict] | str | None = None,
         inherits: str | None = None,
+        dedup: bool = True,
     ) -> str:
         """Load a semantic model definition. Returns a model_id.
 
@@ -1641,41 +2168,11 @@ def _register_multi_model_tools() -> None:
             inherits: Optional model_id of an already-loaded parent model in
                 the session.  The child model inherits the parent's data
                 objects and joins, adding or overriding analytical artefacts.
+            dedup: When true (default), if identical OBML content is already
+                loaded in the current session, reuse its model_id instead of
+                re-parsing.  Pass false to force a fresh load.
         """
-        if not model:
-            raise ToolError(
-                "model is mandatory — provide the OBML model as a JSON object. "
-                "Call get_obml_reference() first to learn the structure."
-            )
-        if isinstance(model, str):
-            try:
-                model = json.loads(model)
-            except json.JSONDecodeError as exc:
-                raise ToolError(f"Invalid model JSON string: {exc}") from exc
-        logger.info("load_model called")
-        body: dict = {"model_json": model}
-        if extends:
-            if isinstance(extends, str):
-                try:
-                    extends = json.loads(extends)
-                except json.JSONDecodeError as exc:
-                    raise ToolError(f"Invalid extends JSON string: {exc}") from exc
-            body["extends_json"] = extends
-        if inherits:
-            body["inherits"] = inherits
-        resp = _session_request("POST", "/models", json_body=body)
-        data = _parse_json(resp)
-
-        parts = [
-            f"Model loaded successfully.  model_id: {data['model_id']}",
-            f"  data objects: {data['data_objects']}",
-            f"  dimensions:   {data['dimensions']}",
-            f"  measures:     {data['measures']}",
-            f"  metrics:      {data['metrics']}",
-        ]
-        if data.get("warnings"):
-            parts.append(f"  warnings: {'; '.join(data['warnings'])}")
-        return "\n".join(parts)
+        return _impl_load_model(model, extends, inherits, dedup)
 
     @mcp.tool
     def describe_model(model_id: str) -> str:
@@ -1976,6 +2473,146 @@ def _register_multi_model_tools() -> None:
             query: SPARQL query string (SELECT or ASK).
         """
         return _impl_sparql_query(model_id, query)
+
+    @mcp.tool
+    def plan_query(
+        model_id: str,
+        dialect: str | None = None,
+        dimensions: list[str] | None = None,
+        measures: list[str] | None = None,
+        fields: list[str] | None = None,
+        distinct: bool | None = None,
+        where: str | None = None,
+        having: str | None = None,
+        order_by: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+        dimensions_exclude: bool | None = None,
+        coalesce_dimensions: str | None = None,
+        query_json: str | None = None,
+        use_path_names: list[dict[str, str]] | None = None,
+        include_database_explain: bool = False,
+    ) -> str:
+        """Return the planner's understanding of a query without compiling SQL.
+
+        Cheap by default — no warehouse round trip.  Returns the planner,
+        physical tables, join path, filter count, structured warnings, and a
+        ``would_compile`` flag.  Set ``include_database_explain=True`` to also
+        run the warehouse's ``EXPLAIN`` and include the raw output (opt-in,
+        costs a round trip).
+
+        Same query parameters as ``compile_query``.
+
+        Args:
+            model_id: The id returned by ``load_model``.
+            include_database_explain: When true, also run EXPLAIN against the
+                configured warehouse and include the raw text.
+        """
+        return _impl_plan_query(
+            model_id,
+            dialect,
+            dimensions,
+            measures,
+            query_json,
+            use_path_names,
+            where=where,
+            having=having,
+            order_by=order_by,
+            limit=limit,
+            offset=offset,
+            dimensions_exclude=dimensions_exclude,
+            coalesce_dimensions=coalesce_dimensions,
+            fields=fields,
+            distinct=distinct,
+            include_database_explain=include_database_explain,
+        )
+
+    @mcp.tool
+    def list_examples(model_id: str, intent: str | None = None) -> str:
+        """List canonical example queries authored alongside the model.
+
+        Returns each example's name, description, and intent tags.  Use
+        ``get_example`` for full detail (query payload + compiled SQL preview).
+
+        Args:
+            model_id: The id returned by ``load_model``.
+            intent: Optional intent-tag filter.  Falls back through exact →
+                contains → fuzzy tag matching.  When no examples match,
+                the server returns a ``suggestion`` listing available tags.
+        """
+        return _impl_list_examples(model_id, intent)
+
+    @mcp.tool
+    def get_example(model_id: str, name: str) -> str:
+        """Get a single example by name with its query and compiled SQL preview.
+
+        Args:
+            model_id: The id returned by ``load_model``.
+            name: The example's ``name`` field.
+        """
+        return _impl_get_example(model_id, name)
+
+    @mcp.tool
+    def run_batch(
+        queries: list[dict],
+        model_yaml: str | None = None,
+        model_id: str | None = None,
+        dialect: str | None = None,
+        execute: bool = False,
+        max_parallelism: int | None = None,
+        fail_fast: bool = False,
+        persist_model: bool = False,
+        dedup: bool = True,
+        session_id: str | None = None,
+    ) -> str:
+        """Run N independent queries against one model in a single round trip.
+
+        POSTs ``/v1/oneshot/batch``.  Loads (or references) one OBML model,
+        then runs every query in ``queries`` in parallel.  Returns the raw
+        JSON response (one ``OneshotBatchQueryResult`` per query, keyed by
+        ``id``).  Stable result ordering by caller id.
+
+        Provide exactly one of ``model_yaml`` (raw OBML YAML string) or
+        ``model_id`` (an already-loaded model in ``session_id``).
+
+        Each ``queries`` item is a dict::
+
+            {"id": "q1", "query": {"select": {...}, ...},
+             "execute": true, "dialect": "snowflake"}
+
+        ``id`` is optional — the server auto-assigns ``q0``, ``q1``, … when
+        omitted.  ``execute`` and ``dialect`` per-item override the batch
+        defaults.
+
+        Partial failure is the default per query (``status: error``);
+        ``fail_fast=True`` cancels the rest on first failure.  The server
+        caps ``max_parallelism`` at its configured limit.
+
+        Args:
+            queries: List of query items (see above).
+            model_yaml: OBML YAML string (mutually exclusive with model_id).
+            model_id: ID of an already-loaded model (requires session_id).
+            dialect: Default dialect for queries that omit one.
+            execute: Default execute flag (compile-only when false).
+            max_parallelism: Cap on concurrent executions; server caps further.
+            fail_fast: If true, cancel remaining queries on first failure.
+            persist_model: Keep a yaml-loaded model in the session afterwards.
+            dedup: Reuse an already-loaded identical OBML model_id (default).
+            session_id: Existing session to reuse; otherwise the API creates
+                a new one for the batch.
+        """
+        return _impl_run_batch(
+            model_yaml=model_yaml,
+            model_id=model_id,
+            queries=queries,
+            dialect=dialect,
+            execute=execute,
+            max_parallelism=max_parallelism,
+            fail_fast=fail_fast,
+            persist_model=persist_model,
+            dedup=dedup,
+            session_id=session_id,
+        )
 
 
 def _register_execute_query_tool() -> None:
@@ -2660,9 +3297,11 @@ def main() -> None:
             except httpx.HTTPError as exc:
                 logger.error("Cannot reach API to validate pre-loaded model: %s", exc)
                 raise SystemExit(1) from None
-            tool_count = 22 if _query_execute_enabled else 21
+            # mode-independent (7) + single-model (19) + execute?
+            tool_count = 27 if _query_execute_enabled else 26
         else:
-            tool_count = 25 if _query_execute_enabled else 24
+            # mode-independent (7) + multi-model (22) + execute?
+            tool_count = 30 if _query_execute_enabled else 29
         mode_label = "single-model" if _single_model_mode else "multi-model"
     else:
         # HTTP/SSE: defer mode detection to the first request so the container

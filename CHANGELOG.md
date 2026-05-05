@@ -4,6 +4,74 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.2.0] — 2026-05-05
+
+### Added (post-2.2.0 follow-up: freshness cache)
+- **`get_cache_stats` tool** — GET `/v1/cache/stats`: backend
+  (``noop``/``file``/…), entry count, total / max size, hit-rate, oldest
+  entry, next sweep time, tracked physical tables, and heartbeat
+  invalidation totals.  Mode-independent
+- **`heartbeat` tool** — POST `/v1/heartbeat` with bearer auth: notify the
+  API that a physical table was refreshed; the cache invalidates every
+  entry that depends on it.  Requires ``HEARTBEAT_AUTH_TOKEN`` env var on
+  the MCP server (forwarded as ``Authorization: Bearer …``)
+- **`plan_query` / `list_examples` / `get_example` in single-model mode** —
+  these tools now register in single-model mode too (uses the new
+  `/v1/query/plan`, `/v1/examples`, `/v1/examples/{name}` shortcut routes
+  on the API)
+- **`compile_query` physical tables** — output now includes
+  ``-- Physical tables: …`` (DATABASE.SCHEMA.CODE refs) when the API
+  surfaces ``physical_tables`` in the response.  ``execute_query`` already
+  passes through raw JSON, so the new ``cached`` / ``cached_at`` /
+  ``ttl_seconds`` / ``ttl_source`` / ``ttl_limiting_table`` fields appear
+  automatically
+- **`HEARTBEAT_AUTH_TOKEN` env var** on the MCP server, paired with the
+  API's matching env
+
+### Added
+- **`run_batch` tool** — POST `/v1/oneshot/batch`: load (or reference) one
+  OBML model and run N independent queries in parallel in a single round
+  trip.  Stable result ordering by caller-provided id (auto-assigned
+  `q0`/`q1`/… when omitted).  Per-query and batch-level timeouts honoured.
+  ``fail_fast`` cancels the rest on first failure; default is partial
+  failure with per-query ``status: ok|error|cancelled``
+- **`plan_query` tool** — POST `/v1/sessions/{sid}/query/plan`: planner's
+  understanding of a query (planner reason, physical tables, join path,
+  filter count, would-compile flag) without compiling SQL or executing.
+  Opt-in ``include_database_explain=true`` runs warehouse ``EXPLAIN`` and
+  surfaces the raw output; failures emit ``DATABASE_EXPLAIN_FAILED``
+  warnings without dropping the OBSL plan
+- **`list_examples` / `get_example` tools** — GET
+  `/v1/sessions/{sid}/models/{mid}/examples` (with optional ``intent``
+  filter) and ``…/examples/{name}``.  Surfaces canonical example queries
+  authored alongside the model with intent tags and a compiled SQL
+  preview
+- **`load_model` dedup + health** — new ``dedup`` argument (default
+  ``True``) reuses an existing ``model_id`` when identical OBML content is
+  already loaded in the session; the response now surfaces ``model_load``
+  (``fresh`` | ``reused``) and a structural ``health`` block (status, join
+  count, orphan dataObjects, fan-trap risks, unreachable dimensions)
+- **Structured warnings** — ``compile_query``, ``load_model``, and
+  ``plan_query`` render the new
+  ``{code, severity, message, path, hint, context}`` shape; legacy plain
+  strings still render unchanged
+- **Fuzzy `find_artefacts`** — output now splits exact / synonym matches
+  and surfaces fuzzy near-miss candidates (with score + reason) when no
+  exact or synonym hit is found
+- **`get_settings` oneshot batch limits** — surfaces ``max_queries``,
+  ``max_parallelism``, per-query timeout, and batch timeout when the
+  ``/v1/settings`` response includes ``oneshot_batch``
+
+### Changed
+- Version bumped to 2.2.0 (aligned with OrionBelt Semantic Layer API 2.2.0)
+- OrionBelt Semantic Layer badge updated to 2.2
+- Multi-model tool count: 25 → 30 (+`run_batch`, `plan_query`,
+  `list_examples`, `get_example`, `get_cache_stats`, `heartbeat`)
+- Single-model tool count: 22 → 27 (+`plan_query`, `list_examples`,
+  `get_example`, `get_cache_stats`, `heartbeat`)
+
+---
+
 ## [2.1.0] — 2026-04-26
 
 ### Added

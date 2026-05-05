@@ -21,6 +21,7 @@ def _reset_state():
     server._obml_reference_cache = None
     server._dialect_names_cache = None
     server._single_model_mode = False
+    server.settings.heartbeat_auth_token = None
     yield
     if server._http_client is not None:
         server._http_client.close()
@@ -29,6 +30,7 @@ def _reset_state():
     server._obml_reference_cache = None
     server._dialect_names_cache = None
     server._single_model_mode = False
+    server.settings.heartbeat_auth_token = None
 
 
 @pytest.fixture()
@@ -2256,3 +2258,651 @@ def test_sparql_query_single_model_mode(mock_api: respx.MockRouter):
 
     result = server._impl_sparql_query(None, "SELECT ?label WHERE { ?s rdfs:label ?label }")
     assert "Orders" in result
+
+
+# ---------------------------------------------------------------------------
+# v2.2: load_model dedup + health, structured warnings
+# ---------------------------------------------------------------------------
+
+
+def test_load_model_renders_health_and_reused_state(mock_api: respx.MockRouter):
+    """load_model surfaces model_load=reused and the health block."""
+    _mock_create_session(mock_api)
+    route = mock_api.post("/v1/sessions/test-session-1/models").mock(
+        return_value=httpx.Response(
+            201,
+            json={
+                "model_id": "m001",
+                "data_objects": 2,
+                "dimensions": 3,
+                "measures": 1,
+                "metrics": 0,
+                "warnings": [],
+                "model_load": "reused",
+                "health": {
+                    "status": "warnings",
+                    "data_objects": 2,
+                    "joins": 1,
+                    "orphan_data_objects": ["Junk"],
+                    "fan_trap_risks": [
+                        {
+                            "tables": ["A", "B"],
+                            "reason": "shared dim FK",
+                            "suggested_pattern": "composite_fact_layer",
+                        }
+                    ],
+                    "unreachable_dimensions": ["StaleDim"],
+                    "warnings_count": 2,
+                },
+            },
+        )
+    )
+
+    out = server._impl_load_model(
+        model={"version": 1.0, "dataObjects": {}},
+        extends=None,
+        inherits=None,
+        dedup=True,
+    )
+
+    assert "Model loaded (reused)" in out
+    assert "model_id: m001" in out
+    assert "health: warnings" in out
+    assert "orphan dataObjects: Junk" in out
+    assert "unreachable dimensions: StaleDim" in out
+    assert "fan-trap risk on [A, B]" in out
+    # default dedup=True must be sent in the request body
+    sent = route.calls[0].request.read().decode()
+    assert '"dedup": true' in sent or '"dedup":true' in sent
+
+
+def test_load_model_dedup_false_sent(mock_api: respx.MockRouter):
+    """load_model passes dedup=False through to the API."""
+    _mock_create_session(mock_api)
+    route = mock_api.post("/v1/sessions/test-session-1/models").mock(
+        return_value=httpx.Response(
+            201,
+            json={
+                "model_id": "m002",
+                "data_objects": 1,
+                "dimensions": 1,
+                "measures": 0,
+                "metrics": 0,
+                "warnings": [],
+                "model_load": "fresh",
+            },
+        )
+    )
+
+    out = server._impl_load_model(
+        model={"version": 1.0, "dataObjects": {}},
+        extends=None,
+        inherits=None,
+        dedup=False,
+    )
+    assert "Model loaded (fresh)" in out
+    sent = route.calls[0].request.read().decode()
+    assert '"dedup": false' in sent or '"dedup":false' in sent
+
+
+def test_compile_query_renders_structured_warnings(mock_api: respx.MockRouter):
+    """compile_query output handles the structured warning shape."""
+    _mock_create_session(mock_api)
+    mock_api.post("/v1/sessions/test-session-1/query/sql").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "sql": "SELECT 1",
+                "dialect": "postgres",
+                "resolved": {
+                    "fact_tables": ["Orders"],
+                    "dimensions": ["Country"],
+                    "measures": ["Revenue"],
+                },
+                "warnings": [
+                    {
+                        "code": "SQL_VALIDATION",
+                        "severity": "warning",
+                        "message": "Generated SQL may not be valid",
+                        "path": "select.measures[0]",
+                        "hint": "Try a different dialect",
+                    }
+                ],
+                "sql_valid": True,
+            },
+        )
+    )
+
+    out = server._impl_compile_query("m001", "postgres", ["Country"], ["Revenue"], None, None)
+    assert "[warning:SQL_VALIDATION]" in out
+    assert "Generated SQL may not be valid" in out
+    assert "(at select.measures[0])" in out
+    assert "hint: Try a different dialect" in out
+
+
+# ---------------------------------------------------------------------------
+# v2.2: find_artefacts fuzzy buckets
+# ---------------------------------------------------------------------------
+
+
+def test_find_artefacts_renders_fuzzy_buckets(mock_api: respx.MockRouter):
+    """find_artefacts renders exact/synonym/fuzzy buckets when present."""
+    _mock_create_session(mock_api)
+    mock_api.post("/v1/sessions/test-session-1/models/m001/find").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "query": "rev",
+                "results": [
+                    {"type": "measure", "name": "Revenue", "match_field": "name", "score": 1.0}
+                ],
+                "exact_matches": [
+                    {"type": "measure", "name": "Revenue", "match_field": "name", "score": 1.0}
+                ],
+                "synonym_matches": [],
+                "fuzzy_matches": [
+                    {"name": "RevenueByYear", "kind": "measure", "score": 0.78, "reason": "trigram"}
+                ],
+            },
+        )
+    )
+
+    out = server._impl_find_artefacts("m001", "rev", None)
+    assert "Exact matches:" in out
+    assert "[measure] Revenue" in out
+    assert "Fuzzy matches" in out
+    assert "score=0.78" in out
+    assert "trigram" in out
+
+
+def test_find_artefacts_renders_fuzzy_only(mock_api: respx.MockRouter):
+    """When no exact/synonym hits, only fuzzy candidates are shown."""
+    _mock_create_session(mock_api)
+    mock_api.post("/v1/sessions/test-session-1/models/m001/find").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "query": "rev",
+                "results": [],
+                "exact_matches": [],
+                "synonym_matches": [],
+                "fuzzy_matches": [
+                    {"name": "Revenu", "kind": "measure", "score": 0.62, "reason": "levenshtein"}
+                ],
+            },
+        )
+    )
+
+    out = server._impl_find_artefacts("m001", "rev", None)
+    assert "Fuzzy matches" in out
+    assert "Revenu" in out
+
+
+# ---------------------------------------------------------------------------
+# v2.2: plan_query
+# ---------------------------------------------------------------------------
+
+
+def test_plan_query_formats_response(mock_api: respx.MockRouter):
+    """plan_query renders planner, physical tables, join path, warnings."""
+    _mock_create_session(mock_api)
+    mock_api.post("/v1/sessions/test-session-1/query/plan").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "status": "ok",
+                "planner": "JoinPlanner",
+                "planner_reason": "single fact table",
+                "physical_tables": ["public.orders", "public.customers"],
+                "join_path": [
+                    {
+                        "from_object": "Orders",
+                        "to_object": "Customers",
+                        "cardinality": "many-to-one",
+                        "fk": "CustomerKey",
+                    }
+                ],
+                "filters_applied": 1,
+                "warnings": [],
+                "would_compile": True,
+                "compiled_sql_length_estimate": 128,
+            },
+        )
+    )
+
+    out = server._impl_plan_query("m001", "postgres", ["Country"], ["Revenue"], None, None)
+    assert "Plan status: ok" in out
+    assert "Would compile: True" in out
+    assert "Planner: JoinPlanner" in out
+    assert "public.orders" in out
+    assert "Orders --[many-to-one]--> Customers on CustomerKey" in out
+    assert "Filters applied: 1" in out
+    assert "Compiled SQL length estimate: 128" in out
+
+
+# ---------------------------------------------------------------------------
+# v2.2: list_examples / get_example
+# ---------------------------------------------------------------------------
+
+
+def test_list_examples_renders_summaries(mock_api: respx.MockRouter):
+    """list_examples renders authored examples with intent tags."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/examples").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "examples": [
+                    {
+                        "name": "TopCustomers",
+                        "description": "Top 10 customers by revenue",
+                        "intent_tags": ["ranking", "customers"],
+                    }
+                ],
+                "suggestion": None,
+            },
+        )
+    )
+
+    out = server._impl_list_examples("m001", None)
+    assert "TopCustomers" in out
+    assert "ranking, customers" in out
+    assert "Top 10 customers by revenue" in out
+
+
+def test_list_examples_with_intent_miss(mock_api: respx.MockRouter):
+    """A miss returns the suggestion message."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/examples").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "examples": [],
+                "suggestion": "no examples for 'foo'; available tags: ranking, customers",
+            },
+        )
+    )
+
+    out = server._impl_list_examples("m001", "foo")
+    assert "no examples for 'foo'" in out
+    assert "available tags" in out
+
+
+def test_get_example_url_encodes_name(mock_api: respx.MockRouter):
+    """get_example URL-encodes the name and returns JSON."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/examples/Top%20Customers").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "name": "Top Customers",
+                "description": "Ranked",
+                "intent_tags": ["ranking"],
+                "query": {"select": {"dimensions": ["Country"], "measures": ["Revenue"]}},
+                "compiled_sql_preview": "SELECT 1",
+            },
+        )
+    )
+
+    out = server._impl_get_example("m001", "Top Customers")
+    assert '"name": "Top Customers"' in out
+    assert '"compiled_sql_preview": "SELECT 1"' in out
+
+
+# ---------------------------------------------------------------------------
+# v2.2: run_batch
+# ---------------------------------------------------------------------------
+
+
+def test_run_batch_posts_oneshot(mock_api: respx.MockRouter):
+    """run_batch POSTs /v1/oneshot/batch and forwards the response."""
+    route = mock_api.post("/v1/oneshot/batch").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "session_id": "s-1",
+                "model_id": "m1",
+                "model_persisted": False,
+                "model_load": "fresh",
+                "results": [
+                    {
+                        "id": "q0",
+                        "status": "ok",
+                        "sql": "SELECT 1",
+                        "dialect": "postgres",
+                        "executed": False,
+                        "warnings": [],
+                    }
+                ],
+                "batch_warnings": [],
+            },
+        )
+    )
+
+    out = server._impl_run_batch(
+        model_yaml="version: 1.0\n",
+        model_id=None,
+        queries=[{"query": {"select": {"dimensions": ["Country"], "measures": ["Revenue"]}}}],
+        dialect=None,
+        execute=False,
+        max_parallelism=None,
+        fail_fast=False,
+        persist_model=False,
+        dedup=True,
+        session_id=None,
+    )
+    assert '"model_load": "fresh"' in out
+    sent = route.calls[0].request.read().decode()
+    assert '"model_yaml"' in sent
+    assert '"dedup": true' in sent or '"dedup":true' in sent
+
+
+def test_run_batch_rejects_empty_queries():
+    """run_batch raises a ToolError when queries is empty."""
+    with pytest.raises(server.ToolError):
+        server._impl_run_batch(
+            model_yaml="version: 1.0\n",
+            model_id=None,
+            queries=[],
+            dialect=None,
+            execute=False,
+            max_parallelism=None,
+            fail_fast=False,
+            persist_model=False,
+            dedup=True,
+            session_id=None,
+        )
+
+
+# ---------------------------------------------------------------------------
+# v2.2: get_settings shows oneshot_batch limits
+# ---------------------------------------------------------------------------
+
+
+def test_get_settings_shows_oneshot_batch_limits(mock_api: respx.MockRouter):
+    """get_settings surfaces server-side oneshot_batch limits when present."""
+    mock_api.get("/v1/settings").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "version": "2.2.0",
+                "api_version": "v1",
+                "single_model_mode": False,
+                "session_ttl_seconds": 1800,
+                "query_execute": False,
+                "oneshot_batch": {
+                    "max_queries": 50,
+                    "max_parallelism": 8,
+                    "default_timeout_ms": 30000,
+                    "batch_timeout_ms": 120000,
+                },
+            },
+        )
+    )
+
+    out = server.get_settings()
+    assert "Oneshot batch limits:" in out
+    assert "max queries:      50" in out
+    assert "max parallelism:  8" in out
+    assert "per-query timeout: 30000ms" in out
+    assert "batch timeout:    120000ms" in out
+
+
+def test_get_settings_renders_cache_block(mock_api: respx.MockRouter):
+    """get_settings surfaces the new /v1/settings.cache block."""
+    mock_api.get("/v1/settings").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "version": "2.2.0",
+                "api_version": "v1",
+                "single_model_mode": False,
+                "session_ttl_seconds": 1800,
+                "query_execute": False,
+                "cache": {
+                    "backend": "file",
+                    "enabled": True,
+                    "min_ttl_seconds": 30,
+                    "max_ttl_seconds": 86400,
+                    "max_value_bytes": 10_000_000,
+                    "max_disk_bytes": 1_000_000_000,
+                    "sweep_interval_seconds": 300,
+                    "unknown_freshness_policy": "default_ttl",
+                    "unknown_freshness_default_ttl": 60,
+                    "heartbeat_endpoint_enabled": True,
+                },
+            },
+        )
+    )
+
+    out = server.get_settings()
+    assert "Result cache:" in out
+    assert "backend:           file" in out
+    assert "enabled:           True" in out
+    assert "TTL bounds:        30s – 86400s" in out
+    assert "unknown freshness: default_ttl" in out
+    assert "(default TTL: 60s)" in out
+    assert "heartbeat endpoint: live" in out
+
+
+def test_get_settings_renders_cache_block_disabled(mock_api: respx.MockRouter):
+    """When cache is noop and heartbeat is off, render a clear disabled state."""
+    mock_api.get("/v1/settings").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "version": "2.2.0",
+                "api_version": "v1",
+                "single_model_mode": False,
+                "session_ttl_seconds": 1800,
+                "query_execute": False,
+                "cache": {
+                    "backend": "noop",
+                    "enabled": False,
+                    "min_ttl_seconds": 30,
+                    "max_ttl_seconds": 86400,
+                    "max_value_bytes": 10_000_000,
+                    "max_disk_bytes": 1_000_000_000,
+                    "sweep_interval_seconds": 300,
+                    "unknown_freshness_policy": "no_cache",
+                    "unknown_freshness_default_ttl": 0,
+                    "heartbeat_endpoint_enabled": False,
+                },
+            },
+        )
+    )
+
+    out = server.get_settings()
+    assert "backend:           noop" in out
+    assert "enabled:           False" in out
+    assert "heartbeat endpoint: disabled (no token set on API)" in out
+
+
+# ---------------------------------------------------------------------------
+# v2.2 follow-up: cache stats, heartbeat, shortcut plan/examples,
+# physical_tables in compile_query
+# ---------------------------------------------------------------------------
+
+
+def test_get_cache_stats_noop(mock_api: respx.MockRouter):
+    """get_cache_stats short-circuits on noop backend."""
+    mock_api.get("/v1/cache/stats").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "backend": "noop",
+                "entry_count": 0,
+                "total_size_bytes": 0,
+                "max_size_bytes": 0,
+                "hit_count_total": 0,
+                "miss_count_total": 0,
+                "hit_rate": 0.0,
+                "tracked_physical_tables": 0,
+                "heartbeat_invalidations_total": 0,
+            },
+        )
+    )
+
+    out = server.get_cache_stats()
+    assert "backend: noop" in out
+    assert "cache is disabled" in out
+
+
+def test_get_cache_stats_file_backend(mock_api: respx.MockRouter):
+    """get_cache_stats renders counters for an active backend."""
+    mock_api.get("/v1/cache/stats").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "backend": "file",
+                "entry_count": 12,
+                "total_size_bytes": 1_234_567,
+                "max_size_bytes": 10_000_000,
+                "hit_count_total": 8,
+                "miss_count_total": 4,
+                "hit_rate": 0.6667,
+                "oldest_entry": "2026-05-05T10:00:00Z",
+                "next_sweep_at": "2026-05-05T11:00:00Z",
+                "tracked_physical_tables": 3,
+                "heartbeat_invalidations_total": 2,
+            },
+        )
+    )
+
+    out = server.get_cache_stats()
+    assert "backend: file" in out
+    assert "entries:           12" in out
+    assert "1,234,567 / 10,000,000 bytes" in out
+    assert "hits / misses:     8 / 4" in out
+    assert "hit rate: 66.7%" in out
+    assert "tracked tables:    3" in out
+    assert "heartbeat invals:  2" in out
+
+
+def test_heartbeat_requires_token(mock_api: respx.MockRouter):
+    """heartbeat raises a clear error when HEARTBEAT_AUTH_TOKEN is unset."""
+    server.settings.heartbeat_auth_token = None
+    with pytest.raises(server.ToolError, match="HEARTBEAT_AUTH_TOKEN"):
+        server.heartbeat("ob_demo", "public", "orders")
+
+
+def test_heartbeat_sends_bearer_and_renders_response(mock_api: respx.MockRouter):
+    """heartbeat sends Authorization: Bearer and renders affected dataObjects."""
+    server.settings.heartbeat_auth_token = "secret-token"
+    try:
+        route = mock_api.post("/v1/heartbeat").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "table_ref": "ob_demo.public.orders",
+                    "recorded_at": "2026-05-05T18:30:00+00:00",
+                    "invalidated_cache_entries": 4,
+                    "affected_data_objects": ["Orders", "OrderLines"],
+                },
+            )
+        )
+
+        out = server.heartbeat("ob_demo", "public", "orders")
+
+        assert "ob_demo.public.orders" in out
+        assert "cache entries invalidated: 4" in out
+        assert "Orders, OrderLines" in out
+        sent = route.calls[0].request
+        assert sent.headers.get("authorization") == "Bearer secret-token"
+        assert b'"database":' in sent.read()
+    finally:
+        server.settings.heartbeat_auth_token = None
+
+
+def test_compile_query_renders_physical_tables(mock_api: respx.MockRouter):
+    """compile_query output surfaces the physical_tables block."""
+    _mock_create_session(mock_api)
+    mock_api.post("/v1/sessions/test-session-1/query/sql").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "sql": "SELECT 1",
+                "dialect": "postgres",
+                "resolved": {
+                    "fact_tables": ["Orders"],
+                    "dimensions": ["Country"],
+                    "measures": ["Revenue"],
+                },
+                "physical_tables": ["ob_demo.public.orders", "ob_demo.public.customers"],
+                "warnings": [],
+                "sql_valid": True,
+            },
+        )
+    )
+
+    out = server._impl_compile_query("m001", "postgres", ["Country"], ["Revenue"], None, None)
+    assert "Physical tables: ob_demo.public.orders, ob_demo.public.customers" in out
+
+
+def test_plan_query_uses_shortcut_in_single_model_mode(mock_api: respx.MockRouter):
+    """plan_query falls through to /v1/query/plan when model_id is None."""
+    server._single_model_mode = True
+    mock_api.post("/v1/query/plan").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "status": "ok",
+                "planner": "JoinPlanner",
+                "planner_reason": "single fact",
+                "physical_tables": ["ob.public.orders"],
+                "join_path": [],
+                "filters_applied": 0,
+                "warnings": [],
+                "would_compile": True,
+                "compiled_sql_length_estimate": 64,
+            },
+        )
+    )
+
+    out = server._impl_plan_query(None, None, ["Country"], ["Revenue"], None, None)
+    assert "Plan status: ok" in out
+    assert "ob.public.orders" in out
+
+
+def test_list_examples_uses_shortcut_in_single_model_mode(mock_api: respx.MockRouter):
+    """list_examples falls through to /v1/examples when model_id is None."""
+    server._single_model_mode = True
+    mock_api.get("/v1/examples").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "examples": [
+                    {
+                        "name": "TopCustomers",
+                        "description": "Top 10",
+                        "intent_tags": ["ranking"],
+                    }
+                ],
+                "suggestion": None,
+            },
+        )
+    )
+
+    out = server._impl_list_examples(None, None)
+    assert "TopCustomers" in out
+    assert "ranking" in out
+
+
+def test_get_example_uses_shortcut_in_single_model_mode(mock_api: respx.MockRouter):
+    """get_example falls through to /v1/examples/{name} when model_id is None."""
+    server._single_model_mode = True
+    mock_api.get("/v1/examples/Top%20Customers").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "name": "Top Customers",
+                "description": "Ranked",
+                "intent_tags": ["ranking"],
+                "query": {"select": {"dimensions": ["Country"], "measures": ["Revenue"]}},
+                "compiled_sql_preview": "SELECT 1",
+            },
+        )
+    )
+
+    out = server._impl_get_example(None, "Top Customers")
+    assert '"name": "Top Customers"' in out

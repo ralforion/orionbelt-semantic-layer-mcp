@@ -7,8 +7,8 @@
 
 <p align="center"><strong>Thin MCP server that delegates to the OrionBelt Semantic Layer REST API</strong></p>
 
-[![Version 2.1.0](https://img.shields.io/badge/version-2.1.0-purple.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/releases)
-[![OrionBelt Semantic Layer 2.1](https://img.shields.io/badge/OrionBelt_Semantic_Layer-2.1-0054A6.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer)
+[![Version 2.2.0](https://img.shields.io/badge/version-2.2.0-purple.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/releases)
+[![OrionBelt Semantic Layer 2.2](https://img.shields.io/badge/OrionBelt_Semantic_Layer-2.2-0054A6.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/blob/main/LICENSE)
 [![FastMCP](https://img.shields.io/badge/FastMCP-3.2+-8A2BE2)](https://gofastmcp.com)
@@ -47,7 +47,7 @@ The OrionBelt Semantic Layer platform has two deployment modes. This MCP server 
 - **No business logic** — all tool calls delegate to the REST API (v1 endpoints)
 - **Dual-mode** — auto-detects single-model or multi-model API mode at startup
 - **Auto-session management** — creates an API session on first tool call, caches the ID (multi-model mode)
-- **22 tools** (single-model mode) or **25 tools** (multi-model mode) for querying, execution, discovery, diagrams, RDF/SPARQL, and format conversion
+- **27 tools** (single-model mode) or **30 tools** (multi-model mode) for querying, execution, batch, planning, discovery, examples, diagrams, RDF/SPARQL, freshness cache, and format conversion
 - **3 prompts + 1 resource** for OBML reference and usage guidance
 
 <p align="center">
@@ -116,6 +116,7 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 | `MCP_SERVER_PORT` | `9000`       | Bind port for HTTP/SSE                |
 | `LOG_LEVEL`       | `INFO`       | Logging level                         |
 | `API_TIMEOUT`     | `30`         | HTTP timeout in seconds               |
+| `HEARTBEAT_AUTH_TOKEN` | —       | Bearer token forwarded to `POST /v1/heartbeat` (must match the API's value) |
 
 ## Tools
 
@@ -124,7 +125,7 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 | MCP Tool                          | Description                                              |
 | --------------------------------- | -------------------------------------------------------- |
 | `get_obml_reference()`            | Returns the full OBML format specification               |
-| `load_model(model)`               | Parse, validate, and store a semantic model (JSON object)|
+| `load_model(model, dedup=True)`   | Parse, validate, and store a model (returns health + model_load) |
 | `describe_model(model_id)`        | Inspect data objects, dimensions, measures, metrics      |
 | `remove_model(model_id)`          | Remove a model from the current session                  |
 | `list_models()`                   | List all models loaded in the current session            |
@@ -141,7 +142,9 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 | `list_metrics(model_id)`          | List all metrics in a model                              |
 | `get_metric(model_id, name)`      | Get a single metric by name                              |
 | `explain_artefact(model_id, name)`| Explain lineage of a dimension, measure, or metric       |
-| `find_artefacts(model_id, query)` | Search artefacts by name or synonym                      |
+| `find_artefacts(model_id, query)` | Search artefacts (exact / synonym / fuzzy buckets)       |
+| `list_examples(model_id, intent?)`| List authored example queries (filterable by intent tag) |
+| `get_example(model_id, name)`     | Get one example with query + compiled SQL preview        |
 | `get_join_graph(model_id)`        | Return the join graph as an adjacency list               |
 
 ### Query, execution & diagrams
@@ -150,6 +153,8 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 | --------------------------------- | -------------------------------------------------------- |
 | `compile_query(...)`              | Compile a semantic query to SQL (with explain plan)      |
 | `execute_query(...)`              | Compile and execute a query, returning SQL + result data |
+| `plan_query(model_id, ...)`       | Planner view (no SQL); optional warehouse `EXPLAIN`      |
+| `run_batch(queries, ...)`         | One-shot: load a model + run N queries in parallel       |
 | `get_model_diagram(model_id)`     | Generate a Mermaid ER diagram for a loaded model         |
 
 ### Semantic graph (RDF / SPARQL)
@@ -159,12 +164,19 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 | `get_graph(model_id)`             | Return the model as OBSL-Core RDF (Turtle)               |
 | `sparql_query(model_id, query)`   | Run a read-only SPARQL query (SELECT / ASK)              |
 
+### Freshness cache
+
+| MCP Tool                                  | Description                                              |
+| ----------------------------------------- | -------------------------------------------------------- |
+| `get_cache_stats()`                       | Cache backend, entry count, hit rate, sweep time         |
+| `heartbeat(database, schema, table, ts?)` | Notify the API a table refreshed (invalidates cache)     |
+
 ### Utilities
 
 | MCP Tool                          | Description                                              |
 | --------------------------------- | -------------------------------------------------------- |
 | `list_dialects()`                 | List available SQL dialects and capabilities             |
-| `get_settings()`                  | Get API config (single-model mode, TTL, Flight SQL)      |
+| `get_settings()`                  | Get API config (modes, TTL, oneshot batch limits)        |
 | `convert_osi_to_obml(input_yaml)` | Convert OSI YAML to OBML format                          |
 | `convert_obml_to_osi(input_yaml)` | Convert OBML YAML to OSI format                          |
 
