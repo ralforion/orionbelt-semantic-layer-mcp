@@ -4,6 +4,12 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.2.1] — 2026-05-09
+
+### Changed
+
+- Version bumped to 2.2.1 (aligned with OrionBelt Semantic Layer API 2.2.1). No MCP code changes — this release tracks the API's bundled demo model rewrite and ER diagram fixes.
+
 ## [2.2.0] — 2026-05-05
 
 ### Added (post-2.2.0 follow-up: freshness cache)

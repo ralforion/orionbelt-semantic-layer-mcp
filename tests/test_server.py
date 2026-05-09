@@ -2625,7 +2625,7 @@ def test_get_settings_shows_oneshot_batch_limits(mock_api: respx.MockRouter):
         return_value=httpx.Response(
             200,
             json={
-                "version": "2.2.0",
+                "version": "2.2.1",
                 "api_version": "v1",
                 "single_model_mode": False,
                 "session_ttl_seconds": 1800,
@@ -2654,7 +2654,7 @@ def test_get_settings_renders_cache_block(mock_api: respx.MockRouter):
         return_value=httpx.Response(
             200,
             json={
-                "version": "2.2.0",
+                "version": "2.2.1",
                 "api_version": "v1",
                 "single_model_mode": False,
                 "session_ttl_seconds": 1800,
@@ -2691,7 +2691,7 @@ def test_get_settings_renders_cache_block_disabled(mock_api: respx.MockRouter):
         return_value=httpx.Response(
             200,
             json={
-                "version": "2.2.0",
+                "version": "2.2.1",
                 "api_version": "v1",
                 "single_model_mode": False,
                 "session_ttl_seconds": 1800,
