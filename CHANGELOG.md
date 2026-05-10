@@ -4,6 +4,12 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.3.0] — 2026-05-10
+
+### Changed
+
+- Tested against OBSL v2.3.0; no client changes required.
+
 ## [2.2.1] — 2026-05-09
 
 ### Changed
