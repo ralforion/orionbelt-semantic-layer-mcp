@@ -278,13 +278,39 @@ def _parse_json(resp: httpx.Response):
 
 
 def _parse_error_detail(response: httpx.Response) -> str:
-    """Extract error detail string from an API error response."""
+    """Extract error detail string from an API error response.
+
+    Picks up the ``message`` field from structured detail dicts
+    (``UnsupportedAggregationError``, ``UnsupportedGroupingError``, OBSQL
+    translation errors, query resolution errors).  When the dict carries
+    typed context (``dialect`` + ``aggregation`` / ``grouping``, or a list
+    of ``errors`` with ``code`` / ``message``), it is appended to the
+    message so the LLM sees the structured fields without parsing JSON.
+    """
     try:
         body = response.json()
         detail = body.get("detail", response.text)
-        # Structured error detail (e.g. UnsupportedAggregationError)
         if isinstance(detail, dict):
-            return detail.get("message", str(detail))
+            message = detail.get("message") or detail.get("error") or str(detail)
+            # UnsupportedAggregationError / UnsupportedGroupingError shape
+            dialect = detail.get("dialect")
+            aggregation = detail.get("aggregation")
+            grouping = detail.get("grouping")
+            if dialect and (aggregation or grouping):
+                tag = aggregation or grouping
+                kind = "aggregation" if aggregation else "grouping"
+                message = f"{message} ({kind}={tag!r}, dialect={dialect!r})"
+            # Nested error list (ResolutionError, SQLTranslationError, ...)
+            errors = detail.get("errors")
+            if isinstance(errors, list) and errors:
+                parts = [
+                    f"{e.get('code', '?')}: {e.get('message', '?')}"
+                    for e in errors
+                    if isinstance(e, dict)
+                ]
+                if parts:
+                    message = f"{message} — {'; '.join(parts)}"
+            return str(message)
         return str(detail)
     except (ValueError, json.JSONDecodeError):
         return response.text
@@ -415,6 +441,7 @@ def _shortcut_request(
 # ---------------------------------------------------------------------------
 
 _obml_reference_cache: str | None = None
+_obsql_reference_cache: str | None = None
 _dialect_names_cache: list[str] | None = None
 
 
@@ -428,6 +455,18 @@ def _fetch_obml_reference() -> str:
                 data = _parse_json(resp)
                 _obml_reference_cache = data["reference"]
     return _obml_reference_cache
+
+
+def _fetch_obsql_reference() -> str:
+    """Fetch and cache the OBSQL reference from the API."""
+    global _obsql_reference_cache
+    if _obsql_reference_cache is None:
+        with _state_lock:
+            if _obsql_reference_cache is None:  # double-check under lock
+                resp = _api_request("GET", f"{_API_V1}/reference/obsql", retry_on_expired=False)
+                data = _parse_json(resp)
+                _obsql_reference_cache = data["reference"]
+    return _obsql_reference_cache
 
 
 def _fetch_dialect_names() -> list[str]:
@@ -448,6 +487,12 @@ def obml_reference() -> str:
     return _fetch_obml_reference()
 
 
+@mcp.resource("obsql://reference")
+def obsql_reference() -> str:
+    """Full OBSQL grammar reference — natural SQL surface against the semantic model."""
+    return _fetch_obsql_reference()
+
+
 # ---------------------------------------------------------------------------
 # Mode-independent tools (always registered)
 # ---------------------------------------------------------------------------
@@ -463,6 +508,57 @@ def get_obml_reference() -> str:
     dimensions, measures, metrics, and expressions.
     """
     return _fetch_obml_reference()
+
+
+@mcp.tool
+def get_obsql_reference() -> str:
+    """Get the OBSQL (OrionBelt Semantic Query Language) reference.
+
+    OBSQL is a natural SQL-like surface against the model's virtual table:
+    ``SELECT <dim/measure labels> FROM <model_name> [WHERE ...] [HAVING ...]
+    [ORDER BY ...] [LIMIT n] [WITH ROLLUP | WITH CUBE]``.  JOINs, CTEs,
+    subqueries, UNION, window functions, and ``SELECT *`` are rejected.
+
+    IMPORTANT: Call this tool BEFORE composing any OBSQL queries with the
+    ``compile_obsql`` or ``execute_obsql`` tools.
+    """
+    return _fetch_obsql_reference()
+
+
+@mcp.tool
+def list_references() -> str:
+    """List all available reference documents (OBML, OBSQL, JSON schemas).
+
+    Returns the index of references published by ``GET /v1/reference`` so
+    callers can discover the model and query languages without scraping
+    Swagger UI.
+    """
+    resp = _api_request("GET", f"{_API_V1}/reference", retry_on_expired=False)
+    data = _parse_json(resp)
+    refs = data.get("references", [])
+    if not refs:
+        return "No references published by this API."
+    lines = ["Available references:", ""]
+    for ref in refs:
+        lines.append(f"  {ref['name']}  ({ref['kind']})")
+        lines.append(f"    description: {ref['description']}")
+        lines.append(f"    path: {ref['path']}")
+    return "\n".join(lines)
+
+
+@mcp.tool
+def get_json_schema(name: Literal["obml", "query"]) -> str:
+    """Get a published JSON Schema by name.
+
+    Returns the raw JSON Schema document as a JSON string so callers can
+    validate documents locally without round-tripping them to the API.
+
+    Args:
+        name: Either ``"obml"`` (the OBML model schema) or ``"query"``
+            (the QueryObject input to ``/query/execute``).
+    """
+    resp = _api_request("GET", f"{_API_V1}/reference/schemas/{name}", retry_on_expired=False)
+    return json.dumps(_parse_json(resp), indent=2)
 
 
 @mcp.tool
@@ -1708,6 +1804,109 @@ def _impl_get_example(model_id: str | None, name: str) -> str:
     return json.dumps(_parse_json(resp), indent=2)
 
 
+def _format_obsql_compile_result(data: dict) -> str:
+    """Format compile_obsql API response into human-readable output.
+
+    Mirrors :func:`_format_compile_result` but also surfaces the translated
+    ``QueryObject`` (the intermediate shape OBSQL was rewritten into).
+    """
+    resolved = data.get("resolved", {})
+    parts = [
+        f"-- Dialect: {data['dialect']}",
+        f"-- Fact tables: {', '.join(resolved.get('fact_tables', []))}",
+        f"-- Dimensions: {', '.join(resolved.get('dimensions', []))}",
+        f"-- Measures: {', '.join(resolved.get('measures', []))}",
+    ]
+    physical = data.get("physical_tables") or []
+    if physical:
+        parts.append(f"-- Physical tables: {', '.join(physical)}")
+    parts.extend(["", data["sql"]])
+    if not data.get("sql_valid", True):
+        parts.append("")
+        parts.append("-- WARNING: Generated SQL may not be valid for this dialect")
+    if data.get("query"):
+        parts.append("")
+        parts.append("-- Translated QueryObject:")
+        for line in json.dumps(data["query"], indent=2).splitlines():
+            parts.append(f"-- {line}")
+    if data.get("explain"):
+        exp = data["explain"]
+        parts.append("")
+        parts.append(f"-- Planner: {exp['planner']} ({exp.get('planner_reason', '')})")
+        parts.append(f"-- Base object: {exp['base_object']} ({exp.get('base_object_reason', '')})")
+        for j in exp.get("joins", []):
+            parts.append(
+                f"--   Join: {j['from_object']} -> {j['to_object']} ({j.get('reason', '')})"
+            )
+    if data.get("warnings"):
+        parts.append("")
+        for w in data["warnings"]:
+            parts.append(f"-- Warning: {_format_warning(w)}")
+    return "\n".join(parts)
+
+
+def _impl_compile_obsql(
+    model_id: str | None,
+    sql: str,
+    dialect: str | None,
+) -> str:
+    """Translate OBSQL to SQL (shared implementation).
+
+    In single-model mode (``model_id`` is None) uses the shortcut endpoint
+    ``POST /v1/query/semantic-ql/compile``.  In multi-model mode the
+    session-scoped endpoint ``POST /v1/sessions/{sid}/query/semantic-ql/compile``
+    is used with the supplied ``model_id``.
+    """
+    if not sql or not sql.strip():
+        raise ToolError("sql must be a non-empty OBSQL string")
+    body: dict = {"sql": sql}
+    if dialect is not None:
+        body["dialect"] = dialect
+    if model_id is None:
+        body["model_id"] = ""  # shortcut auto-resolves
+        resp = _shortcut_request("POST", "/query/semantic-ql/compile", json_body=body)
+    else:
+        body["model_id"] = model_id
+        resp = _session_request("POST", "/query/semantic-ql/compile", json_body=body)
+    return _format_obsql_compile_result(_parse_json(resp))
+
+
+def _impl_execute_obsql(
+    model_id: str | None,
+    sql: str,
+    dialect: str | None,
+    output_format: str = "json",
+    format_values: bool | None = None,
+    locale: str | None = None,
+    timezone: str | None = None,
+) -> str:
+    """Translate OBSQL → QueryObject, compile, and execute (shared impl)."""
+    if not sql or not sql.strip():
+        raise ToolError("sql must be a non-empty OBSQL string")
+    body: dict = {"sql": sql}
+    if dialect is not None:
+        body["dialect"] = dialect
+
+    extra_params: dict[str, str] = {"format": output_format}
+    if format_values is not None:
+        extra_params["format_values"] = str(format_values).lower()
+    if locale is not None:
+        extra_params["locale"] = locale
+    if timezone is not None:
+        extra_params["timezone"] = timezone
+
+    if model_id is None:
+        body["model_id"] = ""  # shortcut auto-resolves
+        resp = _shortcut_request("POST", "/query/semantic-ql", json_body=body, params=extra_params)
+    else:
+        body["model_id"] = model_id
+        resp = _session_request("POST", "/query/semantic-ql", json_body=body, params=extra_params)
+
+    if output_format == "tsv":
+        return resp.text
+    return json.dumps(_parse_json(resp), indent=2)
+
+
 def _impl_run_batch(
     model_yaml: str | None,
     model_id: str | None,
@@ -2077,6 +2276,35 @@ def _register_single_model_tools() -> None:
             name: The example's ``name`` field.
         """
         return _impl_get_example(None, name)
+
+    @mcp.tool
+    def compile_obsql(
+        sql: str,
+        dialect: str | None = None,
+    ) -> str:
+        """Translate an OBSQL (natural SQL) query to SQL without executing it.
+
+        OBSQL is a BI-style SQL surface against the model's virtual table.
+        Supported shape::
+
+            SELECT <dim/measure labels> FROM <model_name>
+              [WHERE <conditions>] [HAVING <conditions>]
+              [GROUP BY ...] [ORDER BY ... [NULLS FIRST|LAST]]
+              [LIMIT n] [OFFSET m]
+              [WITH ROLLUP | WITH CUBE]
+
+        ``SELECT *``, JOINs, CTEs, subqueries, UNION, and window functions
+        are rejected.  ``SELECT`` without ``FROM`` resolves to the implicit
+        model.
+
+        Call ``get_obsql_reference()`` first to see the full grammar.
+
+        Args:
+            sql: OBSQL query string.
+            dialect: Target SQL dialect.  When omitted the API resolves via
+                ``model.settings.defaultDialect`` → server default.
+        """
+        return _impl_compile_obsql(None, sql, dialect)
 
 
 def _setup_mode_tools() -> None:
@@ -2553,6 +2781,36 @@ def _register_multi_model_tools() -> None:
         return _impl_get_example(model_id, name)
 
     @mcp.tool
+    def compile_obsql(
+        model_id: str,
+        sql: str,
+        dialect: str | None = None,
+    ) -> str:
+        """Translate an OBSQL (natural SQL) query to SQL without executing it.
+
+        OBSQL is a BI-style SQL surface against the model's virtual table.
+        Supported shape::
+
+            SELECT <dim/measure labels> FROM <model_name>
+              [WHERE <conditions>] [HAVING <conditions>]
+              [GROUP BY ...] [ORDER BY ... [NULLS FIRST|LAST]]
+              [LIMIT n] [OFFSET m]
+              [WITH ROLLUP | WITH CUBE]
+
+        ``SELECT *``, JOINs, CTEs, subqueries, UNION, and window functions
+        are rejected.  ``SELECT`` without ``FROM`` resolves to the model.
+
+        Call ``get_obsql_reference()`` first to see the full grammar.
+
+        Args:
+            model_id: The id returned by ``load_model``.
+            sql: OBSQL query string.
+            dialect: Target SQL dialect.  When omitted the API resolves via
+                ``model.settings.defaultDialect`` → server default.
+        """
+        return _impl_compile_obsql(model_id, sql, dialect)
+
+    @mcp.tool
     def run_batch(
         queries: list[dict],
         model_yaml: str | None = None,
@@ -2692,6 +2950,42 @@ def _register_execute_query_tool() -> None:
                 timezone=timezone,
             )
 
+        @mcp.tool
+        def execute_obsql(
+            sql: str,
+            dialect: str | None = None,
+            output_format: str = "json",
+            format_values: bool | None = None,
+            locale: str | None = None,
+            timezone: str | None = None,
+        ) -> str:
+            """Translate, compile, and execute an OBSQL query against the model.
+
+            Same input shape as ``compile_obsql`` (see that tool's docs and
+            ``get_obsql_reference()`` for grammar).  Returns rows + schema +
+            compiled SQL + cache metadata in the same shape as
+            ``execute_query``.
+
+            Args:
+                sql: OBSQL query string.
+                dialect: Target SQL dialect (resolved via
+                    ``model.settings.defaultDialect`` → server default
+                    when omitted).
+                output_format: Response format — "json" (default) or "tsv".
+                format_values: Format numeric cells as display strings.
+                locale: BCP-47 locale for number formatting (e.g. "de").
+                timezone: IANA timezone (e.g. "Europe/Berlin").
+            """
+            return _impl_execute_obsql(
+                None,
+                sql,
+                dialect,
+                output_format=output_format,
+                format_values=format_values,
+                locale=locale,
+                timezone=timezone,
+            )
+
     else:
 
         @mcp.tool
@@ -2762,6 +3056,44 @@ def _register_execute_query_tool() -> None:
                 coalesce_dimensions=coalesce_dimensions,
                 fields=fields,
                 distinct=distinct,
+                output_format=output_format,
+                format_values=format_values,
+                locale=locale,
+                timezone=timezone,
+            )
+
+        @mcp.tool
+        def execute_obsql(
+            model_id: str,
+            sql: str,
+            dialect: str | None = None,
+            output_format: str = "json",
+            format_values: bool | None = None,
+            locale: str | None = None,
+            timezone: str | None = None,
+        ) -> str:
+            """Translate, compile, and execute an OBSQL query against the model.
+
+            Same input shape as ``compile_obsql`` (see that tool's docs and
+            ``get_obsql_reference()`` for grammar).  Returns rows + schema +
+            compiled SQL + cache metadata in the same shape as
+            ``execute_query``.
+
+            Args:
+                model_id: The id returned by ``load_model``.
+                sql: OBSQL query string.
+                dialect: Target SQL dialect (resolved via
+                    ``model.settings.defaultDialect`` → server default
+                    when omitted).
+                output_format: Response format — "json" (default) or "tsv".
+                format_values: Format numeric cells as display strings.
+                locale: BCP-47 locale for number formatting (e.g. "de").
+                timezone: IANA timezone (e.g. "Europe/Berlin").
+            """
+            return _impl_execute_obsql(
+                model_id,
+                sql,
+                dialect,
                 output_format=output_format,
                 format_values=format_values,
                 locale=locale,
@@ -3014,6 +3346,24 @@ When ``dialect`` is omitted from ``compile_query`` / ``execute_query``, the API
 resolves it via: model ``settings.defaultDialect`` → server ``DB_VENDOR`` env →
 ``"postgres"``.  Use ``describe_model`` to see the model's default dialect.
 
+## Result Caching & Determinism
+
+The API hashes its result cache on compiled SQL.  Two behaviours keep that
+deterministic:
+
+- **Auto-ORDER BY on LIMIT** — when a query sets `limit` without `order_by`
+  the compiler appends `ORDER BY <all dims>` (or `<all raw fields>`) so
+  the cache never freezes an arbitrary slice.  Aggregate-only queries
+  (no dimensions, no fields) are exempt — they already return one row.
+- **Non-deterministic SQL bypass** — compiled SQL containing `RAND()`,
+  `NOW()`, `CURRENT_DATE`, `TABLESAMPLE`, etc. is excluded from the cache.
+  The `execute_query` JSON response surfaces this via
+  `ttl_source = "no_cache:non_deterministic_sql"` so callers can see why
+  a fresh round-trip happened.
+
+If you need pagination, always set an explicit `order_by` and pair `limit`
+with `offset`.
+
 ## Tips
 
 - Use `describe_model` first to see available dimension/measure names.
@@ -3157,6 +3507,30 @@ references unknown column.
 - `INVALID_ORDER_BY_POSITION`: Numeric ORDER BY position is out of range.
   Fix: Use a position between 1 and the number of SELECT columns.
 
+## Dialect Capability Errors (at query time)
+
+- `UNSUPPORTED_AGGREGATION`: The selected dialect does not implement the
+  measure's aggregation function (HTTP 422 from the API, surfaced as a
+  ToolError with `aggregation=…, dialect=…` context).
+  Fix: Change `dialect`, or rewrite the measure to use a supported
+  aggregation. See `list_dialects()` for each dialect's
+  `unsupported_aggregations`.
+- `UNSUPPORTED_GROUPING`: The selected dialect does not support the
+  requested `WITH ROLLUP` / `WITH CUBE` (e.g. MySQL has no CUBE). Compile
+  and execute paths return HTTP 422; `plan_query` returns 200 plus a
+  structured `UNSUPPORTED_GROUPING` warning so callers can detect
+  unsupportability without a 4xx.
+  Fix: Change `dialect`, drop the modifier, or rewrite the query
+  (e.g. UNION of explicit grain combinations).
+
+## OBSQL Translation Errors
+
+- `UNSUPPORTED_SQL_FEATURE`: OBSQL contains an unsupported construct —
+  `JOIN`, CTE, subquery, `UNION`, window function, `SELECT *`, or a
+  raw-mode query combined with `WITH ROLLUP` / `WITH CUBE`.
+  Fix: Restructure the query to the OBSQL surface — call
+  `get_obsql_reference()` for the supported grammar.
+
 ## Debugging Steps
 
 1. Run `load_model(model_yaml)` — it validates and returns any errors.
@@ -3169,6 +3543,12 @@ references unknown column.
 def write_obml_model() -> str:
     """OBML syntax reference — how to write a semantic model in YAML."""
     return _fetch_obml_reference()
+
+
+@mcp.prompt
+def write_obsql_query() -> str:
+    """OBSQL grammar reference — natural SQL surface against the model."""
+    return _fetch_obsql_reference()
 
 
 @mcp.prompt
@@ -3297,11 +3677,11 @@ def main() -> None:
             except httpx.HTTPError as exc:
                 logger.error("Cannot reach API to validate pre-loaded model: %s", exc)
                 raise SystemExit(1) from None
-            # mode-independent (7) + single-model (19) + execute?
-            tool_count = 27 if _query_execute_enabled else 26
+            # mode-independent (10) + single-model (20) + execute (2 when on)?
+            tool_count = 32 if _query_execute_enabled else 30
         else:
-            # mode-independent (7) + multi-model (22) + execute?
-            tool_count = 30 if _query_execute_enabled else 29
+            # mode-independent (10) + multi-model (23) + execute (2 when on)?
+            tool_count = 35 if _query_execute_enabled else 33
         mode_label = "single-model" if _single_model_mode else "multi-model"
     else:
         # HTTP/SSE: defer mode detection to the first request so the container

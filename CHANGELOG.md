@@ -4,6 +4,65 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.4.0] — 2026-05-15
+
+### Added
+- **OBSQL natural SQL surface** — new tools wrap the v2.4.0 OBSQL endpoints
+  so LLMs (and humans) can express queries as BI-style SQL against the
+  model's virtual table instead of building a `QueryObject` JSON:
+  - **`compile_obsql(sql, dialect?)`** — POST
+    `/v1/sessions/{sid}/query/semantic-ql/compile` (multi-model) or
+    `/v1/query/semantic-ql/compile` (single-model).  Returns compiled SQL
+    plus the translated `QueryObject` and explain plan.  Surface supports
+    `SELECT … FROM <model>`, `WHERE`, `HAVING`, `GROUP BY`, `ORDER BY …
+    [NULLS FIRST|LAST]`, `LIMIT`, `OFFSET`, and `WITH ROLLUP | WITH CUBE`.
+    `SELECT` without `FROM` resolves to the implicit model.
+  - **`execute_obsql(sql, dialect?, output_format?, format_values?, locale?,
+    timezone?)`** — same as above but compiles AND executes.  Registers
+    only when `QUERY_EXECUTE=true` on the API
+- **`get_obsql_reference()` tool** — GET `/v1/reference/obsql`.  Returns
+  the full OBSQL grammar with examples.  Mode-independent.  Cached
+- **`list_references()` tool** — GET `/v1/reference`.  Lists all
+  reference documents (markdown + JSON schemas) published by the API
+- **`get_json_schema(name)` tool** — GET `/v1/reference/schemas/{name}`.
+  Returns the raw JSON Schema for `obml` (model documents) or `query`
+  (QueryObject) so callers can validate documents locally
+- **`obsql://reference` resource** — same content as `get_obsql_reference`,
+  exposed as an MCP resource
+- **`write_obsql_query` prompt** — surfaces the OBSQL reference for
+  authoring agents that prefer SQL over JSON QueryObjects
+- **`UNSUPPORTED_GROUPING` / `UNSUPPORTED_SQL_FEATURE` error codes** —
+  documented in the `debug_validation` prompt.  `UNSUPPORTED_GROUPING`
+  fires when the dialect (e.g. MySQL) cannot compile `WITH CUBE` /
+  `WITH ROLLUP`; `plan_query` returns it as a structured warning
+  instead of a 4xx.  `UNSUPPORTED_SQL_FEATURE` fires for OBSQL
+  constructs the translator rejects (JOIN, CTE, subquery, UNION,
+  window function, `SELECT *`, raw-mode with trailing
+  `WITH ROLLUP`/`WITH CUBE`)
+- **Structured-error context decoration** — `_parse_error_detail` now
+  appends `aggregation=…, dialect=…` (or `grouping=…, dialect=…`) to
+  the surfaced ToolError message when the API returns those structured
+  fields, and joins nested `errors[].{code, message}` lists onto the
+  detail line so the LLM sees the full context without parsing JSON
+- **Determinism & caching notes** — `write_query` prompt documents the
+  v2.4.0 cache-determinism behaviour: queries with `limit` and no
+  `order_by` are auto-ordered by all dimensions / raw fields, and SQL
+  containing `RAND()` / `NOW()` / `CURRENT_DATE` / `TABLESAMPLE` is
+  excluded from the cache (surfaces as
+  `ttl_source = "no_cache:non_deterministic_sql"`)
+
+### Changed
+- Version bumped to 2.4.0 (aligned with OrionBelt Semantic Layer API 2.4.0)
+- OrionBelt Semantic Layer badge updated to 2.4
+- Mode-independent tool count: 7 → 10 (+`get_obsql_reference`,
+  `list_references`, `get_json_schema`)
+- Multi-model tool count: 30 → 33 (+`compile_obsql`; +`execute_obsql`
+  when `QUERY_EXECUTE=true` brings it to 35)
+- Single-model tool count: 27 → 30 (+`compile_obsql`; +`execute_obsql`
+  when `QUERY_EXECUTE=true` brings it to 32)
+
+---
+
 ## [2.3.0] — 2026-05-10
 
 ### Changed

@@ -1858,7 +1858,7 @@ def test_api_error_raises_tool_error(mock_api: respx.MockRouter):
 
 
 def test_unsupported_aggregation_error(mock_api: respx.MockRouter):
-    """422 UnsupportedAggregationError returns readable message."""
+    """422 UnsupportedAggregationError returns readable message with context."""
     from fastmcp.exceptions import ToolError
 
     _mock_create_session(mock_api)
@@ -1876,10 +1876,7 @@ def test_unsupported_aggregation_error(mock_api: respx.MockRouter):
         )
     )
 
-    with pytest.raises(
-        ToolError,
-        match="Dialect 'mysql' does not support aggregation 'median'",
-    ):
+    with pytest.raises(ToolError) as exc_info:
         server._impl_compile_query(
             model_id="m001",
             dialect="mysql",
@@ -1888,6 +1885,68 @@ def test_unsupported_aggregation_error(mock_api: respx.MockRouter):
             query_json=None,
             use_path_names=None,
         )
+
+    msg = str(exc_info.value)
+    assert "does not support aggregation 'median'" in msg
+    # Structured context is appended for callers that didn't read the message
+    assert "aggregation='median'" in msg
+    assert "dialect='mysql'" in msg
+
+
+def test_unsupported_grouping_error(mock_api: respx.MockRouter):
+    """422 UnsupportedGroupingError surfaces dialect + grouping context (v2.4.0+)."""
+    from fastmcp.exceptions import ToolError
+
+    _mock_create_session(mock_api)
+    mock_api.post("/v1/sessions/test-session-1/query/sql").mock(
+        return_value=httpx.Response(
+            422,
+            json={
+                "detail": {
+                    "error": "Unsupported grouping",
+                    "message": "Dialect 'mysql' does not support grouping 'cube'",
+                    "dialect": "mysql",
+                    "grouping": "cube",
+                }
+            },
+        )
+    )
+
+    query_json = (
+        '{"select": {"dimensions": ["Country"], "measures": ["Revenue"]}, "grouping": "cube"}'
+    )
+    with pytest.raises(ToolError) as exc_info:
+        server._impl_compile_query(
+            model_id="m001",
+            dialect="mysql",
+            dimensions=["Country"],
+            measures=["Revenue"],
+            query_json=query_json,
+            use_path_names=None,
+        )
+
+    msg = str(exc_info.value)
+    assert "does not support grouping 'cube'" in msg
+    assert "grouping='cube'" in msg
+    assert "dialect='mysql'" in msg
+
+
+def test_resolution_error_appends_inner_errors():
+    """Nested errors list (ResolutionError, OBSQL translation) is appended to detail."""
+    body = {
+        "detail": {
+            "error": "Query resolution failed",
+            "errors": [
+                {"code": "UNKNOWN_DIMENSION", "message": "No such dimension 'Foo'"},
+                {"code": "UNKNOWN_MEASURE", "message": "No such measure 'Bar'"},
+            ],
+        }
+    }
+    resp = httpx.Response(422, json=body)
+    detail = server._parse_error_detail(resp)
+    assert "Query resolution failed" in detail
+    assert "UNKNOWN_DIMENSION: No such dimension 'Foo'" in detail
+    assert "UNKNOWN_MEASURE: No such measure 'Bar'" in detail
 
 
 def test_connect_error_raises_tool_error(monkeypatch):
@@ -2906,3 +2965,181 @@ def test_get_example_uses_shortcut_in_single_model_mode(mock_api: respx.MockRout
 
     out = server._impl_get_example(None, "Top Customers")
     assert '"name": "Top Customers"' in out
+
+
+# ---------------------------------------------------------------------------
+# v2.4.0 — OBSQL & reference tools
+# ---------------------------------------------------------------------------
+
+
+def test_get_obsql_reference(mock_api: respx.MockRouter):
+    """get_obsql_reference fetches and caches the OBSQL grammar reference."""
+    mock_api.get("/v1/reference/obsql").mock(
+        return_value=httpx.Response(
+            200,
+            json={"reference": "# OBSQL\n\nSELECT … FROM <model>"},
+        )
+    )
+    out = server.get_obsql_reference()
+    assert "OBSQL" in out
+    assert "SELECT" in out
+    # Second call should hit the cache (only one HTTP request)
+    server.get_obsql_reference()
+    assert mock_api.routes[0].call_count == 1
+
+
+def test_list_references(mock_api: respx.MockRouter):
+    """list_references renders the reference index from /v1/reference."""
+    mock_api.get("/v1/reference").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "references": [
+                    {
+                        "name": "obml",
+                        "kind": "markdown",
+                        "description": "OBML reference",
+                        "path": "/v1/reference/obml",
+                    },
+                    {
+                        "name": "obsql",
+                        "kind": "markdown",
+                        "description": "OBSQL grammar",
+                        "path": "/v1/reference/obsql",
+                    },
+                    {
+                        "name": "query-schema",
+                        "kind": "json-schema",
+                        "description": "QueryObject schema",
+                        "path": "/v1/reference/schemas/query",
+                    },
+                ]
+            },
+        )
+    )
+    out = server.list_references()
+    assert "obml" in out
+    assert "obsql" in out
+    assert "query-schema" in out
+    assert "/v1/reference/schemas/query" in out
+
+
+def test_get_json_schema_query(mock_api: respx.MockRouter):
+    """get_json_schema fetches a published JSON Schema by name."""
+    mock_api.get("/v1/reference/schemas/query").mock(
+        return_value=httpx.Response(
+            200,
+            json={"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object"},
+            headers={"Content-Type": "application/schema+json"},
+        )
+    )
+    out = server.get_json_schema("query")
+    assert "$schema" in out
+    assert "object" in out
+
+
+def test_compile_obsql_single_model_mode(mock_api: respx.MockRouter):
+    """compile_obsql uses the /v1/query/semantic-ql/compile shortcut endpoint."""
+    server._single_model_mode = True
+    mock_api.post("/v1/query/semantic-ql/compile").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "sql": "SELECT country, SUM(amount) AS revenue FROM orders GROUP BY country",
+                "dialect": "postgres",
+                "query": {
+                    "select": {"dimensions": ["Country"], "measures": ["Revenue"]},
+                },
+                "resolved": {
+                    "fact_tables": ["orders"],
+                    "dimensions": ["Country"],
+                    "measures": ["Revenue"],
+                },
+                "warnings": [],
+                "sql_valid": True,
+                "physical_tables": ["ob.public.orders"],
+            },
+        )
+    )
+    out = server._impl_compile_obsql(
+        None,
+        "SELECT Country, Revenue FROM orders",
+        "postgres",
+    )
+    assert "SELECT country" in out
+    assert "Translated QueryObject" in out
+    assert "ob.public.orders" in out
+
+
+def test_compile_obsql_multi_model_mode(mock_api: respx.MockRouter):
+    """compile_obsql uses the session-scoped endpoint when model_id is set."""
+    _mock_create_session(mock_api)
+    mock_api.post("/v1/sessions/test-session-1/query/semantic-ql/compile").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "sql": "SELECT 1",
+                "dialect": "duckdb",
+                "query": {},
+                "resolved": {"fact_tables": [], "dimensions": [], "measures": []},
+                "warnings": [],
+                "sql_valid": True,
+            },
+        )
+    )
+    out = server._impl_compile_obsql("m001", "SELECT 1", None)
+    assert "SELECT 1" in out
+    assert "-- Dialect: duckdb" in out
+
+
+def test_compile_obsql_rejects_empty_sql():
+    """compile_obsql refuses empty SQL strings without a round trip."""
+    with pytest.raises(server.ToolError, match="non-empty OBSQL"):
+        server._impl_compile_obsql(None, "   ", None)
+
+
+def test_execute_obsql_single_model_mode(mock_api: respx.MockRouter):
+    """execute_obsql uses the /v1/query/semantic-ql shortcut endpoint."""
+    server._single_model_mode = True
+    mock_api.post("/v1/query/semantic-ql").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "rows": [{"Country": "US", "Revenue": 100}],
+                "schema": [
+                    {"name": "Country", "type": "string"},
+                    {"name": "Revenue", "type": "float"},
+                ],
+                "sql": "SELECT country, SUM(amount) AS revenue FROM orders GROUP BY country",
+                "dialect": "postgres",
+                "cached": False,
+            },
+        )
+    )
+    out = server._impl_execute_obsql(
+        None,
+        "SELECT Country, Revenue FROM orders",
+        "postgres",
+    )
+    assert '"Country": "US"' in out
+    assert '"Revenue": 100' in out
+
+
+def test_execute_obsql_tsv_passthrough(mock_api: respx.MockRouter):
+    """execute_obsql returns raw body text when output_format is tsv."""
+    server._single_model_mode = True
+    mock_api.post("/v1/query/semantic-ql").mock(
+        return_value=httpx.Response(
+            200,
+            text="Country\tRevenue\nUS\t100\n",
+            headers={"Content-Type": "text/tab-separated-values"},
+        )
+    )
+    out = server._impl_execute_obsql(
+        None,
+        "SELECT Country, Revenue FROM orders",
+        None,
+        output_format="tsv",
+    )
+    assert out.startswith("Country\tRevenue")
+    assert "US\t100" in out

@@ -7,8 +7,8 @@
 
 <p align="center"><strong>Thin MCP server that delegates to the OrionBelt Semantic Layer REST API</strong></p>
 
-[![Version 2.3.0](https://img.shields.io/badge/version-2.3.0-purple.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/releases)
-[![OrionBelt Semantic Layer 2.3](https://img.shields.io/badge/OrionBelt_Semantic_Layer-2.3-0054A6.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer)
+[![Version 2.4.0](https://img.shields.io/badge/version-2.4.0-purple.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/releases)
+[![OrionBelt Semantic Layer 2.4](https://img.shields.io/badge/OrionBelt_Semantic_Layer-2.4-0054A6.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/blob/main/LICENSE)
 [![FastMCP](https://img.shields.io/badge/FastMCP-3.2+-8A2BE2)](https://gofastmcp.com)
@@ -47,8 +47,8 @@ The OrionBelt Semantic Layer platform has two deployment modes. This MCP server 
 - **No business logic** — all tool calls delegate to the REST API (v1 endpoints)
 - **Dual-mode** — auto-detects single-model or multi-model API mode at startup
 - **Auto-session management** — creates an API session on first tool call, caches the ID (multi-model mode)
-- **27 tools** (single-model mode) or **30 tools** (multi-model mode) for querying, execution, batch, planning, discovery, examples, diagrams, RDF/SPARQL, freshness cache, and format conversion
-- **3 prompts + 1 resource** for OBML reference and usage guidance
+- **30–32 tools** (single-model mode) or **33–35 tools** (multi-model mode) for querying (QueryObject + OBSQL natural SQL), execution, batch, planning, discovery, examples, diagrams, RDF/SPARQL, freshness cache, reference docs, and format conversion (execute tools add +2 when `QUERY_EXECUTE=true`)
+- **4 prompts + 2 resources** for OBML / OBSQL reference and usage guidance
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/ralfbecher/orionbelt-semantic-layer-mcp/main/docs/assets/architecture.png" alt="OrionBelt Analytics Architecture" width="900">
@@ -151,8 +151,10 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 
 | MCP Tool                          | Description                                              |
 | --------------------------------- | -------------------------------------------------------- |
-| `compile_query(...)`              | Compile a semantic query to SQL (with explain plan)      |
-| `execute_query(...)`              | Compile and execute a query, returning SQL + result data |
+| `compile_query(...)`              | Compile a semantic query (QueryObject) to SQL            |
+| `execute_query(...)`              | Compile and execute a QueryObject, returning SQL + rows  |
+| `compile_obsql(model_id, sql, ...)` | Compile an OBSQL (natural SQL) query to SQL            |
+| `execute_obsql(model_id, sql, ...)` | Compile and execute an OBSQL query, returning SQL + rows |
 | `plan_query(model_id, ...)`       | Planner view (no SQL); optional warehouse `EXPLAIN`      |
 | `run_batch(queries, ...)`         | One-shot: load a model + run N queries in parallel       |
 | `get_model_diagram(model_id)`     | Generate a Mermaid ER diagram for a loaded model         |
@@ -170,6 +172,15 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 | ----------------------------------------- | -------------------------------------------------------- |
 | `get_cache_stats()`                       | Cache backend, entry count, hit rate, sweep time         |
 | `heartbeat(database, schema, table, ts?)` | Notify the API a table refreshed (invalidates cache)     |
+
+### References
+
+| MCP Tool                          | Description                                              |
+| --------------------------------- | -------------------------------------------------------- |
+| `get_obml_reference()`            | OBML (model authoring) grammar reference                 |
+| `get_obsql_reference()`           | OBSQL (natural SQL surface) grammar reference            |
+| `list_references()`               | Index of all references published by the API             |
+| `get_json_schema(name)`           | JSON Schema for `obml` (model) or `query` (QueryObject)  |
 
 ### Utilities
 
