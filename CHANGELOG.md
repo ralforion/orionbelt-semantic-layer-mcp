@@ -4,6 +4,37 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.5.0] — 2026-05-22
+
+### Changed
+
+- Version bumped to 2.5.0 (aligned with OrionBelt Semantic Layer API 2.5.0).
+- OrionBelt Semantic Layer badge updated to 2.5.
+
+### Notes
+
+- No MCP code changes. API v2.5.0 introduces the PostgreSQL wire-protocol
+  surface (port 5432) for BI tools (Tableau, DBeaver, Superset, Power BI,
+  `psql`, Dremio as a Postgres source) and the supporting Tableau / pgjdbc
+  end-to-end compatibility work. The pgwire surface is independent of the
+  REST API this MCP delegates to — no new endpoints, no shape changes to
+  endpoints the MCP consumes.
+- Server-side improvements that flow through to existing tools without
+  client changes:
+  - `compile_query` / `execute_query`: CFL planner now joins tables
+    referenced by measure-filter expressions, fixing a "missing
+    FROM-clause entry" 500 on measures like `Electronics Sales` filtered
+    on a sibling dim table.
+  - `execute_query`: richer type hints when the API runs against ADBC
+    Postgres (NUMERIC / MONEY / INTERVAL surfaced as `number` /
+    `datetime` instead of `string`).
+  - `compile_obsql` / `execute_obsql`: Tableau-style
+    `HAVING (COUNT(1) > 0)` tautology is silently dropped and
+    `CAST(col AS …)` wrappers in SELECT / ORDER BY are unwrapped to the
+    underlying column.
+
+---
+
 ## [2.4.0] — 2026-05-15
 
 ### Added
