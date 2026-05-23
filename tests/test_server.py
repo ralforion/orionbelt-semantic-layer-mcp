@@ -1273,6 +1273,134 @@ def test_list_metrics_cumulative_extras(mock_api: respx.MockRouter):
     assert "cumulativeType: sum" not in result
 
 
+def test_list_metrics_cumulative_with_partition_by(mock_api: respx.MockRouter):
+    """list_metrics surfaces partitionBy on cumulative metrics (v2.6+)."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/metrics").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "name": "Revenue MA12 by Country",
+                    "type": "cumulative",
+                    "expression": None,
+                    "measure": "Revenue",
+                    "time_dimension": "order_month",
+                    "cumulative_type": "avg",
+                    "window": 12,
+                    "grain_to_date": None,
+                    "partition_by": ["Country"],
+                    "component_measures": [],
+                    "synonyms": [],
+                },
+            ],
+        )
+    )
+
+    result = server._impl_list_metrics("m001")
+    assert "Revenue MA12 by Country" in result
+    assert "partitionBy: [Country]" in result
+
+
+def test_list_metrics_window(mock_api: respx.MockRouter):
+    """list_metrics formats window metrics with all v2.6 fields."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/metrics").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "name": "Revenue Rank by Quarter",
+                    "type": "window",
+                    "window_function": "dense_rank",
+                    "measure": "Revenue",
+                    "order_direction": "desc",
+                    "partition_by": ["Quarter"],
+                    "component_measures": ["Revenue"],
+                    "synonyms": [],
+                },
+                {
+                    "name": "Revenue Prior Month",
+                    "type": "window",
+                    "window_function": "lag",
+                    "measure": "Revenue",
+                    "offset": 1,
+                    "time_dimension": "order_month",
+                    "partition_by": ["Country"],
+                    "default_value": 0,
+                    "component_measures": ["Revenue"],
+                    "synonyms": [],
+                },
+                {
+                    "name": "Revenue Quartile",
+                    "type": "window",
+                    "window_function": "ntile",
+                    "measure": "Revenue",
+                    "buckets": 4,
+                    "partition_by": ["Year"],
+                    "order_direction": "asc",
+                    "component_measures": ["Revenue"],
+                    "synonyms": [],
+                },
+            ],
+        )
+    )
+
+    result = server._impl_list_metrics("m001")
+    assert "type: window" in result
+    assert "windowFunction: dense_rank" in result
+    assert "partitionBy: [Quarter]" in result
+    assert "windowFunction: lag" in result
+    assert "offset: 1" in result
+    assert "timeDimension: order_month" in result
+    assert "defaultValue: 0" in result
+    assert "windowFunction: ntile" in result
+    assert "buckets: 4" in result
+    # asc is non-default, should be shown; desc is default and should not be
+    assert "orderDirection: asc" in result
+    assert "orderDirection: desc" not in result
+
+
+def test_list_measures_two_column_aggregation(mock_api: respx.MockRouter):
+    """list_measures surfaces 'columns' for two-column statistical aggregates (v2.6+)."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/measures").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "name": "Revenue Spend Correlation",
+                    "result_type": "float",
+                    "aggregation": "corr",
+                    "expression": None,
+                    "columns": [
+                        {"data_object": "Orders", "column": "Revenue"},
+                        {"data_object": "Marketing", "column": "Spend"},
+                    ],
+                    "synonyms": [],
+                },
+                {
+                    "name": "Total Revenue",
+                    "result_type": "float",
+                    "aggregation": "sum",
+                    "expression": None,
+                    "columns": [{"data_object": "Orders", "column": "Revenue"}],
+                    "synonyms": [],
+                },
+            ],
+        )
+    )
+
+    result = server._impl_list_measures("m001")
+    assert "Revenue Spend Correlation" in result
+    assert "corr" in result
+    # Two-column agg surfaces ordered column refs
+    assert "columns: [Orders.Revenue, Marketing.Spend]" in result
+    # Single-column agg does NOT emit a columns line
+    revenue_block = result.split("Total Revenue")[1] if "Total Revenue" in result else ""
+    assert "columns:" not in revenue_block
+
+
 def test_list_metrics_empty(mock_api: respx.MockRouter):
     """list_metrics handles empty list."""
     _mock_create_session(mock_api)
@@ -1627,6 +1755,39 @@ def test_convert_osi_to_obml_with_validation_errors(mock_api: respx.MockRouter):
     assert "Missing required field 'code'" in result
     assert "Unknown column reference 'bar'" in result
     assert "Validation warnings: Unused dimension 'baz'" in result
+
+
+def test_convert_osi_to_obml_with_input_validation(mock_api: respx.MockRouter):
+    """convert_osi_to_obml surfaces input-side validation (API v2.6+)."""
+    mock_api.post("/v1/convert/osi-to-obml").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "output_yaml": "version: 1.0\ndataObjects: {}",
+                "warnings": [],
+                "validation": {
+                    "schema_valid": True,
+                    "semantic_valid": True,
+                    "schema_errors": [],
+                    "semantic_errors": [],
+                    "semantic_warnings": [],
+                },
+                "input_validation": {
+                    "schema_valid": False,
+                    "semantic_valid": True,
+                    "schema_errors": ["Field 'kind' missing under semanticModels[0]"],
+                    "semantic_errors": [],
+                    "semantic_warnings": ["Legacy v0.1 shape detected"],
+                },
+            },
+        )
+    )
+
+    result = server.convert_osi_to_obml("osi_yaml_content")
+    assert "version: 1.0" in result
+    assert "Input validation issues (OSI v0.2 schema)" in result
+    assert "Field 'kind' missing under semanticModels[0]" in result
+    assert "Input validation warnings: Legacy v0.1 shape detected" in result
 
 
 # ---------------------------------------------------------------------------

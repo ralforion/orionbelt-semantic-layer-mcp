@@ -724,6 +724,21 @@ def convert_osi_to_obml(input_yaml: str) -> str:
     parts = [data["output_yaml"]]
     if data.get("warnings"):
         parts.append(f"\nWarnings: {'; '.join(data['warnings'])}")
+    # Input-side validation (API v2.6+: OSI input checked against vendored
+    # OSI v0.2 schema before conversion). Legacy v0.1 inputs may produce
+    # spurious schema_errors that the converter's compat shim absorbs, so
+    # surface these as advisory rather than failure.
+    input_validation = data.get("input_validation") or {}
+    if input_validation:
+        in_errors = input_validation.get("schema_errors", []) + input_validation.get(
+            "semantic_errors", []
+        )
+        if in_errors:
+            parts.append(f"\nInput validation issues (OSI v0.2 schema): {'; '.join(in_errors)}")
+        if input_validation.get("semantic_warnings"):
+            parts.append(
+                f"\nInput validation warnings: {'; '.join(input_validation['semantic_warnings'])}"
+            )
     validation = data.get("validation", {})
     if not validation.get("schema_valid", True) or not validation.get("semantic_valid", True):
         errors = validation.get("schema_errors", []) + validation.get("semantic_errors", [])
@@ -865,8 +880,10 @@ def _format_warnings(items: list | None, indent: str = "  warnings: ") -> list[s
 
 
 def _format_metric_summary(met: dict) -> str:
-    """Format a one-line summary for a metric (derived, cumulative, or PoP)."""
+    """Format a one-line summary for a metric (derived, cumulative, PoP, or window)."""
     met_type = met.get("type", "derived")
+    # partitionBy is shared between cumulative and window metrics (v2.6+).
+    partition_by = met.get("partition_by") or met.get("partitionBy") or []
     if met_type == "cumulative":
         parts = [f"type: cumulative, measure: {met.get('measure', '?')}"]
         if met.get("time_dimension"):
@@ -877,6 +894,8 @@ def _format_metric_summary(met: dict) -> str:
             parts.append(f"window: {met['window']}")
         if met.get("grain_to_date"):
             parts.append(f"grainToDate: {met['grain_to_date']}")
+        if partition_by:
+            parts.append(f"partitionBy: [{', '.join(partition_by)}]")
         return ", ".join(parts)
     if met_type == "period_over_period":
         parts = [f"type: period_over_period, expr: {met.get('expression', '?')}"]
@@ -889,6 +908,28 @@ def _format_metric_summary(met: dict) -> str:
             parts.append(f"offsetGrain: {pop['offset_grain']}")
         if pop.get("comparison"):
             parts.append(f"comparison: {pop['comparison']}")
+        return ", ".join(parts)
+    if met_type == "window":
+        fn = met.get("window_function") or met.get("windowFunction") or "?"
+        parts = [f"type: window, windowFunction: {fn}"]
+        if met.get("measure"):
+            parts.append(f"measure: {met['measure']}")
+        if met.get("time_dimension"):
+            parts.append(f"timeDimension: {met['time_dimension']}")
+        if partition_by:
+            parts.append(f"partitionBy: [{', '.join(partition_by)}]")
+        order_dir = met.get("order_direction") or met.get("orderDirection")
+        if order_dir and order_dir != "desc":
+            parts.append(f"orderDirection: {order_dir}")
+        if met.get("offset") is not None:
+            parts.append(f"offset: {met['offset']}")
+        if met.get("buckets") is not None:
+            parts.append(f"buckets: {met['buckets']}")
+        default_val = met.get("default_value")
+        if default_val is None:
+            default_val = met.get("defaultValue")
+        if default_val is not None:
+            parts.append(f"defaultValue: {default_val}")
         return ", ".join(parts)
     return f"expr: {met.get('expression', '?')}"
 
@@ -960,6 +1001,17 @@ def _impl_describe_model(model_id: str | None = None) -> str:
         m_agg = m.get("aggregation", "?")
         dtype = f"  dataType: {m['data_type']}" if m.get("data_type") else ""
         lines.append(f"  {m_name}  ({m_type}, {m_agg}{expr}{dtype})")
+        # Two-column statistical aggregates (corr, covar_*, regr_*) — column
+        # order is significant in the compiled SQL, so surface it explicitly.
+        cols = m.get("columns") or []
+        if len(cols) > 1 and not m.get("expression"):
+            col_refs = [
+                f"{c.get('data_object') or c.get('dataObject', '?')}.{c.get('column', '?')}"
+                if isinstance(c, dict)
+                else str(c)
+                for c in cols
+            ]
+            lines.append(f"    columns: [{', '.join(col_refs)}]")
         if m.get("description"):
             lines.append(f"    description: {m['description']}")
         if m.get("grain"):
@@ -1369,6 +1421,15 @@ def _impl_list_measures(model_id: str | None) -> str:
         grain_tag = "  grain" if m.get("grain") else ""
         fc_tag = "  filterContext" if m.get("filter_context") or m.get("filterContext") else ""
         lines.append(f"  {m_name}  ({m_type}, {m_agg}{expr}{dtype}{total}{grain_tag}{fc_tag})")
+        cols = m.get("columns") or []
+        if len(cols) > 1 and not m.get("expression"):
+            col_refs = [
+                f"{c.get('data_object') or c.get('dataObject', '?')}.{c.get('column', '?')}"
+                if isinstance(c, dict)
+                else str(c)
+                for c in cols
+            ]
+            lines.append(f"    columns: [{', '.join(col_refs)}]")
         if m.get("description"):
             lines.append(f"    description: {m['description']}")
         if m.get("synonyms"):
