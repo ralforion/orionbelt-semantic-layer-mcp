@@ -4,6 +4,17 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.6.1] — 2026-05-24
+
+### Changed
+
+- **Startup version check is now semver-aware and strict on major/minor.**
+  Same-major+minor pairs are accepted regardless of patch (e.g. MCP 2.6.0
+  against API 2.6.1 or 2.6.5 starts silently), but any major or minor
+  mismatch now exits with a clear error instead of merely warning. This
+  prevents the server from silently starting against an API that does
+  not implement the features it depends on.
+
 ## [2.6.0] — 2026-05-23
 
 ### Added

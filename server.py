@@ -3663,21 +3663,19 @@ def _check_api_health() -> None:
     with contextlib.suppress(ValueError, AttributeError):
         api_version = resp.json().get("version")
     if mcp_version and api_version:
-        mcp_major = mcp_version.split(".")[0]
-        api_major = api_version.split(".")[0]
-        if mcp_major != api_major:
-            logger.warning(
-                "Version mismatch: MCP server v%s vs API v%s — "
-                "major version differs, some features may not work correctly",
+        mcp_parts = mcp_version.split(".")
+        api_parts = api_version.split(".")
+        if mcp_parts[:2] != api_parts[:2]:
+            logger.error(
+                "Incompatible API version: MCP server v%s requires API v%s.%s.x — "
+                "found v%s. Patch differences are allowed; major or minor mismatches "
+                "are not supported.",
                 mcp_version,
+                mcp_parts[0],
+                mcp_parts[1],
                 api_version,
             )
-        elif mcp_version != api_version:
-            logger.warning(
-                "Version mismatch: MCP server v%s vs API v%s",
-                mcp_version,
-                api_version,
-            )
+            raise SystemExit(1)
 
 
 def _detect_api_mode() -> tuple[bool, bool]:

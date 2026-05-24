@@ -2157,6 +2157,65 @@ def test_health_check_server_error(mock_api: respx.MockRouter):
 
 
 # ---------------------------------------------------------------------------
+# Version compatibility check
+# ---------------------------------------------------------------------------
+
+
+def _mock_health_with_version(mock_api: respx.MockRouter, version: str) -> None:
+    mock_api.get("/health").mock(
+        return_value=httpx.Response(
+            200, json={"status": "ok", "version": version, "api_version": "v1"}
+        )
+    )
+
+
+def test_version_check_patch_difference_allowed(mock_api, monkeypatch):
+    """API patch version higher than MCP is silently accepted."""
+    monkeypatch.setattr("importlib.metadata.version", lambda _n: "2.6.0")
+    _mock_health_with_version(mock_api, "2.6.1")
+    # Should not raise
+    server._check_api_health()
+
+
+def test_version_check_patch_lower_allowed(mock_api, monkeypatch):
+    """API patch version lower than MCP is silently accepted."""
+    monkeypatch.setattr("importlib.metadata.version", lambda _n: "2.6.5")
+    _mock_health_with_version(mock_api, "2.6.0")
+    server._check_api_health()
+
+
+def test_version_check_exact_match_allowed(mock_api, monkeypatch):
+    """Exact version match is silently accepted."""
+    monkeypatch.setattr("importlib.metadata.version", lambda _n: "2.6.0")
+    _mock_health_with_version(mock_api, "2.6.0")
+    server._check_api_health()
+
+
+def test_version_check_minor_mismatch_errors(mock_api, monkeypatch):
+    """API minor different from MCP exits with error."""
+    monkeypatch.setattr("importlib.metadata.version", lambda _n: "2.6.0")
+    _mock_health_with_version(mock_api, "2.7.0")
+    with pytest.raises(SystemExit, match="1"):
+        server._check_api_health()
+
+
+def test_version_check_minor_behind_errors(mock_api, monkeypatch):
+    """API minor behind MCP exits with error."""
+    monkeypatch.setattr("importlib.metadata.version", lambda _n: "2.6.0")
+    _mock_health_with_version(mock_api, "2.5.0")
+    with pytest.raises(SystemExit, match="1"):
+        server._check_api_health()
+
+
+def test_version_check_major_mismatch_errors(mock_api, monkeypatch):
+    """API major different from MCP exits with error."""
+    monkeypatch.setattr("importlib.metadata.version", lambda _n: "2.6.0")
+    _mock_health_with_version(mock_api, "3.0.0")
+    with pytest.raises(SystemExit, match="1"):
+        server._check_api_health()
+
+
+# ---------------------------------------------------------------------------
 # Mode detection
 # ---------------------------------------------------------------------------
 
