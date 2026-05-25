@@ -4,6 +4,23 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.7.0] — 2026-05-25
+
+### Changed
+
+- **Version aligned with OrionBelt Semantic Layer API v2.7.0.** The
+  strict same-major+minor startup check (introduced in v2.6.1) means
+  MCP v2.6.x cannot connect to API v2.7.0 — bumping to 2.7.0 restores
+  compatibility. No functional changes to MCP itself: the new API
+  features in v2.7.0 (`exists` / `nonexists` filter operators) ride
+  through the existing QueryObject forwarding path unchanged.
+
+### Notes
+
+- API v2.7.0 removed the deprecated `MODEL_FILE` env var; MCP never
+  referenced it, so no MCP-side change is needed. Deployments setting
+  `MODEL_FILE` should migrate to `MODEL_FILES=<path>` on the API side.
+
 ## [2.6.1] — 2026-05-24
 
 ### Changed
