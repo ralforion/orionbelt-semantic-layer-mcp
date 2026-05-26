@@ -4,6 +4,36 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.7.2] — 2026-05-26
+
+### Fixed
+
+- **`UNKNOWN_PROPERTY` errors from API v2.7.2 now render as structured
+  `code: message` lines instead of a raw JSON dump.** API v2.7.2 rejects
+  unknown OBML / QueryObject properties with a top-level
+  `{message, errors, warnings}` envelope — no `detail` wrapper. The MCP's
+  `_parse_error_detail` previously fell through to `response.text` for
+  that shape, so the LLM saw raw JSON. The parser now promotes the body
+  itself as the detail dict when `detail` is absent and `errors` is a
+  top-level list, and the existing nested-errors formatter renders it
+  the same way as `ResolutionError` / OBSQL translation errors.
+
+### Added
+
+- **`UNKNOWN_PROPERTY` documented in the debug error-code reference**
+  (`get_debug_validation_codes`) with a fix pointer to
+  `get_json_schema()` for the real field names. Common culprits called
+  out: typos (`filtter:` vs `filter:`), snake_case vs camelCase
+  mix-ups, fields that moved between versions.
+
+### Compatibility
+
+- **Aligned with OrionBelt Semantic Layer API v2.7.2.** The strict
+  same-major+minor startup check accepts any v2.7.x ↔ v2.7.y pair, so
+  MCP v2.7.0 also connects to API v2.7.2 — this release is the narrative
+  alignment + the error-rendering fix that makes the new
+  `UNKNOWN_PROPERTY` code legible.
+
 ## [2.7.0] — 2026-05-25
 
 ### Changed
