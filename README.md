@@ -7,7 +7,7 @@
 
 <p align="center"><strong>Thin MCP server that delegates to the OrionBelt Semantic Layer REST API</strong></p>
 
-[![Version 2.7.2](https://img.shields.io/badge/version-2.7.2-purple.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/releases)
+[![Version 2.7.3](https://img.shields.io/badge/version-2.7.3-purple.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/releases)
 [![OrionBelt Semantic Layer 2.7](https://img.shields.io/badge/OrionBelt_Semantic_Layer-2.7-0054A6.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/blob/main/LICENSE)
@@ -47,7 +47,7 @@ The OrionBelt Semantic Layer platform has two deployment modes. This MCP server 
 - **No business logic** — all tool calls delegate to the REST API (v1 endpoints)
 - **Dual-mode** — auto-detects single-model or multi-model API mode at startup
 - **Auto-session management** — creates an API session on first tool call, caches the ID (multi-model mode)
-- **30–32 tools** (single-model mode) or **33–35 tools** (multi-model mode) for querying (QueryObject + OBSQL natural SQL), execution, batch, planning, discovery, examples, diagrams, RDF/SPARQL, freshness cache, reference docs, and format conversion (execute tools add +2 when `QUERY_EXECUTE=true`)
+- **28–30 tools** (single-model mode) or **31–33 tools** (multi-model mode) for querying (QueryObject + OBSQL natural SQL), execution, batch, planning, discovery, examples, diagrams, RDF/SPARQL, reference docs, and format conversion (execute tools add +2 when `QUERY_EXECUTE=true`)
 - **4 prompts + 2 resources** for OBML / OBSQL reference and usage guidance
 
 <p align="center">
@@ -116,7 +116,6 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 | `MCP_SERVER_PORT` | `9000`       | Bind port for HTTP/SSE                |
 | `LOG_LEVEL`       | `INFO`       | Logging level                         |
 | `API_TIMEOUT`     | `30`         | HTTP timeout in seconds               |
-| `HEARTBEAT_AUTH_TOKEN` | —       | Bearer token forwarded to `POST /v1/heartbeat` (must match the API's value) |
 
 ## Tools
 
@@ -165,13 +164,6 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 | --------------------------------- | -------------------------------------------------------- |
 | `get_graph(model_id)`             | Return the model as OBSL-Core RDF (Turtle)               |
 | `sparql_query(model_id, query)`   | Run a read-only SPARQL query (SELECT / ASK)              |
-
-### Freshness cache
-
-| MCP Tool                                  | Description                                              |
-| ----------------------------------------- | -------------------------------------------------------- |
-| `get_cache_stats()`                       | Cache backend, entry count, hit rate, sweep time         |
-| `heartbeat(database, schema, table, ts?)` | Notify the API a table refreshed (invalidates cache)     |
 
 ### References
 

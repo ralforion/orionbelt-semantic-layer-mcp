@@ -4,6 +4,21 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.7.3] — 2026-05-30
+
+### Removed
+
+- **`heartbeat` and `get_cache_stats` MCP tools.** Both were thin
+  pass-through wrappers over the `POST /v1/heartbeat` and
+  `GET /v1/cache/stats` API endpoints with no added value, mirroring the
+  existing decision to leave `POST /v1/cache/sweep` and
+  `POST /v1/cache/clear` unwrapped. The `HEARTBEAT_AUTH_TOKEN` env var
+  (only consumed by the removed `heartbeat` tool) is dropped as well.
+  Tool count drops by two in every mode. The freshness-cache endpoints
+  remain available directly on the API; the cache configuration summary
+  (including heartbeat-endpoint status) is still surfaced by the server
+  config tool.
+
 ## [2.7.2] — 2026-05-26
 
 ### Fixed

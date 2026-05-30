@@ -63,9 +63,6 @@ class Settings(BaseSettings):
     # "console" (pretty), "json" (structured), or "cloudrun" (JSON, GCP severity).
     log_format: Literal["console", "json", "cloudrun"] = "console"
     api_timeout: int = 30
-    # Bearer token for POST /v1/heartbeat. Forwarded as
-    # ``Authorization: Bearer <token>`` only when the heartbeat tool is called.
-    heartbeat_auth_token: str | None = None
 
     @property
     def effective_port(self) -> int:
@@ -796,46 +793,6 @@ def convert_obml_to_osi(
     if validation.get("semantic_warnings"):
         parts.append(f"\nValidation warnings: {'; '.join(validation['semantic_warnings'])}")
     return "\n".join(parts)
-
-
-@mcp.tool
-def get_cache_stats() -> str:
-    """Get statistics for the result cache (freshness-driven cache layer).
-
-    Returns the backend (``noop``, ``file``, …), entry count, total / max
-    size, hit / miss counters, oldest entry timestamp, next sweep time, and
-    heartbeat invalidation totals.  Always responds — when caching is
-    disabled the backend is ``noop`` and counters are zero.
-    """
-    return _impl_get_cache_stats()
-
-
-@mcp.tool
-def heartbeat(
-    database: str,
-    schema: str,
-    table: str,
-    timestamp: str | None = None,
-) -> str:
-    """Notify the API that a physical table has been refreshed.
-
-    POSTs to ``/v1/heartbeat`` with ``Authorization: Bearer
-    HEARTBEAT_AUTH_TOKEN``.  The cache invalidates every entry whose
-    dependency set includes ``database.schema.table``.  Use this from ETL
-    job hooks after a table refresh completes.
-
-    Requires ``HEARTBEAT_AUTH_TOKEN`` to be set on the MCP server (must
-    match the API's ``HEARTBEAT_AUTH_TOKEN``).  When the API has the token
-    unset it returns 404; set it to enable this endpoint.
-
-    Args:
-        database: Physical database name.
-        schema: Physical schema name.
-        table: Physical table name.
-        timestamp: Optional ISO 8601 refresh time (defaults to server now;
-            future timestamps are clamped to now).
-    """
-    return _impl_heartbeat(database, schema, table, timestamp)
 
 
 # ---------------------------------------------------------------------------
@@ -1671,81 +1628,6 @@ def _impl_load_model(
             parts.append(f"    fan-trap risk on [{tables}]: {risk.get('reason', '')}")
     parts.extend(_format_warnings(data.get("warnings")))
     return "\n".join(parts)
-
-
-def _impl_get_cache_stats() -> str:
-    """GET /v1/cache/stats — render summary statistics."""
-    resp = _api_request("GET", f"{_API_V1}/cache/stats", retry_on_expired=False)
-    data = _parse_json(resp)
-    backend = data.get("backend", "?")
-    lines = [f"Cache backend: {backend}"]
-    if backend == "noop":
-        lines.append("  (cache is disabled — no entries are stored)")
-        return "\n".join(lines)
-    lines.append(f"  entries:           {data.get('entry_count', 0)}")
-    total = data.get("total_size_bytes", 0)
-    cap = data.get("max_size_bytes", 0)
-    if cap:
-        pct = (total / cap * 100) if cap else 0.0
-        lines.append(f"  size:              {total:,} / {cap:,} bytes ({pct:.1f}%)")
-    else:
-        lines.append(f"  size:              {total:,} bytes")
-    hits = data.get("hit_count_total", 0)
-    misses = data.get("miss_count_total", 0)
-    rate = data.get("hit_rate", 0.0) or 0.0
-    lines.append(f"  hits / misses:     {hits} / {misses}  (hit rate: {rate * 100:.1f}%)")
-    if data.get("oldest_entry"):
-        lines.append(f"  oldest entry:      {data['oldest_entry']}")
-    if data.get("next_sweep_at"):
-        lines.append(f"  next sweep at:     {data['next_sweep_at']}")
-    if data.get("tracked_physical_tables") is not None:
-        lines.append(f"  tracked tables:    {data['tracked_physical_tables']}")
-    if data.get("heartbeat_invalidations_total") is not None:
-        lines.append(f"  heartbeat invals:  {data['heartbeat_invalidations_total']}")
-    return "\n".join(lines)
-
-
-def _impl_heartbeat(
-    database: str,
-    schema: str,
-    table: str,
-    timestamp: str | None,
-) -> str:
-    """POST /v1/heartbeat with bearer auth — invalidate cache for one table."""
-    if not settings.heartbeat_auth_token:
-        raise ToolError(
-            "HEARTBEAT_AUTH_TOKEN is not configured on the MCP server. "
-            "Set it to the same value as the API's HEARTBEAT_AUTH_TOKEN."
-        )
-    body: dict = {"database": database, "schema": schema, "table": table}
-    if timestamp is not None:
-        body["timestamp"] = timestamp
-    client = _get_client()
-    try:
-        resp = client.request(
-            "POST",
-            f"{_API_V1}/heartbeat",
-            json=body,
-            headers={"Authorization": f"Bearer {settings.heartbeat_auth_token}"},
-        )
-    except httpx.ConnectError:
-        raise ToolError(
-            f"Cannot connect to OrionBelt Semantic Layer API at {settings.api_base_url}"
-        ) from None
-    except httpx.TimeoutException:
-        raise ToolError("API request timed out") from None
-    if resp.status_code >= 400:
-        _raise_api_error(resp)
-    data = _parse_json(resp)
-    affected = data.get("affected_data_objects") or []
-    lines = [
-        f"Heartbeat recorded for {data.get('table_ref', '?')}",
-        f"  recorded at:        {data.get('recorded_at', '?')}",
-        f"  cache entries invalidated: {data.get('invalidated_cache_entries', 0)}",
-    ]
-    if affected:
-        lines.append(f"  affected dataObjects: {', '.join(affected)}")
-    return "\n".join(lines)
 
 
 def _impl_plan_query(

@@ -21,7 +21,6 @@ def _reset_state():
     server._obml_reference_cache = None
     server._dialect_names_cache = None
     server._single_model_mode = False
-    server.settings.heartbeat_auth_token = None
     yield
     if server._http_client is not None:
         server._http_client.close()
@@ -30,7 +29,6 @@ def _reset_state():
     server._obml_reference_cache = None
     server._dialect_names_cache = None
     server._single_model_mode = False
-    server.settings.heartbeat_auth_token = None
 
 
 @pytest.fixture()
@@ -3017,99 +3015,8 @@ def test_get_settings_renders_cache_block_disabled(mock_api: respx.MockRouter):
 
 
 # ---------------------------------------------------------------------------
-# v2.2 follow-up: cache stats, heartbeat, shortcut plan/examples,
-# physical_tables in compile_query
+# v2.2 follow-up: shortcut plan/examples, physical_tables in compile_query
 # ---------------------------------------------------------------------------
-
-
-def test_get_cache_stats_noop(mock_api: respx.MockRouter):
-    """get_cache_stats short-circuits on noop backend."""
-    mock_api.get("/v1/cache/stats").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "backend": "noop",
-                "entry_count": 0,
-                "total_size_bytes": 0,
-                "max_size_bytes": 0,
-                "hit_count_total": 0,
-                "miss_count_total": 0,
-                "hit_rate": 0.0,
-                "tracked_physical_tables": 0,
-                "heartbeat_invalidations_total": 0,
-            },
-        )
-    )
-
-    out = server.get_cache_stats()
-    assert "backend: noop" in out
-    assert "cache is disabled" in out
-
-
-def test_get_cache_stats_file_backend(mock_api: respx.MockRouter):
-    """get_cache_stats renders counters for an active backend."""
-    mock_api.get("/v1/cache/stats").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "backend": "file",
-                "entry_count": 12,
-                "total_size_bytes": 1_234_567,
-                "max_size_bytes": 10_000_000,
-                "hit_count_total": 8,
-                "miss_count_total": 4,
-                "hit_rate": 0.6667,
-                "oldest_entry": "2026-05-05T10:00:00Z",
-                "next_sweep_at": "2026-05-05T11:00:00Z",
-                "tracked_physical_tables": 3,
-                "heartbeat_invalidations_total": 2,
-            },
-        )
-    )
-
-    out = server.get_cache_stats()
-    assert "backend: file" in out
-    assert "entries:           12" in out
-    assert "1,234,567 / 10,000,000 bytes" in out
-    assert "hits / misses:     8 / 4" in out
-    assert "hit rate: 66.7%" in out
-    assert "tracked tables:    3" in out
-    assert "heartbeat invals:  2" in out
-
-
-def test_heartbeat_requires_token(mock_api: respx.MockRouter):
-    """heartbeat raises a clear error when HEARTBEAT_AUTH_TOKEN is unset."""
-    server.settings.heartbeat_auth_token = None
-    with pytest.raises(server.ToolError, match="HEARTBEAT_AUTH_TOKEN"):
-        server.heartbeat("ob_demo", "public", "orders")
-
-
-def test_heartbeat_sends_bearer_and_renders_response(mock_api: respx.MockRouter):
-    """heartbeat sends Authorization: Bearer and renders affected dataObjects."""
-    server.settings.heartbeat_auth_token = "secret-token"
-    try:
-        route = mock_api.post("/v1/heartbeat").mock(
-            return_value=httpx.Response(
-                200,
-                json={
-                    "table_ref": "ob_demo.public.orders",
-                    "recorded_at": "2026-05-05T18:30:00+00:00",
-                    "invalidated_cache_entries": 4,
-                    "affected_data_objects": ["Orders", "OrderLines"],
-                },
-            )
-        )
-
-        out = server.heartbeat("ob_demo", "public", "orders")
-
-        assert "ob_demo.public.orders" in out
-        assert "cache entries invalidated: 4" in out
-        assert "Orders, OrderLines" in out
-        sent = route.calls[0].request
-        assert sent.headers.get("authorization") == "Bearer secret-token"
-        assert b'"database":' in sent.read()
-    finally:
-        server.settings.heartbeat_auth_token = None
 
 
 def test_compile_query_renders_physical_tables(mock_api: respx.MockRouter):
