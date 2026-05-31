@@ -2099,34 +2099,214 @@ def _impl_run_batch(
 # ---------------------------------------------------------------------------
 
 
-def _register_single_model_tools() -> None:
-    """Register tools for single-model mode (no model_id, shortcut endpoints)."""
+def _resolve_model_id(model_id: str | None) -> str | None:
+    """Normalize ``model_id`` for the active API mode.
+
+    Single-model mode has one pre-loaded model, so any passed id is ignored and
+    ``None`` is returned (routing the shared ``_impl_*`` to the shortcut
+    endpoints). Multi-model mode requires an explicit id — a missing one is a
+    clear error rather than a silent fall-through to the wrong endpoint.
+    """
+    if _single_model_mode:
+        return None
+    if not model_id:
+        raise ToolError(
+            "model_id is required (multi-model mode) — call load_model first "
+            "and pass the id it returns."
+        )
+    return model_id
+
+
+def _register_model_tools() -> None:
+    """Register the model-scoped tool surface — one definition per tool.
+
+    Each tool takes an optional ``model_id`` normalized by ``_resolve_model_id``:
+    ignored in single-model mode (one pre-loaded model), required at call time in
+    multi-model mode. Tools that exist in only one mode (``get_model`` for
+    single-model; ``load_model`` / ``remove_model`` / ``list_models`` /
+    ``run_batch`` for multi-model) are registered conditionally. ``execute_query``
+    / ``execute_obsql`` are always registered and gated by the ``query_execute``
+    capability at list/call time (see ``PhaseMiddleware``).
+
+    ``model_id`` is the id returned by ``load_model`` in multi-model mode; omit it
+    in single-model mode, where the one pre-loaded model is always used.
+    """
+
+    # ----- introspection -----
 
     @mcp.tool
-    def get_model() -> str:
-        """Get the pre-loaded OBML YAML model source.
+    def describe_model(model_id: str | None = None) -> str:
+        """Describe the contents of the model.
 
-        Returns the original OBML YAML that was loaded into the API at startup.
-        Useful for understanding the model definition in the author's terms.
+        Shows data objects (with columns and joins), dimensions, measures, and
+        metrics.  In multi-model mode, call this after ``load_model`` to explore
+        a model.
+
+        Args:
+            model_id: id from ``load_model`` (multi-model); omit in single-model.
         """
-        resp = _api_request("GET", f"{_API_V1}/settings", retry_on_expired=False)
-        data = _parse_json(resp)
-        yaml_content = data.get("model_yaml")
-        if not yaml_content:
-            raise ToolError("No model YAML available from the API")
-        return yaml_content
+        return _impl_describe_model(_resolve_model_id(model_id))
 
     @mcp.tool
-    def describe_model() -> str:
-        """Describe the pre-loaded model.
+    def get_model_schema(model_id: str | None = None) -> str:
+        """Get the full model structure as JSON.
 
-        Shows data objects (with columns and joins), dimensions, measures,
-        and metrics.
+        Returns a detailed JSON representation of the model including all data
+        objects (with columns, types, comments, owners), dimensions, measures,
+        metrics, and their synonyms.  More detailed than ``describe_model``.
+
+        Args:
+            model_id: id from ``load_model`` (multi-model); omit in single-model.
         """
-        return _impl_describe_model()
+        return _impl_get_model_schema(_resolve_model_id(model_id))
+
+    @mcp.tool
+    def get_model_diagram(
+        model_id: str | None = None,
+        show_columns: bool = True,
+        theme: str = "default",
+    ) -> str:
+        """Generate a Mermaid ER diagram for the model.
+
+        Returns a Mermaid diagram script that visualises the data objects,
+        columns, and join relationships in the model.
+
+        Args:
+            model_id: id from ``load_model`` (multi-model); omit in single-model.
+            show_columns: Whether to include column details in the diagram.
+            theme: Mermaid diagram theme (e.g. "default", "dark", "forest").
+        """
+        return _impl_get_model_diagram(_resolve_model_id(model_id), show_columns, theme)
+
+    @mcp.tool
+    def get_join_graph(model_id: str | None = None) -> str:
+        """Return the join graph as an adjacency list.
+
+        Shows the data object nodes and join edges (with cardinality and join
+        columns) in the model.  Useful for understanding table relationships.
+
+        Args:
+            model_id: id from ``load_model`` (multi-model); omit in single-model.
+        """
+        return _impl_get_join_graph(_resolve_model_id(model_id))
+
+    @mcp.tool
+    def get_graph(model_id: str | None = None) -> str:
+        """Get the OBSL-Core RDF graph for the model as Turtle.
+
+        Returns the semantic model's RDF graph serialized in Turtle format.
+        The graph follows the OBSL-Core ontology and can be used for semantic
+        web integration or further analysis.
+
+        Args:
+            model_id: id from ``load_model`` (multi-model); omit in single-model.
+        """
+        return _impl_get_graph(_resolve_model_id(model_id))
+
+    @mcp.tool
+    def sparql_query(query: str, model_id: str | None = None) -> str:
+        """Execute a read-only SPARQL query against the model's RDF graph.
+
+        Supports SELECT and ASK queries only (no INSERT/DELETE/UPDATE).
+        The graph uses the OBSL-Core ontology.
+
+        Args:
+            query: SPARQL query string (SELECT or ASK).
+            model_id: id from ``load_model`` (multi-model); omit in single-model.
+        """
+        return _impl_sparql_query(_resolve_model_id(model_id), query)
+
+    # ----- discovery -----
+
+    @mcp.tool
+    def list_artefacts(
+        kind: Literal["dimension", "measure", "metric"] | None = None,
+        name: str | None = None,
+        model_id: str | None = None,
+    ) -> str:
+        """Look up model artefacts — exact, deterministic, complete.
+
+        Use this when you know what you want or want the authoritative set
+        (contrast ``find_artefacts``, which is fuzzy ranked search). Returns
+        full artefact records:
+
+        - no kind/name → every dimension, measure, and metric in the model;
+        - ``kind`` only → the complete set of that one kind;
+        - ``name`` → that exact artefact (optionally constrained to ``kind``).
+
+        Args:
+            kind: Restrict to one artefact kind (dimension, measure, metric).
+            name: Return only the artefact with this exact name.
+            model_id: id from ``load_model`` (multi-model); omit in single-model.
+        """
+        return _impl_list_artefacts(_resolve_model_id(model_id), kind, name)
+
+    @mcp.tool
+    def find_artefacts(
+        query: str,
+        kind: Literal["dimension", "measure", "metric"] | None = None,
+        model_id: str | None = None,
+    ) -> str:
+        """Fuzzy, ranked search across model artefacts — for "I don't know the
+        exact name".
+
+        Matches names and synonyms (exact, synonym, and fuzzy/partial), and
+        returns ranked candidates — not the authoritative complete set (use
+        ``list_artefacts`` for that). Good for resolving a vague term to real
+        artefact names.
+
+        Args:
+            query: Search term (matched against names and synonyms).
+            kind: Restrict the search to one artefact kind (dimension,
+                measure, metric).  Omit to search all kinds.
+            model_id: id from ``load_model`` (multi-model); omit in single-model.
+        """
+        return _impl_find_artefacts(_resolve_model_id(model_id), query, kind)
+
+    @mcp.tool
+    def explain_artefact(name: str, model_id: str | None = None) -> str:
+        """Explain the lineage of a dimension, measure, or metric.
+
+        Traces the composition chain from the named artefact down to the
+        underlying data objects and columns.  Useful for understanding how a
+        measure is computed or where a dimension originates.
+
+        Args:
+            name: The dimension, measure, or metric name to explain.
+            model_id: id from ``load_model`` (multi-model); omit in single-model.
+        """
+        return _impl_explain_artefact(_resolve_model_id(model_id), name)
+
+    @mcp.tool
+    def list_examples(intent: str | None = None, model_id: str | None = None) -> str:
+        """List canonical example queries authored alongside the model.
+
+        Returns each example's name, description, and intent tags.  Use
+        ``get_example`` for full detail (query payload + compiled SQL preview).
+
+        Args:
+            intent: Optional intent-tag filter.  Falls back through exact →
+                contains → fuzzy tag matching.  When no examples match,
+                the server returns a ``suggestion`` listing available tags.
+            model_id: id from ``load_model`` (multi-model); omit in single-model.
+        """
+        return _impl_list_examples(_resolve_model_id(model_id), intent)
+
+    @mcp.tool
+    def get_example(name: str, model_id: str | None = None) -> str:
+        """Get a single example by name with its query and compiled SQL preview.
+
+        Args:
+            name: The example's ``name`` field.
+            model_id: id from ``load_model`` (multi-model); omit in single-model.
+        """
+        return _impl_get_example(_resolve_model_id(model_id), name)
+
+    # ----- compile / plan -----
 
     @mcp.tool
     def compile_query(
+        model_id: str | None = None,
         dialect: str | None = None,
         dimensions: list[str] | None = None,
         measures: list[str] | None = None,
@@ -2170,6 +2350,7 @@ def _register_single_model_tools() -> None:
         Use ``describe_model`` first to discover available names.
 
         Args:
+            model_id: id from ``load_model`` (multi-model); omit in single-model.
             dialect: Target SQL dialect.  When omitted the API resolves
                 via model.settings.defaultDialect → server default.
             dimensions: List of dimension names (aggregate mode).
@@ -2198,7 +2379,7 @@ def _register_single_model_tools() -> None:
                 selecting secondary joins.
         """
         return _impl_compile_query(
-            None,
+            _resolve_model_id(model_id),
             dialect,
             dimensions,
             measures,
@@ -2216,118 +2397,8 @@ def _register_single_model_tools() -> None:
         )
 
     @mcp.tool
-    def get_model_diagram(
-        show_columns: bool = True,
-        theme: str = "default",
-    ) -> str:
-        """Generate a Mermaid ER diagram for the pre-loaded model.
-
-        Returns a Mermaid diagram script that visualises the data objects,
-        columns, and join relationships in the model.
-
-        Args:
-            show_columns: Whether to include column details in the diagram.
-            theme: Mermaid diagram theme (e.g. "default", "dark", "forest").
-        """
-        return _impl_get_model_diagram(None, show_columns, theme)
-
-    @mcp.tool
-    def get_model_schema() -> str:
-        """Get the full model structure as JSON.
-
-        Returns a detailed JSON representation of the model including all data
-        objects (with columns, types, comments, owners), dimensions, measures,
-        metrics, and their synonyms.  More detailed than ``describe_model``.
-        """
-        return _impl_get_model_schema(None)
-
-    @mcp.tool
-    def list_artefacts(
-        kind: Literal["dimension", "measure", "metric"] | None = None,
-        name: str | None = None,
-    ) -> str:
-        """Look up model artefacts — exact, deterministic, complete.
-
-        Use this when you know what you want or want the authoritative set
-        (contrast ``find_artefacts``, which is fuzzy ranked search). Returns
-        full artefact records:
-
-        - no args → every dimension, measure, and metric in the model;
-        - ``kind`` only → the complete set of that one kind;
-        - ``name`` → that exact artefact (optionally constrained to ``kind``).
-
-        Args:
-            kind: Restrict to one artefact kind (dimension, measure, metric).
-            name: Return only the artefact with this exact name.
-        """
-        return _impl_list_artefacts(None, kind, name)
-
-    @mcp.tool
-    def explain_artefact(name: str) -> str:
-        """Explain the lineage of a dimension, measure, or metric.
-
-        Traces the composition chain from the named artefact down to the
-        underlying data objects and columns.  Useful for understanding how a
-        measure is computed or where a dimension originates.
-
-        Args:
-            name: The dimension, measure, or metric name to explain.
-        """
-        return _impl_explain_artefact(None, name)
-
-    @mcp.tool
-    def find_artefacts(
-        query: str,
-        kind: Literal["dimension", "measure", "metric"] | None = None,
-    ) -> str:
-        """Fuzzy, ranked search across model artefacts — for "I don't know the
-        exact name".
-
-        Matches names and synonyms (exact, synonym, and fuzzy/partial), and
-        returns ranked candidates — not the authoritative complete set (use
-        ``list_artefacts`` for that). Good for resolving a vague term to real
-        artefact names.
-
-        Args:
-            query: Search term (matched against names and synonyms).
-            kind: Restrict the search to one artefact kind (dimension,
-                measure, metric).  Omit to search all kinds.
-        """
-        return _impl_find_artefacts(None, query, kind)
-
-    @mcp.tool
-    def get_join_graph() -> str:
-        """Return the join graph as an adjacency list.
-
-        Shows the data object nodes and join edges (with cardinality and join
-        columns) in the model.  Useful for understanding table relationships.
-        """
-        return _impl_get_join_graph(None)
-
-    @mcp.tool
-    def get_graph() -> str:
-        """Get the OBSL-Core RDF graph for the model as Turtle.
-
-        Returns the semantic model's RDF graph serialized in Turtle format.
-        The graph follows the OBSL-Core ontology and can be used for
-        semantic web integration or further analysis.
-        """
-        return _impl_get_graph(None)
-
-    @mcp.tool
-    def sparql_query(query: str) -> str:
-        """Execute a read-only SPARQL query against the model's RDF graph.
-
-        Supports SELECT and ASK queries only (no INSERT/DELETE/UPDATE).
-        The graph uses the OBSL-Core ontology.
-
-        Args:
-            query: SPARQL query string (SELECT or ASK).
-        """
-        return _impl_sparql_query(None, query)
-
-    @mcp.tool
     def plan_query(
+        model_id: str | None = None,
         dialect: str | None = None,
         dimensions: list[str] | None = None,
         measures: list[str] | None = None,
@@ -2349,12 +2420,18 @@ def _register_single_model_tools() -> None:
         Cheap by default — no warehouse round trip.  Returns the planner,
         physical tables, join path, filter count, structured warnings, and a
         ``would_compile`` flag.  Set ``include_database_explain=True`` to also
-        run the warehouse's ``EXPLAIN`` and include the raw output.
+        run the warehouse's ``EXPLAIN`` and include the raw output (opt-in,
+        costs a round trip).
 
         Same query parameters as ``compile_query``.
+
+        Args:
+            model_id: id from ``load_model`` (multi-model); omit in single-model.
+            include_database_explain: When true, also run EXPLAIN against the
+                configured warehouse and include the raw text.
         """
         return _impl_plan_query(
-            None,
+            _resolve_model_id(model_id),
             dialect,
             dimensions,
             measures,
@@ -2373,32 +2450,10 @@ def _register_single_model_tools() -> None:
         )
 
     @mcp.tool
-    def list_examples(intent: str | None = None) -> str:
-        """List canonical example queries authored alongside the model.
-
-        Returns each example's name, description, and intent tags.  Use
-        ``get_example`` for full detail (query payload + compiled SQL preview).
-
-        Args:
-            intent: Optional intent-tag filter.  Falls back through exact →
-                contains → fuzzy tag matching.  When no examples match,
-                the server returns a ``suggestion`` listing available tags.
-        """
-        return _impl_list_examples(None, intent)
-
-    @mcp.tool
-    def get_example(name: str) -> str:
-        """Get a single example by name with its query and compiled SQL preview.
-
-        Args:
-            name: The example's ``name`` field.
-        """
-        return _impl_get_example(None, name)
-
-    @mcp.tool
     def compile_obsql(
         sql: str,
         dialect: str | None = None,
+        model_id: str | None = None,
     ) -> str:
         """Translate an OBSQL (natural SQL) query to SQL without executing it.
 
@@ -2412,8 +2467,7 @@ def _register_single_model_tools() -> None:
               [WITH ROLLUP | WITH CUBE]
 
         ``SELECT *``, JOINs, CTEs, subqueries, UNION, and window functions
-        are rejected.  ``SELECT`` without ``FROM`` resolves to the implicit
-        model.
+        are rejected.  ``SELECT`` without ``FROM`` resolves to the model.
 
         Call ``get_obsql_reference()`` first to see the full grammar.
 
@@ -2421,36 +2475,145 @@ def _register_single_model_tools() -> None:
             sql: OBSQL query string.
             dialect: Target SQL dialect.  When omitted the API resolves via
                 ``model.settings.defaultDialect`` → server default.
+            model_id: id from ``load_model`` (multi-model); omit in single-model.
         """
-        return _impl_compile_obsql(None, sql, dialect)
+        return _impl_compile_obsql(_resolve_model_id(model_id), sql, dialect)
 
+    # ----- execute (always registered; gated by the query_execute capability) -----
 
-def _setup_mode_tools() -> None:
-    """Detect API mode and register the appropriate tool set. Idempotent."""
-    global _single_model_mode, _query_execute_enabled, _tools_registered
-    if _tools_registered:
-        return
-    _single_model_mode, _query_execute_enabled = _detect_api_mode()
+    @mcp.tool
+    def execute_query(
+        model_id: str | None = None,
+        dialect: str | None = None,
+        dimensions: list[str] | None = None,
+        measures: list[str] | None = None,
+        fields: list[str] | None = None,
+        distinct: bool | None = None,
+        where: str | None = None,
+        having: str | None = None,
+        order_by: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+        dimensions_exclude: bool | None = None,
+        coalesce_dimensions: str | None = None,
+        query_json: str | None = None,
+        use_path_names: list[dict[str, str]] | None = None,
+        output_format: str = "json",
+        format_values: bool | None = None,
+        locale: str | None = None,
+        timezone: str | None = None,
+    ) -> str:
+        """Compile and execute a semantic query, returning SQL and results.
+
+        Same query parameters as ``compile_query`` (aggregate and raw
+        modes).  If no ``limit`` is specified, a server-side default
+        row limit is enforced.
+
+        Args:
+            model_id: id from ``load_model`` (multi-model); omit in single-model.
+            dialect: Target SQL dialect.  When omitted the API
+                resolves via model.settings.defaultDialect →
+                server default.
+            dimensions: List of dimension names (aggregate mode).
+            measures: List of measure names (aggregate mode).
+            fields: List of physical column refs as
+                "DataObject.Column" (raw mode).
+            distinct: Emit SELECT DISTINCT (raw mode only).
+            where: Filters as a JSON string.
+            having: Measure/metric filters as a JSON string.
+            order_by: Ordering as a JSON string.
+            limit: Maximum number of rows to return.
+            offset: Number of rows to skip.
+            dimensions_exclude: Anti-join mode (aggregate only).
+            coalesce_dimensions: Coalesce groups as a JSON string.
+            query_json: Complete query as JSON (overrides above).
+            use_path_names: Secondary join path selectors.
+            output_format: Response format — "json" (default) or "tsv".
+            format_values: Format numeric cells as display strings.
+            locale: BCP-47 locale for number formatting (e.g. "de").
+            timezone: IANA timezone (e.g. "Europe/Berlin").
+        """
+        return _impl_execute_query(
+            _resolve_model_id(model_id),
+            dialect,
+            dimensions,
+            measures,
+            query_json,
+            use_path_names,
+            where=where,
+            having=having,
+            order_by=order_by,
+            limit=limit,
+            offset=offset,
+            dimensions_exclude=dimensions_exclude,
+            coalesce_dimensions=coalesce_dimensions,
+            fields=fields,
+            distinct=distinct,
+            output_format=output_format,
+            format_values=format_values,
+            locale=locale,
+            timezone=timezone,
+        )
+
+    @mcp.tool
+    def execute_obsql(
+        sql: str,
+        dialect: str | None = None,
+        output_format: str = "json",
+        format_values: bool | None = None,
+        locale: str | None = None,
+        timezone: str | None = None,
+        model_id: str | None = None,
+    ) -> str:
+        """Translate, compile, and execute an OBSQL query against the model.
+
+        Same input shape as ``compile_obsql`` (see that tool's docs and
+        ``get_obsql_reference()`` for grammar).  Returns rows + schema +
+        compiled SQL + cache metadata in the same shape as ``execute_query``.
+
+        Args:
+            sql: OBSQL query string.
+            dialect: Target SQL dialect (resolved via
+                ``model.settings.defaultDialect`` → server default
+                when omitted).
+            output_format: Response format — "json" (default) or "tsv".
+            format_values: Format numeric cells as display strings.
+            locale: BCP-47 locale for number formatting (e.g. "de").
+            timezone: IANA timezone (e.g. "Europe/Berlin").
+            model_id: id from ``load_model`` (multi-model); omit in single-model.
+        """
+        return _impl_execute_obsql(
+            _resolve_model_id(model_id),
+            sql,
+            dialect,
+            output_format=output_format,
+            format_values=format_values,
+            locale=locale,
+            timezone=timezone,
+        )
+
+    # ----- single-model only: the pre-loaded model's source -----
+
     if _single_model_mode:
-        logger.info("Single-model mode detected — using shortcut endpoints")
-        _register_single_model_tools()
-    else:
-        logger.info("Multi-model mode — using session-scoped endpoints")
-        _register_multi_model_tools()
-    # Execute tools are always registered; their visibility is gated at list
-    # time by capability (query_execute) via PhaseMiddleware. This keeps the
-    # surface a pure function of config + phase rather than of what happened to
-    # be registered, and lets future capability flags drop in the same way.
-    _register_execute_query_tool()
-    logger.info(
-        "Query execution %s (execute_* tools gated by capability)",
-        "enabled" if _query_execute_enabled else "disabled",
-    )
-    _tools_registered = True
 
+        @mcp.tool
+        def get_model() -> str:
+            """Get the pre-loaded OBML YAML model source.
 
-def _register_multi_model_tools() -> None:
-    """Register tools for multi-model mode (requires model_id, session-scoped)."""
+            Returns the original OBML YAML that was loaded into the API at
+            startup.  Useful for understanding the model definition in the
+            author's terms.  (Single-model mode only.)
+            """
+            resp = _api_request("GET", f"{_API_V1}/settings", retry_on_expired=False)
+            data = _parse_json(resp)
+            yaml_content = data.get("model_yaml")
+            if not yaml_content:
+                raise ToolError("No model YAML available from the API")
+            return yaml_content
+
+        return
+
+    # ----- multi-model only: session/model management + one-shot batch -----
 
     @mcp.tool
     def load_model(
@@ -2527,110 +2690,13 @@ def _register_multi_model_tools() -> None:
         return _impl_load_model(model, extends, inherits, dedup)
 
     @mcp.tool
-    def describe_model(model_id: str) -> str:
-        """Describe the contents of a loaded model.
-
-        Shows data objects (with columns and joins), dimensions, measures, and
-        metrics.  Use this after ``load_model`` to explore the model.
+    def remove_model(model_id: str) -> str:
+        """Remove a model from the current session.
 
         Args:
             model_id: The id returned by ``load_model``.
         """
-        return _impl_describe_model(model_id)
-
-    @mcp.tool
-    def compile_query(
-        model_id: str,
-        dialect: str | None = None,
-        dimensions: list[str] | None = None,
-        measures: list[str] | None = None,
-        fields: list[str] | None = None,
-        distinct: bool | None = None,
-        where: str | None = None,
-        having: str | None = None,
-        order_by: str | None = None,
-        limit: int | None = None,
-        offset: int | None = None,
-        dimensions_exclude: bool | None = None,
-        coalesce_dimensions: str | None = None,
-        query_json: str | None = None,
-        use_path_names: list[dict[str, str]] | None = None,
-    ) -> str:
-        """Compile a semantic query to SQL.
-
-        **Aggregate mode** — pass ``dimensions`` and/or ``measures``::
-
-            compile_query(
-                model_id="abc12345",
-                dimensions=["Country"],
-                measures=["Revenue"],
-                where='[{"field": "Country", "op": "equals", "value": "US"}]',
-                limit=10,
-            )
-
-        **Raw mode** — pass ``fields`` for un-aggregated column access::
-
-            compile_query(
-                model_id="abc12345",
-                fields=["Orders.OrderDate", "Orders.Amount"],
-                distinct=True,
-                limit=100,
-            )
-
-        Raw mode is mutually exclusive with dimensions, measures,
-        having, and dimensionsExclude.
-
-        Alternatively, pass a complete query as JSON via ``query_json``
-        (overrides all other query parameters).
-
-        Use ``describe_model`` first to discover available names.
-
-        Args:
-            model_id: The id returned by ``load_model``.
-            dialect: Target SQL dialect.  When omitted the API resolves
-                via model.settings.defaultDialect → server default.
-            dimensions: List of dimension names (aggregate mode).
-            measures: List of measure names (aggregate mode).
-            fields: List of physical column refs as
-                "DataObject.Column" (raw mode).  Mutually exclusive
-                with dimensions/measures.
-            distinct: Emit SELECT DISTINCT (raw mode only).
-            where: Filters as a JSON string, e.g.
-                '[{"field": "Country", "op": "equals", "value": "US"}]'.
-            having: Measure/metric filters as a JSON string, e.g.
-                '[{"field": "Revenue", "op": "gt", "value": 1000}]'.
-            order_by: Ordering as a JSON string, e.g.
-                '[{"field": "Revenue", "direction": "desc"}]'.
-            limit: Maximum number of rows to return.
-            offset: Number of rows to skip.
-            dimensions_exclude: If true, return dimension combinations that
-                do NOT exist (anti-join).
-            coalesce_dimensions: Coalesce groups as a JSON string, e.g.
-                '[{"coalesce": ["SalesEmp", "PurchaseEmp"],
-                "as": "Employee"}]'.  Merges role-playing dimensions
-                into one output column via COALESCE.  All members must
-                share the same resultType.
-            query_json: Complete query as JSON string (overrides above).
-            use_path_names: List of {source, target, pathName} dicts for
-                selecting secondary joins.
-        """
-        return _impl_compile_query(
-            model_id,
-            dialect,
-            dimensions,
-            measures,
-            query_json,
-            use_path_names,
-            where=where,
-            having=having,
-            order_by=order_by,
-            limit=limit,
-            offset=offset,
-            dimensions_exclude=dimensions_exclude,
-            coalesce_dimensions=coalesce_dimensions,
-            fields=fields,
-            distinct=distinct,
-        )
+        return _impl_remove_model(model_id)
 
     @mcp.tool
     def list_models() -> str:
@@ -2647,251 +2713,6 @@ def _register_multi_model_tools() -> None:
                 f"{m['measures']} measures, {m['metrics']} metrics)"
             )
         return "\n".join(lines)
-
-    @mcp.tool
-    def get_model_diagram(
-        model_id: str,
-        show_columns: bool = True,
-        theme: str = "default",
-    ) -> str:
-        """Generate a Mermaid ER diagram for a loaded model.
-
-        Returns a Mermaid diagram script that visualises the data objects,
-        columns, and join relationships in the model.
-
-        Args:
-            model_id: The id returned by ``load_model``.
-            show_columns: Whether to include column details in the diagram.
-            theme: Mermaid diagram theme (e.g. "default", "dark", "forest").
-        """
-        return _impl_get_model_diagram(model_id, show_columns, theme)
-
-    @mcp.tool
-    def remove_model(model_id: str) -> str:
-        """Remove a model from the current session.
-
-        Args:
-            model_id: The id returned by ``load_model``.
-        """
-        return _impl_remove_model(model_id)
-
-    @mcp.tool
-    def get_model_schema(model_id: str) -> str:
-        """Get the full model structure as JSON.
-
-        Returns a detailed JSON representation of the model including all data
-        objects (with columns, types, comments, owners), dimensions, measures,
-        metrics, and their synonyms.  More detailed than ``describe_model``.
-
-        Args:
-            model_id: The id returned by ``load_model``.
-        """
-        return _impl_get_model_schema(model_id)
-
-    @mcp.tool
-    def list_artefacts(
-        model_id: str,
-        kind: Literal["dimension", "measure", "metric"] | None = None,
-        name: str | None = None,
-    ) -> str:
-        """Look up model artefacts — exact, deterministic, complete.
-
-        Use this when you know what you want or want the authoritative set
-        (contrast ``find_artefacts``, which is fuzzy ranked search). Returns
-        full artefact records:
-
-        - ``model_id`` only → every dimension, measure, and metric;
-        - ``kind`` → the complete set of that one kind;
-        - ``name`` → that exact artefact (optionally constrained to ``kind``).
-
-        Args:
-            model_id: The id returned by ``load_model``.
-            kind: Restrict to one artefact kind (dimension, measure, metric).
-            name: Return only the artefact with this exact name.
-        """
-        return _impl_list_artefacts(model_id, kind, name)
-
-    @mcp.tool
-    def explain_artefact(model_id: str, name: str) -> str:
-        """Explain the lineage of a dimension, measure, or metric.
-
-        Traces the composition chain from the named artefact down to the
-        underlying data objects and columns.  Useful for understanding how a
-        measure is computed or where a dimension originates.
-
-        Args:
-            model_id: The id returned by ``load_model``.
-            name: The dimension, measure, or metric name to explain.
-        """
-        return _impl_explain_artefact(model_id, name)
-
-    @mcp.tool
-    def find_artefacts(
-        model_id: str,
-        query: str,
-        kind: Literal["dimension", "measure", "metric"] | None = None,
-    ) -> str:
-        """Fuzzy, ranked search across model artefacts — for "I don't know the
-        exact name".
-
-        Matches names and synonyms (exact, synonym, and fuzzy/partial), and
-        returns ranked candidates — not the authoritative complete set (use
-        ``list_artefacts`` for that). Good for resolving a vague term to real
-        artefact names.
-
-        Args:
-            model_id: The id returned by ``load_model``.
-            query: Search term (matched against names and synonyms).
-            kind: Restrict the search to one artefact kind (dimension,
-                measure, metric).  Omit to search all kinds.
-        """
-        return _impl_find_artefacts(model_id, query, kind)
-
-    @mcp.tool
-    def get_join_graph(model_id: str) -> str:
-        """Return the join graph as an adjacency list.
-
-        Shows the data object nodes and join edges (with cardinality and join
-        columns) in the model.  Useful for understanding table relationships.
-
-        Args:
-            model_id: The id returned by ``load_model``.
-        """
-        return _impl_get_join_graph(model_id)
-
-    @mcp.tool
-    def get_graph(model_id: str) -> str:
-        """Get the OBSL-Core RDF graph for a loaded model as Turtle.
-
-        Returns the semantic model's RDF graph serialized in Turtle format.
-        The graph follows the OBSL-Core ontology and can be used for
-        semantic web integration or further analysis.
-
-        Args:
-            model_id: The id returned by ``load_model``.
-        """
-        return _impl_get_graph(model_id)
-
-    @mcp.tool
-    def sparql_query(model_id: str, query: str) -> str:
-        """Execute a read-only SPARQL query against a model's RDF graph.
-
-        Supports SELECT and ASK queries only (no INSERT/DELETE/UPDATE).
-        The graph uses the OBSL-Core ontology.
-
-        Args:
-            model_id: The id returned by ``load_model``.
-            query: SPARQL query string (SELECT or ASK).
-        """
-        return _impl_sparql_query(model_id, query)
-
-    @mcp.tool
-    def plan_query(
-        model_id: str,
-        dialect: str | None = None,
-        dimensions: list[str] | None = None,
-        measures: list[str] | None = None,
-        fields: list[str] | None = None,
-        distinct: bool | None = None,
-        where: str | None = None,
-        having: str | None = None,
-        order_by: str | None = None,
-        limit: int | None = None,
-        offset: int | None = None,
-        dimensions_exclude: bool | None = None,
-        coalesce_dimensions: str | None = None,
-        query_json: str | None = None,
-        use_path_names: list[dict[str, str]] | None = None,
-        include_database_explain: bool = False,
-    ) -> str:
-        """Return the planner's understanding of a query without compiling SQL.
-
-        Cheap by default — no warehouse round trip.  Returns the planner,
-        physical tables, join path, filter count, structured warnings, and a
-        ``would_compile`` flag.  Set ``include_database_explain=True`` to also
-        run the warehouse's ``EXPLAIN`` and include the raw output (opt-in,
-        costs a round trip).
-
-        Same query parameters as ``compile_query``.
-
-        Args:
-            model_id: The id returned by ``load_model``.
-            include_database_explain: When true, also run EXPLAIN against the
-                configured warehouse and include the raw text.
-        """
-        return _impl_plan_query(
-            model_id,
-            dialect,
-            dimensions,
-            measures,
-            query_json,
-            use_path_names,
-            where=where,
-            having=having,
-            order_by=order_by,
-            limit=limit,
-            offset=offset,
-            dimensions_exclude=dimensions_exclude,
-            coalesce_dimensions=coalesce_dimensions,
-            fields=fields,
-            distinct=distinct,
-            include_database_explain=include_database_explain,
-        )
-
-    @mcp.tool
-    def list_examples(model_id: str, intent: str | None = None) -> str:
-        """List canonical example queries authored alongside the model.
-
-        Returns each example's name, description, and intent tags.  Use
-        ``get_example`` for full detail (query payload + compiled SQL preview).
-
-        Args:
-            model_id: The id returned by ``load_model``.
-            intent: Optional intent-tag filter.  Falls back through exact →
-                contains → fuzzy tag matching.  When no examples match,
-                the server returns a ``suggestion`` listing available tags.
-        """
-        return _impl_list_examples(model_id, intent)
-
-    @mcp.tool
-    def get_example(model_id: str, name: str) -> str:
-        """Get a single example by name with its query and compiled SQL preview.
-
-        Args:
-            model_id: The id returned by ``load_model``.
-            name: The example's ``name`` field.
-        """
-        return _impl_get_example(model_id, name)
-
-    @mcp.tool
-    def compile_obsql(
-        model_id: str,
-        sql: str,
-        dialect: str | None = None,
-    ) -> str:
-        """Translate an OBSQL (natural SQL) query to SQL without executing it.
-
-        OBSQL is a BI-style SQL surface against the model's virtual table.
-        Supported shape::
-
-            SELECT <dim/measure labels> FROM <model_name>
-              [WHERE <conditions>] [HAVING <conditions>]
-              [GROUP BY ...] [ORDER BY ... [NULLS FIRST|LAST]]
-              [LIMIT n] [OFFSET m]
-              [WITH ROLLUP | WITH CUBE]
-
-        ``SELECT *``, JOINs, CTEs, subqueries, UNION, and window functions
-        are rejected.  ``SELECT`` without ``FROM`` resolves to the model.
-
-        Call ``get_obsql_reference()`` first to see the full grammar.
-
-        Args:
-            model_id: The id returned by ``load_model``.
-            sql: OBSQL query string.
-            dialect: Target SQL dialect.  When omitted the API resolves via
-                ``model.settings.defaultDialect`` → server default.
-        """
-        return _impl_compile_obsql(model_id, sql, dialect)
 
     @mcp.tool
     def run_batch(
@@ -2956,237 +2777,22 @@ def _register_multi_model_tools() -> None:
         )
 
 
-def _register_execute_query_tool() -> None:
-    """Register the execute_query / execute_obsql tools.
-
-    Always registered; visibility and callability are gated by the
-    ``query_execute`` capability at request time (see PhaseMiddleware /
-    _tool_capability_ok), so a compile-only server lists neither.
-    """
-
-    if _single_model_mode:
-
-        @mcp.tool
-        def execute_query(
-            dialect: str | None = None,
-            dimensions: list[str] | None = None,
-            measures: list[str] | None = None,
-            fields: list[str] | None = None,
-            distinct: bool | None = None,
-            where: str | None = None,
-            having: str | None = None,
-            order_by: str | None = None,
-            limit: int | None = None,
-            offset: int | None = None,
-            dimensions_exclude: bool | None = None,
-            coalesce_dimensions: str | None = None,
-            query_json: str | None = None,
-            use_path_names: list[dict[str, str]] | None = None,
-            output_format: str = "json",
-            format_values: bool | None = None,
-            locale: str | None = None,
-            timezone: str | None = None,
-        ) -> str:
-            """Compile and execute a semantic query, returning SQL and results.
-
-            Same query parameters as ``compile_query`` (aggregate and raw
-            modes).  If no ``limit`` is specified, a server-side default
-            row limit is enforced.
-
-            Args:
-                dialect: Target SQL dialect.  When omitted the API
-                    resolves via model.settings.defaultDialect →
-                    server default.
-                dimensions: List of dimension names (aggregate mode).
-                measures: List of measure names (aggregate mode).
-                fields: List of physical column refs as
-                    "DataObject.Column" (raw mode).
-                distinct: Emit SELECT DISTINCT (raw mode only).
-                where: Filters as a JSON string.
-                having: Measure/metric filters as a JSON string.
-                order_by: Ordering as a JSON string.
-                limit: Maximum number of rows to return.
-                offset: Number of rows to skip.
-                dimensions_exclude: Anti-join mode (aggregate only).
-                coalesce_dimensions: Coalesce groups as a JSON string.
-                query_json: Complete query as JSON (overrides above).
-                use_path_names: Secondary join path selectors.
-                output_format: Response format — "json" (default) or "tsv".
-                format_values: Format numeric cells as display strings.
-                locale: BCP-47 locale for number formatting (e.g. "de").
-                timezone: IANA timezone (e.g. "Europe/Berlin").
-            """
-            return _impl_execute_query(
-                None,
-                dialect,
-                dimensions,
-                measures,
-                query_json,
-                use_path_names,
-                where=where,
-                having=having,
-                order_by=order_by,
-                limit=limit,
-                offset=offset,
-                dimensions_exclude=dimensions_exclude,
-                coalesce_dimensions=coalesce_dimensions,
-                fields=fields,
-                distinct=distinct,
-                output_format=output_format,
-                format_values=format_values,
-                locale=locale,
-                timezone=timezone,
-            )
-
-        @mcp.tool
-        def execute_obsql(
-            sql: str,
-            dialect: str | None = None,
-            output_format: str = "json",
-            format_values: bool | None = None,
-            locale: str | None = None,
-            timezone: str | None = None,
-        ) -> str:
-            """Translate, compile, and execute an OBSQL query against the model.
-
-            Same input shape as ``compile_obsql`` (see that tool's docs and
-            ``get_obsql_reference()`` for grammar).  Returns rows + schema +
-            compiled SQL + cache metadata in the same shape as
-            ``execute_query``.
-
-            Args:
-                sql: OBSQL query string.
-                dialect: Target SQL dialect (resolved via
-                    ``model.settings.defaultDialect`` → server default
-                    when omitted).
-                output_format: Response format — "json" (default) or "tsv".
-                format_values: Format numeric cells as display strings.
-                locale: BCP-47 locale for number formatting (e.g. "de").
-                timezone: IANA timezone (e.g. "Europe/Berlin").
-            """
-            return _impl_execute_obsql(
-                None,
-                sql,
-                dialect,
-                output_format=output_format,
-                format_values=format_values,
-                locale=locale,
-                timezone=timezone,
-            )
-
-    else:
-
-        @mcp.tool
-        def execute_query(
-            model_id: str,
-            dialect: str | None = None,
-            dimensions: list[str] | None = None,
-            measures: list[str] | None = None,
-            fields: list[str] | None = None,
-            distinct: bool | None = None,
-            where: str | None = None,
-            having: str | None = None,
-            order_by: str | None = None,
-            limit: int | None = None,
-            offset: int | None = None,
-            dimensions_exclude: bool | None = None,
-            coalesce_dimensions: str | None = None,
-            query_json: str | None = None,
-            use_path_names: list[dict[str, str]] | None = None,
-            output_format: str = "json",
-            format_values: bool | None = None,
-            locale: str | None = None,
-            timezone: str | None = None,
-        ) -> str:
-            """Compile and execute a semantic query, returning SQL and results.
-
-            Same query parameters as ``compile_query`` (aggregate and raw
-            modes).  If no ``limit`` is specified, a server-side default
-            row limit is enforced.
-
-            Args:
-                model_id: The id returned by ``load_model``.
-                dialect: Target SQL dialect.  When omitted the API
-                    resolves via model.settings.defaultDialect →
-                    server default.
-                dimensions: List of dimension names (aggregate mode).
-                measures: List of measure names (aggregate mode).
-                fields: List of physical column refs as
-                    "DataObject.Column" (raw mode).
-                distinct: Emit SELECT DISTINCT (raw mode only).
-                where: Filters as a JSON string.
-                having: Measure/metric filters as a JSON string.
-                order_by: Ordering as a JSON string.
-                limit: Maximum number of rows to return.
-                offset: Number of rows to skip.
-                dimensions_exclude: Anti-join mode (aggregate only).
-                coalesce_dimensions: Coalesce groups as a JSON string.
-                query_json: Complete query as JSON (overrides above).
-                use_path_names: Secondary join path selectors.
-                output_format: Response format — "json" (default) or "tsv".
-                format_values: Format numeric cells as display strings.
-                locale: BCP-47 locale for number formatting (e.g. "de").
-                timezone: IANA timezone (e.g. "Europe/Berlin").
-            """
-            return _impl_execute_query(
-                model_id,
-                dialect,
-                dimensions,
-                measures,
-                query_json,
-                use_path_names,
-                where=where,
-                having=having,
-                order_by=order_by,
-                limit=limit,
-                offset=offset,
-                dimensions_exclude=dimensions_exclude,
-                coalesce_dimensions=coalesce_dimensions,
-                fields=fields,
-                distinct=distinct,
-                output_format=output_format,
-                format_values=format_values,
-                locale=locale,
-                timezone=timezone,
-            )
-
-        @mcp.tool
-        def execute_obsql(
-            model_id: str,
-            sql: str,
-            dialect: str | None = None,
-            output_format: str = "json",
-            format_values: bool | None = None,
-            locale: str | None = None,
-            timezone: str | None = None,
-        ) -> str:
-            """Translate, compile, and execute an OBSQL query against the model.
-
-            Same input shape as ``compile_obsql`` (see that tool's docs and
-            ``get_obsql_reference()`` for grammar).  Returns rows + schema +
-            compiled SQL + cache metadata in the same shape as
-            ``execute_query``.
-
-            Args:
-                model_id: The id returned by ``load_model``.
-                sql: OBSQL query string.
-                dialect: Target SQL dialect (resolved via
-                    ``model.settings.defaultDialect`` → server default
-                    when omitted).
-                output_format: Response format — "json" (default) or "tsv".
-                format_values: Format numeric cells as display strings.
-                locale: BCP-47 locale for number formatting (e.g. "de").
-                timezone: IANA timezone (e.g. "Europe/Berlin").
-            """
-            return _impl_execute_obsql(
-                model_id,
-                sql,
-                dialect,
-                output_format=output_format,
-                format_values=format_values,
-                locale=locale,
-                timezone=timezone,
-            )
+def _setup_mode_tools() -> None:
+    """Detect API mode and register the tool surface. Idempotent."""
+    global _single_model_mode, _query_execute_enabled, _tools_registered
+    if _tools_registered:
+        return
+    _single_model_mode, _query_execute_enabled = _detect_api_mode()
+    logger.info(
+        "%s mode detected",
+        "Single-model" if _single_model_mode else "Multi-model",
+    )
+    _register_model_tools()
+    logger.info(
+        "Query execution %s (execute_* tools gated by capability)",
+        "enabled" if _query_execute_enabled else "disabled",
+    )
+    _tools_registered = True
 
 
 # ---------------------------------------------------------------------------

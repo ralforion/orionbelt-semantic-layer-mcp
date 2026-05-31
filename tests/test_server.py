@@ -106,7 +106,7 @@ def test_get_obml_reference(mock_api):
 
 
 # ---------------------------------------------------------------------------
-# load_model (multi-model mode — via _register_multi_model_tools)
+# load_model (multi-model mode — via _register_model_tools)
 # ---------------------------------------------------------------------------
 
 
@@ -127,7 +127,7 @@ def test_load_model(mock_api: respx.MockRouter):
         )
     )
 
-    server._register_multi_model_tools()
+    server._register_model_tools()
 
     resp = server._session_request("POST", "/models", json_body={"model_yaml": "version: 1.0\n..."})
     data = server._parse_json(resp)
@@ -227,7 +227,7 @@ def test_get_model_single_model_mode(mock_api: respx.MockRouter):
         )
     )
 
-    server._register_single_model_tools()
+    server._register_model_tools()
     # Call via the settings endpoint directly (same as get_model impl)
     resp = server._api_request("GET", f"{server._API_V1}/settings", retry_on_expired=False)
     data = server._parse_json(resp)
@@ -773,7 +773,7 @@ def test_list_models_empty(mock_api: respx.MockRouter):
         return_value=httpx.Response(200, json=[])
     )
 
-    server._register_multi_model_tools()
+    server._register_model_tools()
     # Call via session request since list_models is registered dynamically
     resp = server._session_request("GET", "/models")
     models = server._parse_json(resp)
@@ -3072,8 +3072,7 @@ def test_tool_phase_buckets_are_disjoint():
 def test_tool_phase_buckets_classify_every_registered_tool():
     """Every registered agent-facing tool belongs to exactly one bucket."""
     server._single_model_mode = False
-    server._register_multi_model_tools()
-    server._register_execute_query_tool()
+    server._register_model_tools()
     registered = {t.name for t in asyncio.run(server.mcp._list_tools())}
 
     classified = server._ALWAYS_TOOLS | server._DESIGN_TOOLS | server._RUN_TIME_TOOLS

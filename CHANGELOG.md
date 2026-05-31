@@ -4,6 +4,24 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Changed
+
+- **Unified the model-tool registration (internal refactor).** The two
+  near-identical registration functions (`_register_single_model_tools` /
+  `_register_multi_model_tools`) and the split `_register_execute_query_tool`
+  collapsed into a single `_register_model_tools()`. Every model-scoped tool is
+  now defined **once** with an optional `model_id`, normalized by
+  `_resolve_model_id()`: ignored in single-model mode (one pre-loaded model),
+  required at call time in multi-model mode (clear error if missing). Mode-only
+  tools (`get_model` for single; `load_model` / `remove_model` / `list_models` /
+  `run_batch` for multi) are registered conditionally. Net **−394 lines** in
+  `server.py`; the visible tool set per mode is unchanged (24 single / 27 multi).
+  Note: in multi-model mode `model_id` now appears as an *optional* field in each
+  tool's input schema (it was a required positional); it is still enforced at
+  call time. MCP clients call tools by name, so argument order is unaffected.
+
 ## [2.7.4] — 2026-05-31
 
 ### Changed
