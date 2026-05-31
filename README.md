@@ -7,7 +7,7 @@
 
 <p align="center"><strong>Thin MCP server that delegates to the OrionBelt Semantic Layer REST API</strong></p>
 
-[![Version 2.7.4](https://img.shields.io/badge/version-2.7.4-purple.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/releases)
+[![Version 2.7.5](https://img.shields.io/badge/version-2.7.5-purple.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/releases)
 [![OrionBelt Semantic Layer 2.7](https://img.shields.io/badge/OrionBelt_Semantic_Layer-2.7-0054A6.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/blob/main/LICENSE)
@@ -47,7 +47,7 @@ The OrionBelt Semantic Layer platform has two deployment modes. This MCP server 
 - **No business logic** — all tool calls delegate to the REST API (v1 endpoints)
 - **Dual-mode** — auto-detects single-model or multi-model API mode at startup
 - **Auto-session management** — creates an API session on first tool call, caches the ID (multi-model mode)
-- **24 tools** (single-model mode) or **27 tools** (multi-model mode) for querying (QueryObject + OBSQL natural SQL), execution, batch, planning, discovery, examples, diagrams, RDF/SPARQL, reference docs, and format conversion. The visible surface is smaller in the design-time phase and when query execution is disabled (see [Design-time vs run-time tool switching](#design-time-vs-run-time-tool-switching))
+- **16 tools** (single-model mode) or **19 tools** (multi-model mode) for querying (QueryObject), execution, batch, discovery, examples, diagrams, RDF/SPARQL, OBML reference, and OSI conversion. The visible surface is smaller in the design-time phase and when query execution is disabled (see [Design-time vs run-time tool switching](#design-time-vs-run-time-tool-switching))
 - **4 prompts + 2 resources** for OBML / OBSQL reference and usage guidance
 
 <p align="center">
@@ -133,7 +133,6 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 
 | MCP Tool                                 | Description                                                                                      |
 | ---------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `get_model_schema(model_id)`             | Full model structure as JSON (detailed)                                                          |
 | `list_artefacts(model_id, kind?, name?)` | **Exact, deterministic lookup** — all artefacts, one kind, or one named artefact (full records)  |
 | `find_artefacts(model_id, query, kind?)` | **Fuzzy, ranked search** — resolve a vague term to real artefact names (exact / synonym / fuzzy) |
 | `explain_artefact(model_id, name)`       | Explain lineage of a dimension, measure, or metric                                               |
@@ -143,31 +142,24 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 
 ### Query, execution & diagrams
 
-| MCP Tool                            | Description                                              |
-| ----------------------------------- | -------------------------------------------------------- |
-| `compile_query(...)`                | Compile a semantic query (QueryObject) to SQL            |
-| `execute_query(...)`                | Compile and execute a QueryObject, returning SQL + rows  |
-| `compile_obsql(model_id, sql, ...)` | Compile an OBSQL (natural SQL) query to SQL              |
-| `execute_obsql(model_id, sql, ...)` | Compile and execute an OBSQL query, returning SQL + rows |
-| `plan_query(model_id, ...)`         | Planner view (no SQL); optional warehouse `EXPLAIN`      |
-| `run_batch(queries, ...)`           | One-shot: load a model + run N queries in parallel       |
-| `get_model_diagram(model_id)`       | Generate a Mermaid ER diagram for a loaded model         |
+| MCP Tool                      | Description                                             |
+| ----------------------------- | ------------------------------------------------------- |
+| `execute_query(...)`          | Compile and execute a QueryObject, returning SQL + rows |
+| `run_batch(queries, ...)`     | One-shot: load a model + run N queries in parallel      |
+| `get_model_diagram(model_id)` | Generate a Mermaid ER diagram for a loaded model        |
 
 ### Semantic graph (RDF / SPARQL)
 
-| MCP Tool                        | Description                                 |
-| ------------------------------- | ------------------------------------------- |
-| `get_graph(model_id)`           | Return the model as OBSL-Core RDF (Turtle)  |
-| `sparql_query(model_id, query)` | Run a read-only SPARQL query (SELECT / ASK) |
+| MCP Tool                                      | Description                                 |
+| --------------------------------------------- | ------------------------------------------- |
+| `get_model_graph(model_id)`                   | Return the model as OBSL-Core RDF (Turtle)  |
+| `query_model_graph_by_sparql(query, ...)`     | Run a read-only SPARQL query (SELECT / ASK) |
 
 ### References
 
-| MCP Tool                | Description                                             |
-| ----------------------- | ------------------------------------------------------- |
-| `get_obml_reference()`  | OBML (model authoring) grammar reference                |
-| `get_obsql_reference()` | OBSQL (natural SQL surface) grammar reference           |
-| `list_references()`     | Index of all references published by the API            |
-| `get_json_schema(name)` | JSON Schema for `obml` (model) or `query` (QueryObject) |
+| MCP Tool               | Description                              |
+| ---------------------- | ---------------------------------------- |
+| `get_obml_reference()` | OBML (model authoring) grammar reference |
 
 ### Utilities
 
@@ -182,7 +174,7 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 The server presents a **phase-scoped tool surface**: instead of listing all
 ~30 tools at once, it shows only the tools that make sense for where you are in
 the model lifecycle. About half the tools are meaningless until a model is
-loaded (`compile_query`, `execute_query`, `list_artefacts`, …) and the rest are
+loaded (`execute_query`, `describe_model`, `list_artefacts`, …) and the rest are
 about authoring or pure file transforms (`get_obml_reference`,
 `convert_obml_to_osi`, …). Splitting them keeps the surface small and prevents a
 whole class of error — calling a query tool with no model loaded.
@@ -196,8 +188,8 @@ design/reference tools:
 | Bucket          | Listed when                 | Tools                                                                                                                                                                                                                                                                                             |
 | --------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Always**      | always (both phases)        | `load_model`, `remove_model` (transition verbs — stay available in the run phase so a second model can be loaded mid-session, up to `max_models_per_session`); `run_batch` (self-contained one-shot — loads/references a model inline, so it needs no prior session state)                        |
-| **Design-only** | only when no model loaded   | `get_obml_reference`, `get_obsql_reference`, `list_references`, `get_json_schema`, `list_dialects`, `convert_obml_to_osi`, `convert_osi_to_obml`                                                                                                                                                  |
-| **Run-only**    | only when a model is loaded | `describe_model`, `get_model_schema`, `get_model_diagram`, `list_artefacts`, `find_artefacts`, `explain_artefact`, `plan_query`, `compile_query`, `compile_obsql`, `execute_query`, `execute_obsql`, `list_examples`, `get_example`, `get_graph`, `get_join_graph`, `sparql_query`, `list_models` |
+| **Design-only** | only when no model loaded   | `get_obml_reference`, `list_dialects`, `convert_obml_to_osi`, `convert_osi_to_obml`                                                                                                                                  |
+| **Run-only**    | only when a model is loaded | `describe_model`, `get_model_diagram`, `list_artefacts`, `find_artefacts`, `explain_artefact`, `execute_query`, `list_examples`, `get_example`, `get_model_graph`, `get_join_graph`, `query_model_graph_by_sparql`, `list_models` |
 
 ```
                        load_model  (returns "re-list" signal)
@@ -226,20 +218,18 @@ If a client calls a run-only verb while still in the design phase (e.g. a stale
 host that hasn't re-listed yet), the server returns a **structured error**
 rather than an opaque failure:
 
-> No model loaded — '`compile_query`' is a run-time tool and is not available
+> No model loaded — '`execute_query`' is a run-time tool and is not available
 > yet. Call `load_model` first, then re-list tools.
 
 ### Capability gating (orthogonal to phase)
 
 Separately from lifecycle phase, a tool can be hidden because the server is
-_configured_ not to support it. The execution tools `execute_query` /
-`execute_obsql` are gated on the API's `query_execute` capability: when the
-server runs **compile-only** they are dropped from `tools/list` and calling them
-returns a structured error (`compile_query` / `compile_obsql` stay available so
-you can still generate SQL). This composes with phase — a verb is listed only if
-its **phase is active _and_ its capability is enabled**. The mechanism is a
-general capability registry, so future "the server can't do X here" flags hide
-their tools the same way.
+_configured_ not to support it. The execution tool `execute_query` is gated on
+the API's `query_execute` capability: when the server runs **compile-only** it is
+dropped from `tools/list` and calling it returns a structured error. This
+composes with phase — a verb is listed only if its **phase is active _and_ its
+capability is enabled**. The mechanism is a general capability registry, so
+future "the server can't do X here" flags hide their tools the same way.
 
 ### Single-model mode
 
@@ -262,8 +252,7 @@ listed from the first request and there is no `load_model` step.
 1. **Get reference** — call `get_obml_reference()` to learn OBML syntax
 2. **Load model** — call `load_model(model_yaml)` to get a `model_id`
 3. **Explore** — call `describe_model(model_id)` or use discovery tools (`list_artefacts`, `find_artefacts`, `explain_artefact`)
-4. **Query** — call `compile_query(model_id, dimensions=[...], measures=[...])` to generate SQL
-5. **Execute** — call `execute_query(model_id, dimensions=[...], measures=[...])` to run SQL and get results (requires `QUERY_EXECUTE=true` on the API)
+4. **Execute** — call `execute_query(model_id, dimensions=[...], measures=[...])` to compile and run SQL, returning rows (requires `QUERY_EXECUTE=true` on the API)
 
 ## Integration Guides
 
