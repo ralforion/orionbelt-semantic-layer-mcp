@@ -4,7 +4,7 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [2.7.5] — 2026-05-31
 
 ### Changed
 
