@@ -424,225 +424,6 @@ def test_describe_model_single_model_mode(mock_api: respx.MockRouter):
 
 
 # ---------------------------------------------------------------------------
-# compile_query (multi-model mode)
-# ---------------------------------------------------------------------------
-
-
-def test_compile_query_simple_mode(mock_api: respx.MockRouter):
-    """compile_query simple mode sends dimensions/measures to API."""
-    _mock_create_session(mock_api)
-    mock_api.post("/v1/sessions/test-session-1/query/sql").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "sql": "SELECT country, SUM(amount) FROM orders GROUP BY 1",
-                "dialect": "postgres",
-                "resolved": {
-                    "fact_tables": ["Orders"],
-                    "dimensions": ["Country"],
-                    "measures": ["Total Revenue"],
-                },
-                "warnings": [],
-                "sql_valid": True,
-            },
-        )
-    )
-
-    result = server._impl_compile_query(
-        model_id="m001",
-        dialect="postgres",
-        dimensions=["Country"],
-        measures=["Total Revenue"],
-        query_json=None,
-        use_path_names=None,
-    )
-    assert "SELECT country" in result
-    assert "Dialect: postgres" in result
-    assert "Fact tables: Orders" in result
-
-
-def test_compile_query_full_mode(mock_api: respx.MockRouter):
-    """compile_query full mode sends query JSON to API."""
-    _mock_create_session(mock_api)
-    mock_api.post("/v1/sessions/test-session-1/query/sql").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "sql": "SELECT country, SUM(amount) FROM orders WHERE country = 'US' GROUP BY 1",
-                "dialect": "snowflake",
-                "resolved": {
-                    "fact_tables": ["Orders"],
-                    "dimensions": ["Country"],
-                    "measures": ["Revenue"],
-                },
-                "warnings": [],
-                "sql_valid": True,
-            },
-        )
-    )
-
-    result = server._impl_compile_query(
-        model_id="m001",
-        dialect="snowflake",
-        dimensions=None,
-        measures=None,
-        query_json='{"select":{"dimensions":["Country"],"measures":["Revenue"]}}',
-        use_path_names=None,
-    )
-    assert "Dialect: snowflake" in result
-    assert "SELECT country" in result
-
-
-def test_compile_query_with_explain(mock_api: respx.MockRouter):
-    """compile_query includes explain plan in output."""
-    _mock_create_session(mock_api)
-    mock_api.post("/v1/sessions/test-session-1/query/sql").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "sql": "SELECT c.country, SUM(o.amount) FROM orders o JOIN customers c ...",
-                "dialect": "postgres",
-                "resolved": {
-                    "fact_tables": ["Orders"],
-                    "dimensions": ["Country"],
-                    "measures": ["Revenue"],
-                },
-                "warnings": [],
-                "sql_valid": True,
-                "explain": {
-                    "planner": "star",
-                    "planner_reason": "single fact table",
-                    "base_object": "Orders",
-                    "base_object_reason": "only fact table",
-                    "joins": [
-                        {
-                            "from_object": "Orders",
-                            "to_object": "Customers",
-                            "join_columns": ["Customer ID"],
-                            "reason": "dimension Country",
-                        }
-                    ],
-                    "where_filter_count": 0,
-                    "having_filter_count": 0,
-                    "has_totals": False,
-                    "cfl_legs": [],
-                },
-            },
-        )
-    )
-
-    result = server._impl_compile_query(
-        model_id="m001",
-        dialect="postgres",
-        dimensions=["Country"],
-        measures=["Revenue"],
-        query_json=None,
-        use_path_names=None,
-    )
-    assert "Planner: star" in result
-    assert "Base object: Orders" in result
-    assert "Join: Orders -> Customers" in result
-
-
-def test_compile_query_sql_invalid(mock_api: respx.MockRouter):
-    """compile_query shows warning when sql_valid is false."""
-    _mock_create_session(mock_api)
-    mock_api.post("/v1/sessions/test-session-1/query/sql").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "sql": "SELECT ...",
-                "dialect": "postgres",
-                "resolved": {"fact_tables": [], "dimensions": [], "measures": []},
-                "warnings": [],
-                "sql_valid": False,
-            },
-        )
-    )
-
-    result = server._impl_compile_query(
-        model_id="m001",
-        dialect="postgres",
-        dimensions=["Country"],
-        measures=["Revenue"],
-        query_json=None,
-        use_path_names=None,
-    )
-    assert "WARNING: Generated SQL may not be valid" in result
-
-
-def test_compile_query_no_args():
-    """compile_query raises ToolError when neither mode is provided."""
-    from fastmcp.exceptions import ToolError
-
-    with pytest.raises(ToolError, match="Provide either"):
-        server._impl_compile_query(
-            model_id="m001",
-            dialect="postgres",
-            dimensions=None,
-            measures=None,
-            query_json=None,
-            use_path_names=None,
-        )
-
-
-def test_compile_query_invalid_json():
-    """compile_query raises ToolError on invalid query JSON."""
-    from fastmcp.exceptions import ToolError
-
-    with pytest.raises(ToolError, match="Invalid query JSON"):
-        server._impl_compile_query(
-            model_id="m001",
-            dialect="postgres",
-            dimensions=None,
-            measures=None,
-            query_json="{bad json",
-            use_path_names=None,
-        )
-
-
-# ---------------------------------------------------------------------------
-# compile_query (single-model mode — shortcut)
-# ---------------------------------------------------------------------------
-
-
-def test_compile_query_single_model_mode(mock_api: respx.MockRouter):
-    """compile_query uses shortcut POST /v1/query/sql in single-model mode."""
-    server._single_model_mode = True
-    mock_api.post("/v1/query/sql").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "sql": "SELECT country, SUM(amount) FROM orders GROUP BY 1",
-                "dialect": "postgres",
-                "resolved": {
-                    "fact_tables": ["Orders"],
-                    "dimensions": ["Country"],
-                    "measures": ["Revenue"],
-                },
-                "warnings": [],
-                "sql_valid": True,
-            },
-        )
-    )
-
-    result = server._impl_compile_query(
-        model_id=None,
-        dialect="postgres",
-        dimensions=["Country"],
-        measures=["Revenue"],
-        query_json=None,
-        use_path_names=None,
-    )
-    assert "SELECT country" in result
-    assert "Dialect: postgres" in result
-
-    # Verify no session was created
-    session_calls = [call for call in mock_api.calls if call.request.url.path == "/v1/sessions"]
-    assert len(session_calls) == 0
-
-
-# ---------------------------------------------------------------------------
 # execute_query (single-model mode — shortcut)
 # ---------------------------------------------------------------------------
 
@@ -867,43 +648,6 @@ def test_remove_model(mock_api: respx.MockRouter):
 
     server._session_request("DELETE", "/models/m001")
     assert server._api_session_id == "test-session-1"
-
-
-# ---------------------------------------------------------------------------
-# get_model_schema
-# ---------------------------------------------------------------------------
-
-
-def test_get_model_schema(mock_api: respx.MockRouter):
-    """get_model_schema returns JSON model structure (multi-model mode)."""
-    _mock_create_session(mock_api)
-    mock_api.get("/v1/sessions/test-session-1/models/m001/schema").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "model_id": "m001",
-                "version": 1.0,
-                "data_objects": [{"name": "Orders", "code": "ORDERS"}],
-                "dimensions": [{"name": "Country"}],
-                "measures": [{"name": "Revenue"}],
-                "metrics": [],
-            },
-        )
-    )
-
-    result = server._impl_get_model_schema("m001")
-    assert '"model_id": "m001"' in result
-    assert '"Orders"' in result
-
-
-def test_get_model_schema_single_model_mode(mock_api: respx.MockRouter):
-    """get_model_schema uses shortcut GET /v1/schema in single-model mode."""
-    server._single_model_mode = True
-    mock_api.get("/v1/schema").mock(return_value=httpx.Response(200, json=_SCHEMA_RESPONSE))
-
-    result = server._impl_get_model_schema(None)
-    assert '"model_id": "default-m001"' in result
-    assert '"Orders"' in result
 
 
 # ---------------------------------------------------------------------------
@@ -1886,7 +1630,7 @@ def test_unsupported_aggregation_error(mock_api: respx.MockRouter):
     from fastmcp.exceptions import ToolError
 
     _mock_create_session(mock_api)
-    mock_api.post("/v1/sessions/test-session-1/query/sql").mock(
+    mock_api.post("/v1/sessions/test-session-1/query/execute").mock(
         return_value=httpx.Response(
             422,
             json={
@@ -1901,7 +1645,7 @@ def test_unsupported_aggregation_error(mock_api: respx.MockRouter):
     )
 
     with pytest.raises(ToolError) as exc_info:
-        server._impl_compile_query(
+        server._impl_execute_query(
             model_id="m001",
             dialect="mysql",
             dimensions=None,
@@ -1922,7 +1666,7 @@ def test_unsupported_grouping_error(mock_api: respx.MockRouter):
     from fastmcp.exceptions import ToolError
 
     _mock_create_session(mock_api)
-    mock_api.post("/v1/sessions/test-session-1/query/sql").mock(
+    mock_api.post("/v1/sessions/test-session-1/query/execute").mock(
         return_value=httpx.Response(
             422,
             json={
@@ -1940,7 +1684,7 @@ def test_unsupported_grouping_error(mock_api: respx.MockRouter):
         '{"select": {"dimensions": ["Country"], "measures": ["Revenue"]}, "grouping": "cube"}'
     )
     with pytest.raises(ToolError) as exc_info:
-        server._impl_compile_query(
+        server._impl_execute_query(
             model_id="m001",
             dialect="mysql",
             dimensions=["Country"],
@@ -2506,41 +2250,6 @@ def test_load_model_dedup_false_sent(mock_api: respx.MockRouter):
     assert '"dedup": false' in sent or '"dedup":false' in sent
 
 
-def test_compile_query_renders_structured_warnings(mock_api: respx.MockRouter):
-    """compile_query output handles the structured warning shape."""
-    _mock_create_session(mock_api)
-    mock_api.post("/v1/sessions/test-session-1/query/sql").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "sql": "SELECT 1",
-                "dialect": "postgres",
-                "resolved": {
-                    "fact_tables": ["Orders"],
-                    "dimensions": ["Country"],
-                    "measures": ["Revenue"],
-                },
-                "warnings": [
-                    {
-                        "code": "SQL_VALIDATION",
-                        "severity": "warning",
-                        "message": "Generated SQL may not be valid",
-                        "path": "select.measures[0]",
-                        "hint": "Try a different dialect",
-                    }
-                ],
-                "sql_valid": True,
-            },
-        )
-    )
-
-    out = server._impl_compile_query("m001", "postgres", ["Country"], ["Revenue"], None, None)
-    assert "[warning:SQL_VALIDATION]" in out
-    assert "Generated SQL may not be valid" in out
-    assert "(at select.measures[0])" in out
-    assert "hint: Try a different dialect" in out
-
-
 # ---------------------------------------------------------------------------
 # v2.2: find_artefacts fuzzy buckets
 # ---------------------------------------------------------------------------
@@ -2597,48 +2306,6 @@ def test_find_artefacts_renders_fuzzy_only(mock_api: respx.MockRouter):
     out = server._impl_find_artefacts("m001", "rev", None)
     assert "Fuzzy matches" in out
     assert "Revenu" in out
-
-
-# ---------------------------------------------------------------------------
-# v2.2: plan_query
-# ---------------------------------------------------------------------------
-
-
-def test_plan_query_formats_response(mock_api: respx.MockRouter):
-    """plan_query renders planner, physical tables, join path, warnings."""
-    _mock_create_session(mock_api)
-    mock_api.post("/v1/sessions/test-session-1/query/plan").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "status": "ok",
-                "planner": "JoinPlanner",
-                "planner_reason": "single fact table",
-                "physical_tables": ["public.orders", "public.customers"],
-                "join_path": [
-                    {
-                        "from_object": "Orders",
-                        "to_object": "Customers",
-                        "cardinality": "many-to-one",
-                        "fk": "CustomerKey",
-                    }
-                ],
-                "filters_applied": 1,
-                "warnings": [],
-                "would_compile": True,
-                "compiled_sql_length_estimate": 128,
-            },
-        )
-    )
-
-    out = server._impl_plan_query("m001", "postgres", ["Country"], ["Revenue"], None, None)
-    assert "Plan status: ok" in out
-    assert "Would compile: True" in out
-    assert "Planner: JoinPlanner" in out
-    assert "public.orders" in out
-    assert "Orders --[many-to-one]--> Customers on CustomerKey" in out
-    assert "Filters applied: 1" in out
-    assert "Compiled SQL length estimate: 128" in out
 
 
 # ---------------------------------------------------------------------------
@@ -2776,58 +2443,8 @@ def test_run_batch_rejects_empty_queries():
 
 
 # ---------------------------------------------------------------------------
-# v2.2 follow-up: shortcut plan/examples, physical_tables in compile_query
+# v2.2 follow-up: shortcut examples in single-model mode
 # ---------------------------------------------------------------------------
-
-
-def test_compile_query_renders_physical_tables(mock_api: respx.MockRouter):
-    """compile_query output surfaces the physical_tables block."""
-    _mock_create_session(mock_api)
-    mock_api.post("/v1/sessions/test-session-1/query/sql").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "sql": "SELECT 1",
-                "dialect": "postgres",
-                "resolved": {
-                    "fact_tables": ["Orders"],
-                    "dimensions": ["Country"],
-                    "measures": ["Revenue"],
-                },
-                "physical_tables": ["ob_demo.public.orders", "ob_demo.public.customers"],
-                "warnings": [],
-                "sql_valid": True,
-            },
-        )
-    )
-
-    out = server._impl_compile_query("m001", "postgres", ["Country"], ["Revenue"], None, None)
-    assert "Physical tables: ob_demo.public.orders, ob_demo.public.customers" in out
-
-
-def test_plan_query_uses_shortcut_in_single_model_mode(mock_api: respx.MockRouter):
-    """plan_query falls through to /v1/query/plan when model_id is None."""
-    server._single_model_mode = True
-    mock_api.post("/v1/query/plan").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "status": "ok",
-                "planner": "JoinPlanner",
-                "planner_reason": "single fact",
-                "physical_tables": ["ob.public.orders"],
-                "join_path": [],
-                "filters_applied": 0,
-                "warnings": [],
-                "would_compile": True,
-                "compiled_sql_length_estimate": 64,
-            },
-        )
-    )
-
-    out = server._impl_plan_query(None, None, ["Country"], ["Revenue"], None, None)
-    assert "Plan status: ok" in out
-    assert "ob.public.orders" in out
 
 
 def test_list_examples_uses_shortcut_in_single_model_mode(mock_api: respx.MockRouter):
@@ -2879,179 +2496,6 @@ def test_get_example_uses_shortcut_in_single_model_mode(mock_api: respx.MockRout
 # ---------------------------------------------------------------------------
 
 
-def test_get_obsql_reference(mock_api: respx.MockRouter):
-    """get_obsql_reference fetches and caches the OBSQL grammar reference."""
-    mock_api.get("/v1/reference/obsql").mock(
-        return_value=httpx.Response(
-            200,
-            json={"reference": "# OBSQL\n\nSELECT … FROM <model>"},
-        )
-    )
-    out = server.get_obsql_reference()
-    assert "OBSQL" in out
-    assert "SELECT" in out
-    # Second call should hit the cache (only one HTTP request)
-    server.get_obsql_reference()
-    assert mock_api.routes[0].call_count == 1
-
-
-def test_list_references(mock_api: respx.MockRouter):
-    """list_references renders the reference index from /v1/reference."""
-    mock_api.get("/v1/reference").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "references": [
-                    {
-                        "name": "obml",
-                        "kind": "markdown",
-                        "description": "OBML reference",
-                        "path": "/v1/reference/obml",
-                    },
-                    {
-                        "name": "obsql",
-                        "kind": "markdown",
-                        "description": "OBSQL grammar",
-                        "path": "/v1/reference/obsql",
-                    },
-                    {
-                        "name": "query-schema",
-                        "kind": "json-schema",
-                        "description": "QueryObject schema",
-                        "path": "/v1/reference/schemas/query",
-                    },
-                ]
-            },
-        )
-    )
-    out = server.list_references()
-    assert "obml" in out
-    assert "obsql" in out
-    assert "query-schema" in out
-    assert "/v1/reference/schemas/query" in out
-
-
-def test_get_json_schema_query(mock_api: respx.MockRouter):
-    """get_json_schema fetches a published JSON Schema by name."""
-    mock_api.get("/v1/reference/schemas/query").mock(
-        return_value=httpx.Response(
-            200,
-            json={"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object"},
-            headers={"Content-Type": "application/schema+json"},
-        )
-    )
-    out = server.get_json_schema("query")
-    assert "$schema" in out
-    assert "object" in out
-
-
-def test_compile_obsql_single_model_mode(mock_api: respx.MockRouter):
-    """compile_obsql uses the /v1/query/semantic-ql/compile shortcut endpoint."""
-    server._single_model_mode = True
-    mock_api.post("/v1/query/semantic-ql/compile").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "sql": "SELECT country, SUM(amount) AS revenue FROM orders GROUP BY country",
-                "dialect": "postgres",
-                "query": {
-                    "select": {"dimensions": ["Country"], "measures": ["Revenue"]},
-                },
-                "resolved": {
-                    "fact_tables": ["orders"],
-                    "dimensions": ["Country"],
-                    "measures": ["Revenue"],
-                },
-                "warnings": [],
-                "sql_valid": True,
-                "physical_tables": ["ob.public.orders"],
-            },
-        )
-    )
-    out = server._impl_compile_obsql(
-        None,
-        "SELECT Country, Revenue FROM orders",
-        "postgres",
-    )
-    assert "SELECT country" in out
-    assert "Translated QueryObject" in out
-    assert "ob.public.orders" in out
-
-
-def test_compile_obsql_multi_model_mode(mock_api: respx.MockRouter):
-    """compile_obsql uses the session-scoped endpoint when model_id is set."""
-    _mock_create_session(mock_api)
-    mock_api.post("/v1/sessions/test-session-1/query/semantic-ql/compile").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "sql": "SELECT 1",
-                "dialect": "duckdb",
-                "query": {},
-                "resolved": {"fact_tables": [], "dimensions": [], "measures": []},
-                "warnings": [],
-                "sql_valid": True,
-            },
-        )
-    )
-    out = server._impl_compile_obsql("m001", "SELECT 1", None)
-    assert "SELECT 1" in out
-    assert "-- Dialect: duckdb" in out
-
-
-def test_compile_obsql_rejects_empty_sql():
-    """compile_obsql refuses empty SQL strings without a round trip."""
-    with pytest.raises(server.ToolError, match="non-empty OBSQL"):
-        server._impl_compile_obsql(None, "   ", None)
-
-
-def test_execute_obsql_single_model_mode(mock_api: respx.MockRouter):
-    """execute_obsql uses the /v1/query/semantic-ql shortcut endpoint."""
-    server._single_model_mode = True
-    mock_api.post("/v1/query/semantic-ql").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "rows": [{"Country": "US", "Revenue": 100}],
-                "schema": [
-                    {"name": "Country", "type": "string"},
-                    {"name": "Revenue", "type": "float"},
-                ],
-                "sql": "SELECT country, SUM(amount) AS revenue FROM orders GROUP BY country",
-                "dialect": "postgres",
-                "cached": False,
-            },
-        )
-    )
-    out = server._impl_execute_obsql(
-        None,
-        "SELECT Country, Revenue FROM orders",
-        "postgres",
-    )
-    assert '"Country": "US"' in out
-    assert '"Revenue": 100' in out
-
-
-def test_execute_obsql_tsv_passthrough(mock_api: respx.MockRouter):
-    """execute_obsql returns raw body text when output_format is tsv."""
-    server._single_model_mode = True
-    mock_api.post("/v1/query/semantic-ql").mock(
-        return_value=httpx.Response(
-            200,
-            text="Country\tRevenue\nUS\t100\n",
-            headers={"Content-Type": "text/tab-separated-values"},
-        )
-    )
-    out = server._impl_execute_obsql(
-        None,
-        "SELECT Country, Revenue FROM orders",
-        None,
-        output_format="tsv",
-    )
-    assert out.startswith("Country\tRevenue")
-    assert "US\t100" in out
-
-
 # ---------------------------------------------------------------------------
 # Design-time vs run-time tool phase switching (Option A)
 # ---------------------------------------------------------------------------
@@ -3066,7 +2510,7 @@ def test_tool_phase_buckets_are_disjoint():
     # Spot-check canonical assignments from the spec.
     assert {"load_model", "remove_model", "run_batch"} <= b1  # run_batch is always-on
     assert {"get_obml_reference", "convert_obml_to_osi", "list_dialects"} <= b2
-    assert {"compile_query", "execute_query", "list_artefacts", "find_artefacts"} <= b3
+    assert {"describe_model", "execute_query", "list_artefacts", "find_artefacts"} <= b3
 
 
 def test_tool_phase_buckets_classify_every_registered_tool():
@@ -3119,7 +2563,7 @@ def _all_bucket_sample():
         _fake_tool("remove_model"),  # bucket 1 — lifecycle
         _fake_tool("get_obml_reference"),  # bucket 2 — design-only
         _fake_tool("convert_obml_to_osi"),  # bucket 2 — design-only
-        _fake_tool("compile_query"),  # bucket 3 — run-only
+        _fake_tool("describe_model"),  # bucket 3 — run-only
         _fake_tool("list_artefacts"),  # bucket 3 — run-only
     ]
 
@@ -3148,7 +2592,7 @@ def test_phase_middleware_run_swaps_out_design_tools():
         return _all_bucket_sample()
 
     names = {t.name for t in _run(mw.on_list_tools(object(), call_next))}
-    assert names == {"load_model", "remove_model", "compile_query", "list_artefacts"}
+    assert names == {"load_model", "remove_model", "describe_model", "list_artefacts"}
     # The key fix: design/reference tools must not leak into the run surface.
     assert "get_obml_reference" not in names
     assert "convert_obml_to_osi" not in names
@@ -3160,7 +2604,7 @@ def test_run_batch_is_always_listed_and_unguarded():
     mw = server.PhaseMiddleware()
 
     async def list_next(_ctx):
-        return [_fake_tool("run_batch"), _fake_tool("compile_query")]
+        return [_fake_tool("run_batch"), _fake_tool("describe_model")]
 
     async def ok(_ctx):
         return "ok"
@@ -3182,7 +2626,7 @@ def test_phase_middleware_guard_blocks_runtime_call_in_design():
     server._single_model_mode = False
     server._loaded_model_ids.clear()
     mw = server.PhaseMiddleware()
-    ctx = types.SimpleNamespace(message=types.SimpleNamespace(name="compile_query"))
+    ctx = types.SimpleNamespace(message=types.SimpleNamespace(name="describe_model"))
 
     async def call_next(_ctx):
         return "should-not-run"
@@ -3211,7 +2655,7 @@ def test_phase_middleware_guard_allows_runtime_call_in_run():
     server._loaded_model_ids.clear()
     server._mark_model_loaded("m001")
     mw = server.PhaseMiddleware()
-    ctx = types.SimpleNamespace(message=types.SimpleNamespace(name="compile_query"))
+    ctx = types.SimpleNamespace(message=types.SimpleNamespace(name="describe_model"))
 
     async def call_next(_ctx):
         return "ok"
@@ -3343,13 +2787,11 @@ def test_tool_capability_ok_gates_execute_tools():
     """execute_* are gated by query_execute; other verbs are never gated."""
     server._query_execute_enabled = False
     assert not server._tool_capability_ok("execute_query")
-    assert not server._tool_capability_ok("execute_obsql")
-    assert server._tool_capability_ok("compile_query")  # no capability required
+    assert server._tool_capability_ok("describe_model")  # no capability required
     assert server._tool_capability_ok("load_model")
 
     server._query_execute_enabled = True
     assert server._tool_capability_ok("execute_query")
-    assert server._tool_capability_ok("execute_obsql")
 
 
 def test_capability_enabled_unknown_fails_open():
@@ -3365,16 +2807,15 @@ def test_phase_middleware_hides_execute_when_capability_disabled():
     server._mark_model_loaded("m001")  # run phase
     mw = server.PhaseMiddleware()
     tools = [
-        _fake_tool("compile_query"),
+        _fake_tool("describe_model"),
         _fake_tool("execute_query"),
-        _fake_tool("execute_obsql"),
     ]
 
     async def call_next(_ctx):
         return tools
 
     out = {t.name for t in _run(mw.on_list_tools(object(), call_next))}
-    assert out == {"compile_query"}
+    assert out == {"describe_model"}
 
 
 def test_phase_middleware_shows_execute_when_capability_enabled():
@@ -3384,13 +2825,13 @@ def test_phase_middleware_shows_execute_when_capability_enabled():
     server._loaded_model_ids.clear()
     server._mark_model_loaded("m001")
     mw = server.PhaseMiddleware()
-    tools = [_fake_tool("compile_query"), _fake_tool("execute_query")]
+    tools = [_fake_tool("describe_model"), _fake_tool("execute_query")]
 
     async def call_next(_ctx):
         return tools
 
     out = {t.name for t in _run(mw.on_list_tools(object(), call_next))}
-    assert out == {"compile_query", "execute_query"}
+    assert out == {"describe_model", "execute_query"}
 
 
 def test_capability_guard_blocks_execute_call_when_disabled():

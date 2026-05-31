@@ -6,8 +6,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [2.7.5] — 2026-05-31
 
+### Removed
+
+- **Eight tools dropped to slim the surface** (24 → 16 single-model, 27 → 19
+  multi-model):
+  - the entire **OBSQL** tool surface — `get_obsql_reference`, `compile_obsql`,
+    `execute_obsql` (OBML + QueryObject remain the supported path);
+  - the standalone compile/plan verbs — `compile_query`, `plan_query`
+    (`execute_query` compiles and runs in one call);
+  - reference helpers `list_references` and `get_json_schema` (`get_obml_reference`
+    remains);
+  - `get_model_schema` — redundant with `describe_model`.
+
+  The `obsql://reference` resource and `write_obsql_query` prompt are now
+  orphaned (no OBSQL tool consumes them) — flagged for follow-up.
+
 ### Changed
 
+- **Renamed two RDF tools for clarity:** `get_graph` → `get_model_graph`,
+  `sparql_query` → `query_model_graph_by_sparql`.
 - **Unified the model-tool registration (internal refactor).** The two
   near-identical registration functions (`_register_single_model_tools` /
   `_register_multi_model_tools`) and the split `_register_execute_query_tool`
@@ -17,7 +34,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   required at call time in multi-model mode (clear error if missing). Mode-only
   tools (`get_model` for single; `load_model` / `remove_model` / `list_models` /
   `run_batch` for multi) are registered conditionally. Net **−394 lines** in
-  `server.py`; the visible tool set per mode is unchanged (24 single / 27 multi).
+  `server.py`.
   Note: in multi-model mode `model_id` now appears as an *optional* field in each
   tool's input schema (it was a required positional); it is still enforced at
   call time. MCP clients call tools by name, so argument order is unaffected.

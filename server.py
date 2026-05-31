@@ -223,9 +223,6 @@ _ALWAYS_TOOLS: frozenset[str] = frozenset(
 _DESIGN_TOOLS: frozenset[str] = frozenset(
     {
         "get_obml_reference",
-        "get_obsql_reference",
-        "list_references",
-        "get_json_schema",
         "list_dialects",
         "convert_osi_to_obml",
         "convert_obml_to_osi",
@@ -239,21 +236,16 @@ _RUN_TIME_TOOLS: frozenset[str] = frozenset(
     {
         "get_model",
         "describe_model",
-        "get_model_schema",
         "get_model_diagram",
         "list_artefacts",
         "find_artefacts",
         "explain_artefact",
-        "plan_query",
-        "compile_query",
-        "compile_obsql",
         "execute_query",
-        "execute_obsql",
         "list_examples",
         "get_example",
-        "get_graph",
+        "get_model_graph",
         "get_join_graph",
-        "sparql_query",
+        "query_model_graph_by_sparql",
         "list_models",
     }
 )
@@ -325,7 +317,6 @@ CAP_QUERY_EXECUTE = "query_execute"
 # no capability and are always available (subject to phase).
 _TOOL_CAPABILITY: dict[str, str] = {
     "execute_query": CAP_QUERY_EXECUTE,
-    "execute_obsql": CAP_QUERY_EXECUTE,
 }
 
 # Capability flag → a resolver reading the current (startup-detected) config.
@@ -423,7 +414,7 @@ class PhaseMiddleware(Middleware):
             raise ToolError(
                 f"No model loaded — '{name}' is a run-time tool and is not "
                 "available yet. Call load_model first, then re-list tools: the "
-                "run-time tool set (compile_query, execute_query, describe_model, "
+                "run-time tool set (execute_query, describe_model, list_artefacts, "
                 "…) becomes available once a model is loaded."
             )
         return await call_next(context)
@@ -745,57 +736,6 @@ def get_obml_reference() -> str:
     dimensions, measures, metrics, and expressions.
     """
     return _fetch_obml_reference()
-
-
-@mcp.tool
-def get_obsql_reference() -> str:
-    """Get the OBSQL (OrionBelt Semantic Query Language) reference.
-
-    OBSQL is a natural SQL-like surface against the model's virtual table:
-    ``SELECT <dim/measure labels> FROM <model_name> [WHERE ...] [HAVING ...]
-    [ORDER BY ...] [LIMIT n] [WITH ROLLUP | WITH CUBE]``.  JOINs, CTEs,
-    subqueries, UNION, window functions, and ``SELECT *`` are rejected.
-
-    IMPORTANT: Call this tool BEFORE composing any OBSQL queries with the
-    ``compile_obsql`` or ``execute_obsql`` tools.
-    """
-    return _fetch_obsql_reference()
-
-
-@mcp.tool
-def list_references() -> str:
-    """List all available reference documents (OBML, OBSQL, JSON schemas).
-
-    Returns the index of references published by ``GET /v1/reference`` so
-    callers can discover the model and query languages without scraping
-    Swagger UI.
-    """
-    resp = _api_request("GET", f"{_API_V1}/reference", retry_on_expired=False)
-    data = _parse_json(resp)
-    refs = data.get("references", [])
-    if not refs:
-        return "No references published by this API."
-    lines = ["Available references:", ""]
-    for ref in refs:
-        lines.append(f"  {ref['name']}  ({ref['kind']})")
-        lines.append(f"    description: {ref['description']}")
-        lines.append(f"    path: {ref['path']}")
-    return "\n".join(lines)
-
-
-@mcp.tool
-def get_json_schema(name: Literal["obml", "query"]) -> str:
-    """Get a published JSON Schema by name.
-
-    Returns the raw JSON Schema document as a JSON string so callers can
-    validate documents locally without round-tripping them to the API.
-
-    Args:
-        name: Either ``"obml"`` (the OBML model schema) or ``"query"``
-            (the QueryObject input to ``/query/execute``).
-    """
-    resp = _api_request("GET", f"{_API_V1}/reference/schemas/{name}", retry_on_expired=False)
-    return json.dumps(_parse_json(resp), indent=2)
 
 
 @mcp.tool
@@ -1291,105 +1231,6 @@ def _build_query_object(
         raise ToolError("Provide either dimensions/measures, fields, or query_json.")
 
 
-def _format_compile_result(data: dict) -> str:
-    """Format compile_query API response into human-readable output."""
-    resolved = data.get("resolved", {})
-    parts = [
-        f"-- Dialect: {data['dialect']}",
-        f"-- Fact tables: {', '.join(resolved.get('fact_tables', []))}",
-        f"-- Dimensions: {', '.join(resolved.get('dimensions', []))}",
-        f"-- Measures: {', '.join(resolved.get('measures', []))}",
-    ]
-    physical = data.get("physical_tables") or []
-    if physical:
-        parts.append(f"-- Physical tables: {', '.join(physical)}")
-    parts.extend(["", data["sql"]])
-    if not data.get("sql_valid", True):
-        parts.append("")
-        parts.append("-- WARNING: Generated SQL may not be valid for this dialect")
-    if data.get("explain"):
-        exp = data["explain"]
-        parts.append("")
-        parts.append(f"-- Planner: {exp['planner']} ({exp.get('planner_reason', '')})")
-        parts.append(f"-- Base object: {exp['base_object']} ({exp.get('base_object_reason', '')})")
-        for j in exp.get("joins", []):
-            parts.append(
-                f"--   Join: {j['from_object']} -> {j['to_object']} ({j.get('reason', '')})"
-            )
-        cfl_legs = exp.get("cfl_legs", [])
-        if cfl_legs:
-            for leg in cfl_legs:
-                measures = ", ".join(leg.get("measures", []))
-                parts.append(
-                    f"--   CFL leg: {leg['measure_source']} "
-                    f"(root: {leg['common_root']}, measures: {measures})"
-                )
-                if leg.get("reason"):
-                    parts.append(f"--     Reason: {leg['reason']}")
-                for jn in leg.get("joins", []):
-                    parts.append(f"--     Join: {jn}")
-        if exp.get("has_totals"):
-            parts.append("-- Totals: yes")
-        if exp.get("has_grain_overrides"):
-            parts.append("-- Grain overrides: yes")
-        if exp.get("has_filter_context"):
-            parts.append("-- Filter context: yes")
-    if data.get("warnings"):
-        parts.append("")
-        for w in data["warnings"]:
-            parts.append(f"-- Warning: {_format_warning(w)}")
-    return "\n".join(parts)
-
-
-def _impl_compile_query(
-    model_id: str | None,
-    dialect: str | None,
-    dimensions: list[str] | None,
-    measures: list[str] | None,
-    query_json: str | None,
-    use_path_names: list[dict[str, str]] | None,
-    where: str | None = None,
-    having: str | None = None,
-    order_by: str | None = None,
-    limit: int | None = None,
-    offset: int | None = None,
-    dimensions_exclude: bool | None = None,
-    coalesce_dimensions: str | None = None,
-    fields: list[str] | None = None,
-    distinct: bool | None = None,
-) -> str:
-    """Compile a semantic query (shared implementation)."""
-    logger.info("compile_query called (model_id=%s, dialect=%s)", model_id, dialect)
-    query = _build_query_object(
-        dimensions,
-        measures,
-        query_json,
-        use_path_names,
-        where=where,
-        having=having,
-        order_by=order_by,
-        limit=limit,
-        offset=offset,
-        dimensions_exclude=dimensions_exclude,
-        coalesce_dimensions=coalesce_dimensions,
-        fields=fields,
-        distinct=distinct,
-    )
-
-    if model_id is None:
-        params: dict[str, str] = {}
-        if dialect is not None:
-            params["dialect"] = dialect
-        resp = _shortcut_request("POST", "/query/sql", json_body=query, params=params or None)
-    else:
-        body: dict = {"model_id": model_id, "query": query}
-        if dialect is not None:
-            body["dialect"] = dialect
-        resp = _session_request("POST", "/query/sql", json_body=body)
-
-    return _format_compile_result(_parse_json(resp))
-
-
 def _impl_execute_query(
     model_id: str | None,
     dialect: str | None,
@@ -1475,15 +1316,6 @@ def _impl_get_model_diagram(model_id: str | None, show_columns: bool, theme: str
         params = f"?show_columns={str(show_columns).lower()}&theme={quote(theme, safe='')}"
         resp = _session_request("GET", f"/models/{model_id}/diagram/er{params}")
     return _parse_json(resp)["mermaid"]
-
-
-def _impl_get_model_schema(model_id: str | None) -> str:
-    """Get the full model structure as JSON (shared implementation)."""
-    if model_id is None:
-        resp = _shortcut_request("GET", "/schema")
-    else:
-        resp = _session_request("GET", f"/models/{model_id}/schema")
-    return json.dumps(_parse_json(resp), indent=2)
 
 
 # Artefact kinds discoverable via list_artefacts / find_artefacts.
@@ -1806,8 +1638,8 @@ def _impl_load_model(
     _mark_model_loaded(data["model_id"])
     parts.append("")
     parts.append(
-        "Run-time tools are now available (compile_query, execute_query, "
-        "describe_model, plan_query, …). Re-list tools to discover them."
+        "Run-time tools are now available (execute_query, describe_model, "
+        "list_artefacts, find_artefacts, …). Re-list tools to discover them."
     )
     return "\n".join(parts)
 
@@ -1826,93 +1658,6 @@ def _impl_remove_model(model_id: str) -> str:
             "load_model again."
         )
     return msg
-
-
-def _impl_plan_query(
-    model_id: str | None,
-    dialect: str | None,
-    dimensions: list[str] | None,
-    measures: list[str] | None,
-    query_json: str | None,
-    use_path_names: list[dict[str, str]] | None,
-    where: str | None = None,
-    having: str | None = None,
-    order_by: str | None = None,
-    limit: int | None = None,
-    offset: int | None = None,
-    dimensions_exclude: bool | None = None,
-    coalesce_dimensions: str | None = None,
-    fields: list[str] | None = None,
-    distinct: bool | None = None,
-    include_database_explain: bool = False,
-) -> str:
-    """Return the planner's understanding of a query without compiling SQL."""
-    logger.info("plan_query called (model_id=%s, dialect=%s)", model_id, dialect)
-    query = _build_query_object(
-        dimensions,
-        measures,
-        query_json,
-        use_path_names,
-        where=where,
-        having=having,
-        order_by=order_by,
-        limit=limit,
-        offset=offset,
-        dimensions_exclude=dimensions_exclude,
-        coalesce_dimensions=coalesce_dimensions,
-        fields=fields,
-        distinct=distinct,
-    )
-    if model_id is None:
-        body = {
-            "query": query,
-            "include_database_explain": include_database_explain,
-        }
-        if dialect is not None:
-            body["dialect"] = dialect
-        resp = _shortcut_request("POST", "/query/plan", json_body=body)
-    else:
-        body = {
-            "model_id": model_id,
-            "query": query,
-            "include_database_explain": include_database_explain,
-        }
-        if dialect is not None:
-            body["dialect"] = dialect
-        resp = _session_request("POST", "/query/plan", json_body=body)
-    data = _parse_json(resp)
-
-    lines = [
-        f"Plan status: {data.get('status', 'ok')}",
-        f"Would compile: {data.get('would_compile', False)}",
-    ]
-    if data.get("planner"):
-        lines.append(f"Planner: {data['planner']} ({data.get('planner_reason', '')})")
-    if data.get("physical_tables"):
-        lines.append(f"Physical tables: {', '.join(data['physical_tables'])}")
-    join_path = data.get("join_path") or []
-    if join_path:
-        lines.append("Join path:")
-        for step in join_path:
-            fk = f" on {step['fk']}" if step.get("fk") else ""
-            lines.append(
-                f"  {step.get('from_object', '?')} --[{step.get('cardinality', '?')}]"
-                f"--> {step.get('to_object', '?')}{fk}"
-            )
-    if data.get("filters_applied") is not None:
-        lines.append(f"Filters applied: {data['filters_applied']}")
-    if data.get("compiled_sql_length_estimate"):
-        lines.append(f"Compiled SQL length estimate: {data['compiled_sql_length_estimate']}")
-    if data.get("warnings"):
-        lines.append("")
-        for w in data["warnings"]:
-            lines.append(f"  warning: {_format_warning(w)}")
-    db_exp = data.get("database_explain")
-    if db_exp:
-        lines.append("")
-        lines.append(f"Database EXPLAIN ({db_exp.get('dialect', '?')}):")
-        lines.append(db_exp.get("explain_output", ""))
-    return "\n".join(lines)
 
 
 def _impl_list_examples(model_id: str | None, intent: str | None) -> str:
@@ -1949,109 +1694,6 @@ def _impl_get_example(model_id: str | None, name: str) -> str:
         resp = _shortcut_request("GET", f"/examples/{encoded}")
     else:
         resp = _session_request("GET", f"/models/{model_id}/examples/{encoded}")
-    return json.dumps(_parse_json(resp), indent=2)
-
-
-def _format_obsql_compile_result(data: dict) -> str:
-    """Format compile_obsql API response into human-readable output.
-
-    Mirrors :func:`_format_compile_result` but also surfaces the translated
-    ``QueryObject`` (the intermediate shape OBSQL was rewritten into).
-    """
-    resolved = data.get("resolved", {})
-    parts = [
-        f"-- Dialect: {data['dialect']}",
-        f"-- Fact tables: {', '.join(resolved.get('fact_tables', []))}",
-        f"-- Dimensions: {', '.join(resolved.get('dimensions', []))}",
-        f"-- Measures: {', '.join(resolved.get('measures', []))}",
-    ]
-    physical = data.get("physical_tables") or []
-    if physical:
-        parts.append(f"-- Physical tables: {', '.join(physical)}")
-    parts.extend(["", data["sql"]])
-    if not data.get("sql_valid", True):
-        parts.append("")
-        parts.append("-- WARNING: Generated SQL may not be valid for this dialect")
-    if data.get("query"):
-        parts.append("")
-        parts.append("-- Translated QueryObject:")
-        for line in json.dumps(data["query"], indent=2).splitlines():
-            parts.append(f"-- {line}")
-    if data.get("explain"):
-        exp = data["explain"]
-        parts.append("")
-        parts.append(f"-- Planner: {exp['planner']} ({exp.get('planner_reason', '')})")
-        parts.append(f"-- Base object: {exp['base_object']} ({exp.get('base_object_reason', '')})")
-        for j in exp.get("joins", []):
-            parts.append(
-                f"--   Join: {j['from_object']} -> {j['to_object']} ({j.get('reason', '')})"
-            )
-    if data.get("warnings"):
-        parts.append("")
-        for w in data["warnings"]:
-            parts.append(f"-- Warning: {_format_warning(w)}")
-    return "\n".join(parts)
-
-
-def _impl_compile_obsql(
-    model_id: str | None,
-    sql: str,
-    dialect: str | None,
-) -> str:
-    """Translate OBSQL to SQL (shared implementation).
-
-    In single-model mode (``model_id`` is None) uses the shortcut endpoint
-    ``POST /v1/query/semantic-ql/compile``.  In multi-model mode the
-    session-scoped endpoint ``POST /v1/sessions/{sid}/query/semantic-ql/compile``
-    is used with the supplied ``model_id``.
-    """
-    if not sql or not sql.strip():
-        raise ToolError("sql must be a non-empty OBSQL string")
-    body: dict = {"sql": sql}
-    if dialect is not None:
-        body["dialect"] = dialect
-    if model_id is None:
-        body["model_id"] = ""  # shortcut auto-resolves
-        resp = _shortcut_request("POST", "/query/semantic-ql/compile", json_body=body)
-    else:
-        body["model_id"] = model_id
-        resp = _session_request("POST", "/query/semantic-ql/compile", json_body=body)
-    return _format_obsql_compile_result(_parse_json(resp))
-
-
-def _impl_execute_obsql(
-    model_id: str | None,
-    sql: str,
-    dialect: str | None,
-    output_format: str = "json",
-    format_values: bool | None = None,
-    locale: str | None = None,
-    timezone: str | None = None,
-) -> str:
-    """Translate OBSQL → QueryObject, compile, and execute (shared impl)."""
-    if not sql or not sql.strip():
-        raise ToolError("sql must be a non-empty OBSQL string")
-    body: dict = {"sql": sql}
-    if dialect is not None:
-        body["dialect"] = dialect
-
-    extra_params: dict[str, str] = {"format": output_format}
-    if format_values is not None:
-        extra_params["format_values"] = str(format_values).lower()
-    if locale is not None:
-        extra_params["locale"] = locale
-    if timezone is not None:
-        extra_params["timezone"] = timezone
-
-    if model_id is None:
-        body["model_id"] = ""  # shortcut auto-resolves
-        resp = _shortcut_request("POST", "/query/semantic-ql", json_body=body, params=extra_params)
-    else:
-        body["model_id"] = model_id
-        resp = _session_request("POST", "/query/semantic-ql", json_body=body, params=extra_params)
-
-    if output_format == "tsv":
-        return resp.text
     return json.dumps(_parse_json(resp), indent=2)
 
 
@@ -2125,8 +1767,8 @@ def _register_model_tools() -> None:
     multi-model mode. Tools that exist in only one mode (``get_model`` for
     single-model; ``load_model`` / ``remove_model`` / ``list_models`` /
     ``run_batch`` for multi-model) are registered conditionally. ``execute_query``
-    / ``execute_obsql`` are always registered and gated by the ``query_execute``
-    capability at list/call time (see ``PhaseMiddleware``).
+    is always registered and gated by the ``query_execute`` capability at
+    list/call time (see ``PhaseMiddleware``).
 
     ``model_id`` is the id returned by ``load_model`` in multi-model mode; omit it
     in single-model mode, where the one pre-loaded model is always used.
@@ -2146,19 +1788,6 @@ def _register_model_tools() -> None:
             model_id: id from ``load_model`` (multi-model); omit in single-model.
         """
         return _impl_describe_model(_resolve_model_id(model_id))
-
-    @mcp.tool
-    def get_model_schema(model_id: str | None = None) -> str:
-        """Get the full model structure as JSON.
-
-        Returns a detailed JSON representation of the model including all data
-        objects (with columns, types, comments, owners), dimensions, measures,
-        metrics, and their synonyms.  More detailed than ``describe_model``.
-
-        Args:
-            model_id: id from ``load_model`` (multi-model); omit in single-model.
-        """
-        return _impl_get_model_schema(_resolve_model_id(model_id))
 
     @mcp.tool
     def get_model_diagram(
@@ -2191,7 +1820,7 @@ def _register_model_tools() -> None:
         return _impl_get_join_graph(_resolve_model_id(model_id))
 
     @mcp.tool
-    def get_graph(model_id: str | None = None) -> str:
+    def get_model_graph(model_id: str | None = None) -> str:
         """Get the OBSL-Core RDF graph for the model as Turtle.
 
         Returns the semantic model's RDF graph serialized in Turtle format.
@@ -2204,7 +1833,7 @@ def _register_model_tools() -> None:
         return _impl_get_graph(_resolve_model_id(model_id))
 
     @mcp.tool
-    def sparql_query(query: str, model_id: str | None = None) -> str:
+    def query_model_graph_by_sparql(query: str, model_id: str | None = None) -> str:
         """Execute a read-only SPARQL query against the model's RDF graph.
 
         Supports SELECT and ASK queries only (no INSERT/DELETE/UPDATE).
@@ -2304,181 +1933,6 @@ def _register_model_tools() -> None:
 
     # ----- compile / plan -----
 
-    @mcp.tool
-    def compile_query(
-        model_id: str | None = None,
-        dialect: str | None = None,
-        dimensions: list[str] | None = None,
-        measures: list[str] | None = None,
-        fields: list[str] | None = None,
-        distinct: bool | None = None,
-        where: str | None = None,
-        having: str | None = None,
-        order_by: str | None = None,
-        limit: int | None = None,
-        offset: int | None = None,
-        dimensions_exclude: bool | None = None,
-        coalesce_dimensions: str | None = None,
-        query_json: str | None = None,
-        use_path_names: list[dict[str, str]] | None = None,
-    ) -> str:
-        """Compile a semantic query to SQL.
-
-        **Aggregate mode** — pass ``dimensions`` and/or ``measures``::
-
-            compile_query(
-                dimensions=["Country"],
-                measures=["Revenue"],
-                where='[{"field": "Country", "op": "equals", "value": "US"}]',
-                limit=10,
-            )
-
-        **Raw mode** — pass ``fields`` for un-aggregated column access::
-
-            compile_query(
-                fields=["Orders.OrderDate", "Orders.Amount"],
-                distinct=True,
-                limit=100,
-            )
-
-        Raw mode is mutually exclusive with dimensions, measures,
-        having, and dimensionsExclude.
-
-        Alternatively, pass a complete query as JSON via ``query_json``
-        (overrides all other query parameters).
-
-        Use ``describe_model`` first to discover available names.
-
-        Args:
-            model_id: id from ``load_model`` (multi-model); omit in single-model.
-            dialect: Target SQL dialect.  When omitted the API resolves
-                via model.settings.defaultDialect → server default.
-            dimensions: List of dimension names (aggregate mode).
-            measures: List of measure names (aggregate mode).
-            fields: List of physical column refs as
-                "DataObject.Column" (raw mode).  Mutually exclusive
-                with dimensions/measures.
-            distinct: Emit SELECT DISTINCT (raw mode only).
-            where: Filters as a JSON string, e.g.
-                '[{"field": "Country", "op": "equals", "value": "US"}]'.
-            having: Measure/metric filters as a JSON string, e.g.
-                '[{"field": "Revenue", "op": "gt", "value": 1000}]'.
-            order_by: Ordering as a JSON string, e.g.
-                '[{"field": "Revenue", "direction": "desc"}]'.
-            limit: Maximum number of rows to return.
-            offset: Number of rows to skip.
-            dimensions_exclude: If true, return dimension combinations that
-                do NOT exist (anti-join).
-            coalesce_dimensions: Coalesce groups as a JSON string, e.g.
-                '[{"coalesce": ["SalesEmp", "PurchaseEmp"],
-                "as": "Employee"}]'.  Merges role-playing dimensions
-                into one output column via COALESCE.  All members must
-                share the same resultType.
-            query_json: Complete query as JSON string (overrides above).
-            use_path_names: List of {source, target, pathName} dicts for
-                selecting secondary joins.
-        """
-        return _impl_compile_query(
-            _resolve_model_id(model_id),
-            dialect,
-            dimensions,
-            measures,
-            query_json,
-            use_path_names,
-            where=where,
-            having=having,
-            order_by=order_by,
-            limit=limit,
-            offset=offset,
-            dimensions_exclude=dimensions_exclude,
-            coalesce_dimensions=coalesce_dimensions,
-            fields=fields,
-            distinct=distinct,
-        )
-
-    @mcp.tool
-    def plan_query(
-        model_id: str | None = None,
-        dialect: str | None = None,
-        dimensions: list[str] | None = None,
-        measures: list[str] | None = None,
-        fields: list[str] | None = None,
-        distinct: bool | None = None,
-        where: str | None = None,
-        having: str | None = None,
-        order_by: str | None = None,
-        limit: int | None = None,
-        offset: int | None = None,
-        dimensions_exclude: bool | None = None,
-        coalesce_dimensions: str | None = None,
-        query_json: str | None = None,
-        use_path_names: list[dict[str, str]] | None = None,
-        include_database_explain: bool = False,
-    ) -> str:
-        """Return the planner's understanding of a query without compiling SQL.
-
-        Cheap by default — no warehouse round trip.  Returns the planner,
-        physical tables, join path, filter count, structured warnings, and a
-        ``would_compile`` flag.  Set ``include_database_explain=True`` to also
-        run the warehouse's ``EXPLAIN`` and include the raw output (opt-in,
-        costs a round trip).
-
-        Same query parameters as ``compile_query``.
-
-        Args:
-            model_id: id from ``load_model`` (multi-model); omit in single-model.
-            include_database_explain: When true, also run EXPLAIN against the
-                configured warehouse and include the raw text.
-        """
-        return _impl_plan_query(
-            _resolve_model_id(model_id),
-            dialect,
-            dimensions,
-            measures,
-            query_json,
-            use_path_names,
-            where=where,
-            having=having,
-            order_by=order_by,
-            limit=limit,
-            offset=offset,
-            dimensions_exclude=dimensions_exclude,
-            coalesce_dimensions=coalesce_dimensions,
-            fields=fields,
-            distinct=distinct,
-            include_database_explain=include_database_explain,
-        )
-
-    @mcp.tool
-    def compile_obsql(
-        sql: str,
-        dialect: str | None = None,
-        model_id: str | None = None,
-    ) -> str:
-        """Translate an OBSQL (natural SQL) query to SQL without executing it.
-
-        OBSQL is a BI-style SQL surface against the model's virtual table.
-        Supported shape::
-
-            SELECT <dim/measure labels> FROM <model_name>
-              [WHERE <conditions>] [HAVING <conditions>]
-              [GROUP BY ...] [ORDER BY ... [NULLS FIRST|LAST]]
-              [LIMIT n] [OFFSET m]
-              [WITH ROLLUP | WITH CUBE]
-
-        ``SELECT *``, JOINs, CTEs, subqueries, UNION, and window functions
-        are rejected.  ``SELECT`` without ``FROM`` resolves to the model.
-
-        Call ``get_obsql_reference()`` first to see the full grammar.
-
-        Args:
-            sql: OBSQL query string.
-            dialect: Target SQL dialect.  When omitted the API resolves via
-                ``model.settings.defaultDialect`` → server default.
-            model_id: id from ``load_model`` (multi-model); omit in single-model.
-        """
-        return _impl_compile_obsql(_resolve_model_id(model_id), sql, dialect)
-
     # ----- execute (always registered; gated by the query_execute capability) -----
 
     @mcp.tool
@@ -2505,9 +1959,12 @@ def _register_model_tools() -> None:
     ) -> str:
         """Compile and execute a semantic query, returning SQL and results.
 
-        Same query parameters as ``compile_query`` (aggregate and raw
-        modes).  If no ``limit`` is specified, a server-side default
-        row limit is enforced.
+        Two query modes: **aggregate** — pass ``dimensions`` and/or ``measures``;
+        **raw** — pass ``fields`` for un-aggregated column access (mutually
+        exclusive with dimensions/measures/having/dimensions_exclude).
+        Alternatively pass a complete ``query_json`` (overrides the rest).
+        Call ``describe_model`` first to discover available names.  If no
+        ``limit`` is specified, a server-side default row limit is enforced.
 
         Args:
             model_id: id from ``load_model`` (multi-model); omit in single-model.
@@ -2549,43 +2006,6 @@ def _register_model_tools() -> None:
             coalesce_dimensions=coalesce_dimensions,
             fields=fields,
             distinct=distinct,
-            output_format=output_format,
-            format_values=format_values,
-            locale=locale,
-            timezone=timezone,
-        )
-
-    @mcp.tool
-    def execute_obsql(
-        sql: str,
-        dialect: str | None = None,
-        output_format: str = "json",
-        format_values: bool | None = None,
-        locale: str | None = None,
-        timezone: str | None = None,
-        model_id: str | None = None,
-    ) -> str:
-        """Translate, compile, and execute an OBSQL query against the model.
-
-        Same input shape as ``compile_obsql`` (see that tool's docs and
-        ``get_obsql_reference()`` for grammar).  Returns rows + schema +
-        compiled SQL + cache metadata in the same shape as ``execute_query``.
-
-        Args:
-            sql: OBSQL query string.
-            dialect: Target SQL dialect (resolved via
-                ``model.settings.defaultDialect`` → server default
-                when omitted).
-            output_format: Response format — "json" (default) or "tsv".
-            format_values: Format numeric cells as display strings.
-            locale: BCP-47 locale for number formatting (e.g. "de").
-            timezone: IANA timezone (e.g. "Europe/Berlin").
-            model_id: id from ``load_model`` (multi-model); omit in single-model.
-        """
-        return _impl_execute_obsql(
-            _resolve_model_id(model_id),
-            sql,
-            dialect,
             output_format=output_format,
             format_values=format_values,
             locale=locale,
@@ -2815,14 +2235,14 @@ class StaticPrompt(_BasePrompt):
 
 
 _WRITE_QUERY_TEXT = """\
-# Compiling Queries with OrionBelt
+# Querying with OrionBelt
 
 ## Simple Mode
 
 Pass dimension and measure names directly:
 
 ```
-compile_query(
+execute_query(
   model_id="abc12345",
   dimensions=["Customer Country"],
   measures=["Total Revenue"]
@@ -2834,7 +2254,7 @@ compile_query(
 Pass a complete query as JSON:
 
 ```
-compile_query(
+execute_query(
   model_id="abc12345",
   query_json='{
     "select": {
@@ -2967,7 +2387,7 @@ from `via` in the directed join graph.
 
 When querying, simply use the role-playing dimension name:
 ```
-compile_query(dimensions=["SalesEmployee"], measures=["Revenue"])
+execute_query(dimensions=["SalesEmployee"], measures=["Revenue"])
 ```
 
 ## Coalesce Dimensions
@@ -2976,7 +2396,7 @@ Role-playing dimensions appear as separate columns in CFL output — one row per
 role per person.  To collapse them into a single output column, use
 ``coalesce_dimensions``::
 
-    compile_query(
+    execute_query(
         measures=["Total Sales", "Total Purchases"],
         coalesce_dimensions=(
             '[{{"coalesce": ["SalesEmp", "PurchaseEmp"],'
@@ -3008,7 +2428,7 @@ Rules:
 Raw mode returns un-aggregated rows — no GROUP BY, no measures, no metrics.
 Pass ``fields`` instead of ``dimensions``/``measures``::
 
-    compile_query(
+    execute_query(
         fields=["Orders.OrderDate", "Customers.Country"],
         distinct=True,
         where='[{{"field": "Customers.Country", "op": "equals", "value": "US"}}]',
@@ -3036,7 +2456,7 @@ and ``offset`` work in both modes.
 
 ## Default Dialect
 
-When ``dialect`` is omitted from ``compile_query`` / ``execute_query``, the API
+When ``dialect`` is omitted from ``execute_query``, the API
 resolves it via: model ``settings.defaultDialect`` → server ``DB_VENDOR`` env →
 ``"postgres"``.  Use ``describe_model`` to see the model's default dialect.
 
@@ -3076,10 +2496,9 @@ _DEBUG_VALIDATION_TEXT = """\
   The API response carries one error per offending key with a `path` (e.g.
   `where[0]`) and a "did you mean?" suggestion list derived from the model's
   real fields.
-  Fix: Use the suggestion, or check the JSON schema (`get_json_schema("obml")`
-  / `get_json_schema("query")`) for the exact field names. Common culprits:
-  typos, snake_case vs camelCase mix-ups, fields that moved between
-  versions.
+  Fix: Use the suggestion, or check the OBML reference (`get_obml_reference()`)
+  for the exact field names. Common culprits: typos, snake_case vs camelCase
+  mix-ups, fields that moved between versions.
 - `YAML_PARSE_ERROR`: Invalid YAML syntax.
   Fix: Check indentation, quoting, colons.
 - `YAML_SAFETY_ERROR`: YAML safety constraint violated (anchors, oversized).
@@ -3220,20 +2639,10 @@ references unknown column.
   aggregation. See `list_dialects()` for each dialect's
   `unsupported_aggregations`.
 - `UNSUPPORTED_GROUPING`: The selected dialect does not support the
-  requested `WITH ROLLUP` / `WITH CUBE` (e.g. MySQL has no CUBE). Compile
-  and execute paths return HTTP 422; `plan_query` returns 200 plus a
-  structured `UNSUPPORTED_GROUPING` warning so callers can detect
-  unsupportability without a 4xx.
+  requested `WITH ROLLUP` / `WITH CUBE` (e.g. MySQL has no CUBE). The
+  execute path returns HTTP 422.
   Fix: Change `dialect`, drop the modifier, or rewrite the query
   (e.g. UNION of explicit grain combinations).
-
-## OBSQL Translation Errors
-
-- `UNSUPPORTED_SQL_FEATURE`: OBSQL contains an unsupported construct —
-  `JOIN`, CTE, subquery, `UNION`, window function, `SELECT *`, or a
-  raw-mode query combined with `WITH ROLLUP` / `WITH CUBE`.
-  Fix: Restructure the query to the OBSQL surface — call
-  `get_obsql_reference()` for the supported grammar.
 
 ## Debugging Steps
 
@@ -3257,7 +2666,7 @@ def write_obsql_query() -> str:
 
 @mcp.prompt
 def write_query() -> str:
-    """How to use the compile_query tool — simple and full modes."""
+    """How to use the execute_query tool — simple and full modes."""
     dialect_list = ", ".join(f"`{d}`" for d in _fetch_dialect_names())
     return _WRITE_QUERY_TEXT.replace("{dialects}", dialect_list)
 
@@ -3379,15 +2788,15 @@ def main() -> None:
             except httpx.HTTPError as exc:
                 logger.error("Cannot reach API to validate pre-loaded model: %s", exc)
                 raise SystemExit(1) from None
-            # Registered count — execute_* are always registered now and gated
-            # at list time by capability, so this counts everything registered.
-            # The *visible* surface is smaller when query_execute is off (−2) or
-            # in the design phase (run-time verbs hidden); single-model mode is
-            # always run-time. neutral (7) + single-model (15) + execute (2).
-            tool_count = 24
+            # Registered count — execute_query is always registered and gated at
+            # list time by capability, so this counts everything registered. The
+            # *visible* surface is smaller when query_execute is off (−1) or in
+            # the design phase (run-only verbs hidden); single-model mode is
+            # always run-time. design (4) + single-model run-scoped (12).
+            tool_count = 16
         else:
-            # neutral (7) + multi-model (18) + execute (2).
-            tool_count = 27
+            # design (4) + multi-model run/lifecycle-scoped (15).
+            tool_count = 19
         mode_label = "single-model" if _single_model_mode else "multi-model"
     else:
         # HTTP/SSE: defer mode detection to the first request so the container
