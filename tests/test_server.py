@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import types
+
 import httpx
 import pytest
 import respx
+from fastmcp.exceptions import ToolError as _ToolError
 
 import server
 
@@ -21,6 +25,8 @@ def _reset_state():
     server._obml_reference_cache = None
     server._dialect_names_cache = None
     server._single_model_mode = False
+    server._query_execute_enabled = False
+    server._loaded_model_ids.clear()
     yield
     if server._http_client is not None:
         server._http_client.close()
@@ -29,6 +35,8 @@ def _reset_state():
     server._obml_reference_cache = None
     server._dialect_names_cache = None
     server._single_model_mode = False
+    server._query_execute_enabled = False
+    server._loaded_model_ids.clear()
 
 
 @pytest.fixture()
@@ -899,7 +907,7 @@ def test_get_model_schema_single_model_mode(mock_api: respx.MockRouter):
 
 
 # ---------------------------------------------------------------------------
-# list_dimensions / get_dimension
+# list_artefacts — dimensions
 # ---------------------------------------------------------------------------
 
 
@@ -922,7 +930,7 @@ def test_list_dimensions(mock_api: respx.MockRouter):
         )
     )
 
-    result = server._impl_list_dimensions("m001")
+    result = server._impl_list_artefacts("m001", "dimension")
     assert "Country" in result
     assert "Customers" in result
     assert "synonyms: nation" in result
@@ -935,7 +943,7 @@ def test_list_dimensions_empty(mock_api: respx.MockRouter):
         return_value=httpx.Response(200, json=[])
     )
 
-    result = server._impl_list_dimensions("m001")
+    result = server._impl_list_artefacts("m001", "dimension")
     assert "No dimensions" in result
 
 
@@ -958,69 +966,12 @@ def test_list_dimensions_single_model_mode(mock_api: respx.MockRouter):
         )
     )
 
-    result = server._impl_list_dimensions(None)
+    result = server._impl_list_artefacts(None, "dimension")
     assert "Country" in result
 
 
-def test_get_dimension(mock_api: respx.MockRouter):
-    """get_dimension returns JSON for a single dimension."""
-    _mock_create_session(mock_api)
-    mock_api.get("/v1/sessions/test-session-1/models/m001/dimensions/Country").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "name": "Country",
-                "data_object": "Customers",
-                "column": "Country",
-                "result_type": "string",
-            },
-        )
-    )
-
-    result = server._impl_get_dimension("m001", "Country")
-    assert '"Country"' in result
-
-
-def test_get_dimension_url_encodes_name(mock_api: respx.MockRouter):
-    """get_dimension URL-encodes names with spaces."""
-    _mock_create_session(mock_api)
-    mock_api.get("/v1/sessions/test-session-1/models/m001/dimensions/Customer%20Country").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "name": "Customer Country",
-                "data_object": "Customers",
-                "column": "Country",
-                "result_type": "string",
-            },
-        )
-    )
-
-    result = server._impl_get_dimension("m001", "Customer Country")
-    assert '"Customer Country"' in result
-
-
-def test_get_dimension_single_model_mode(mock_api: respx.MockRouter):
-    """get_dimension uses shortcut GET /v1/dimensions/{name} in single-model mode."""
-    server._single_model_mode = True
-    mock_api.get("/v1/dimensions/Country").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "name": "Country",
-                "data_object": "Customers",
-                "column": "Country",
-                "result_type": "string",
-            },
-        )
-    )
-
-    result = server._impl_get_dimension(None, "Country")
-    assert '"Country"' in result
-
-
 # ---------------------------------------------------------------------------
-# list_measures / get_measure
+# list_measures
 # ---------------------------------------------------------------------------
 
 
@@ -1042,7 +993,7 @@ def test_list_measures(mock_api: respx.MockRouter):
         )
     )
 
-    result = server._impl_list_measures("m001")
+    result = server._impl_list_artefacts("m001", "measure")
     assert "Total Revenue" in result
     assert "sum" in result
     assert "synonyms: sales" in result
@@ -1067,31 +1018,13 @@ def test_list_measures_with_data_type(mock_api: respx.MockRouter):
         )
     )
 
-    result = server._impl_list_measures("m001")
+    result = server._impl_list_artefacts("m001", "measure")
     assert "Revenue" in result
     assert "dataType: decimal(18, 2)" in result
 
 
-def test_get_measure(mock_api: respx.MockRouter):
-    """get_measure returns JSON for a single measure."""
-    _mock_create_session(mock_api)
-    mock_api.get("/v1/sessions/test-session-1/models/m001/measures/Total%20Revenue").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "name": "Total Revenue",
-                "result_type": "float",
-                "aggregation": "sum",
-            },
-        )
-    )
-
-    result = server._impl_get_measure("m001", "Total Revenue")
-    assert '"Total Revenue"' in result
-
-
 # ---------------------------------------------------------------------------
-# list_metrics / get_metric
+# list_artefacts — metrics
 # ---------------------------------------------------------------------------
 
 
@@ -1112,7 +1045,7 @@ def test_list_metrics(mock_api: respx.MockRouter):
         )
     )
 
-    result = server._impl_list_metrics("m001")
+    result = server._impl_list_artefacts("m001", "metric")
     assert "Profit Margin" in result
     assert "components: Profit, Revenue" in result
 
@@ -1135,7 +1068,7 @@ def test_list_metrics_with_data_type(mock_api: respx.MockRouter):
         )
     )
 
-    result = server._impl_list_metrics("m001")
+    result = server._impl_list_artefacts("m001", "metric")
     assert "Profit Margin" in result
     assert "dataType: decimal(18, 6)" in result
 
@@ -1169,7 +1102,7 @@ def test_list_metrics_cumulative(mock_api: respx.MockRouter):
         )
     )
 
-    result = server._impl_list_metrics("m001")
+    result = server._impl_list_artefacts("m001", "metric")
     assert "Running Revenue" in result
     assert "type: cumulative" in result
     assert "measure: Total Revenue" in result
@@ -1214,7 +1147,7 @@ def test_list_metrics_pop(mock_api: respx.MockRouter):
         )
     )
 
-    result = server._impl_list_metrics("m001")
+    result = server._impl_list_artefacts("m001", "metric")
     assert "Revenue YoY Growth" in result
     assert "type: period_over_period" in result
     assert "expr: {[Revenue]}" in result
@@ -1261,7 +1194,7 @@ def test_list_metrics_cumulative_extras(mock_api: respx.MockRouter):
         )
     )
 
-    result = server._impl_list_metrics("m001")
+    result = server._impl_list_artefacts("m001", "metric")
     assert "7-Day Rolling Avg" in result
     assert "cumulativeType: avg" in result
     assert "window: 7" in result
@@ -1295,7 +1228,7 @@ def test_list_metrics_cumulative_with_partition_by(mock_api: respx.MockRouter):
         )
     )
 
-    result = server._impl_list_metrics("m001")
+    result = server._impl_list_artefacts("m001", "metric")
     assert "Revenue MA12 by Country" in result
     assert "partitionBy: [Country]" in result
 
@@ -1344,7 +1277,7 @@ def test_list_metrics_window(mock_api: respx.MockRouter):
         )
     )
 
-    result = server._impl_list_metrics("m001")
+    result = server._impl_list_artefacts("m001", "metric")
     assert "type: window" in result
     assert "windowFunction: dense_rank" in result
     assert "partitionBy: [Quarter]" in result
@@ -1389,7 +1322,7 @@ def test_list_measures_two_column_aggregation(mock_api: respx.MockRouter):
         )
     )
 
-    result = server._impl_list_measures("m001")
+    result = server._impl_list_artefacts("m001", "measure")
     assert "Revenue Spend Correlation" in result
     assert "corr" in result
     # Two-column agg surfaces ordered column refs
@@ -1406,26 +1339,8 @@ def test_list_metrics_empty(mock_api: respx.MockRouter):
         return_value=httpx.Response(200, json=[])
     )
 
-    result = server._impl_list_metrics("m001")
+    result = server._impl_list_artefacts("m001", "metric")
     assert "No metrics" in result
-
-
-def test_get_metric(mock_api: respx.MockRouter):
-    """get_metric returns JSON for a single metric."""
-    _mock_create_session(mock_api)
-    mock_api.get("/v1/sessions/test-session-1/models/m001/metrics/Profit%20Margin").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "name": "Profit Margin",
-                "expression": "{[Profit]} / {[Revenue]}",
-                "component_measures": ["Profit", "Revenue"],
-            },
-        )
-    )
-
-    result = server._impl_get_metric("m001", "Profit Margin")
-    assert '"Profit Margin"' in result
 
 
 # ---------------------------------------------------------------------------
@@ -1613,56 +1528,6 @@ def test_get_join_graph_single_model_mode(mock_api: respx.MockRouter):
     result = server._impl_get_join_graph(None)
     assert "Orders" in result
     assert "many-to-one" in result
-
-
-# ---------------------------------------------------------------------------
-# get_settings
-# ---------------------------------------------------------------------------
-
-
-def test_get_settings(mock_api: respx.MockRouter):
-    """get_settings returns API configuration."""
-    mock_api.get("/v1/settings").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "single_model_mode": False,
-                "model_yaml": None,
-                "session_ttl_seconds": 1800,
-                "session_max_age_seconds": 86400,
-                "max_sessions": 500,
-                "max_models_per_session": 10,
-            },
-        )
-    )
-
-    result = server.get_settings()
-    assert "Single-model mode: False" in result
-    assert "Session TTL: 1800s" in result
-    assert "Session max age: 86400s" in result
-    assert "Max sessions: 500" in result
-    assert "Max models/session: 10" in result
-
-
-def test_get_settings_single_model(mock_api: respx.MockRouter):
-    """get_settings shows pre-loaded model info in single-model mode."""
-    mock_api.get("/v1/settings").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "single_model_mode": True,
-                "model_yaml": "version: 1.0\ndataObjects: ...",
-                "session_ttl_seconds": 3600,
-                "session_max_age_seconds": 86400,
-                "max_sessions": 500,
-                "max_models_per_session": 10,
-            },
-        )
-    )
-
-    result = server.get_settings()
-    assert "Single-model mode: True" in result
-    assert "Pre-loaded model: yes" in result
 
 
 # ---------------------------------------------------------------------------
@@ -1854,8 +1719,8 @@ def test_session_created_once(mock_api: respx.MockRouter):
         return_value=httpx.Response(200, json=[])
     )
 
-    server._impl_list_dimensions("m001")
-    server._impl_list_dimensions("m001")
+    server._impl_list_artefacts("m001", "dimension")
+    server._impl_list_artefacts("m001", "dimension")
 
     # POST /v1/sessions should have been called exactly once
     session_calls = [call for call in mock_api.calls if call.request.url.path == "/v1/sessions"]
@@ -1899,7 +1764,7 @@ def test_session_retry_on_404(mock_api: respx.MockRouter):
         return_value=httpx.Response(200, json=[])
     )
 
-    result = server._impl_list_dimensions("m001")
+    result = server._impl_list_artefacts("m001", "dimension")
     assert "No dimensions" in result
     assert server._api_session_id == "session-new"
 
@@ -1934,7 +1799,7 @@ def test_session_retry_on_410(mock_api: respx.MockRouter):
         return_value=httpx.Response(200, json=[])
     )
 
-    result = server._impl_list_dimensions("m001")
+    result = server._impl_list_artefacts("m001", "dimension")
     assert "No dimensions" in result
     assert server._api_session_id == "session-new"
 
@@ -2911,110 +2776,6 @@ def test_run_batch_rejects_empty_queries():
 
 
 # ---------------------------------------------------------------------------
-# v2.2: get_settings shows oneshot_batch limits
-# ---------------------------------------------------------------------------
-
-
-def test_get_settings_shows_oneshot_batch_limits(mock_api: respx.MockRouter):
-    """get_settings surfaces server-side oneshot_batch limits when present."""
-    mock_api.get("/v1/settings").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "version": "2.2.1",
-                "api_version": "v1",
-                "single_model_mode": False,
-                "session_ttl_seconds": 1800,
-                "query_execute": False,
-                "oneshot_batch": {
-                    "max_queries": 50,
-                    "max_parallelism": 8,
-                    "default_timeout_ms": 30000,
-                    "batch_timeout_ms": 120000,
-                },
-            },
-        )
-    )
-
-    out = server.get_settings()
-    assert "Oneshot batch limits:" in out
-    assert "max queries:      50" in out
-    assert "max parallelism:  8" in out
-    assert "per-query timeout: 30000ms" in out
-    assert "batch timeout:    120000ms" in out
-
-
-def test_get_settings_renders_cache_block(mock_api: respx.MockRouter):
-    """get_settings surfaces the new /v1/settings.cache block."""
-    mock_api.get("/v1/settings").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "version": "2.2.1",
-                "api_version": "v1",
-                "single_model_mode": False,
-                "session_ttl_seconds": 1800,
-                "query_execute": False,
-                "cache": {
-                    "backend": "file",
-                    "enabled": True,
-                    "min_ttl_seconds": 30,
-                    "max_ttl_seconds": 86400,
-                    "max_value_bytes": 10_000_000,
-                    "max_disk_bytes": 1_000_000_000,
-                    "sweep_interval_seconds": 300,
-                    "unknown_freshness_policy": "default_ttl",
-                    "unknown_freshness_default_ttl": 60,
-                    "heartbeat_endpoint_enabled": True,
-                },
-            },
-        )
-    )
-
-    out = server.get_settings()
-    assert "Result cache:" in out
-    assert "backend:           file" in out
-    assert "enabled:           True" in out
-    assert "TTL bounds:        30s – 86400s" in out
-    assert "unknown freshness: default_ttl" in out
-    assert "(default TTL: 60s)" in out
-    assert "heartbeat endpoint: live" in out
-
-
-def test_get_settings_renders_cache_block_disabled(mock_api: respx.MockRouter):
-    """When cache is noop and heartbeat is off, render a clear disabled state."""
-    mock_api.get("/v1/settings").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "version": "2.2.1",
-                "api_version": "v1",
-                "single_model_mode": False,
-                "session_ttl_seconds": 1800,
-                "query_execute": False,
-                "cache": {
-                    "backend": "noop",
-                    "enabled": False,
-                    "min_ttl_seconds": 30,
-                    "max_ttl_seconds": 86400,
-                    "max_value_bytes": 10_000_000,
-                    "max_disk_bytes": 1_000_000_000,
-                    "sweep_interval_seconds": 300,
-                    "unknown_freshness_policy": "no_cache",
-                    "unknown_freshness_default_ttl": 0,
-                    "heartbeat_endpoint_enabled": False,
-                },
-            },
-        )
-    )
-
-    out = server.get_settings()
-    assert "backend:           noop" in out
-    assert "enabled:           False" in out
-    assert "heartbeat endpoint: disabled (no token set on API)" in out
-
-
-# ---------------------------------------------------------------------------
 # v2.2 follow-up: shortcut plan/examples, physical_tables in compile_query
 # ---------------------------------------------------------------------------
 
@@ -3289,3 +3050,471 @@ def test_execute_obsql_tsv_passthrough(mock_api: respx.MockRouter):
     )
     assert out.startswith("Country\tRevenue")
     assert "US\t100" in out
+
+
+# ---------------------------------------------------------------------------
+# Design-time vs run-time tool phase switching (Option A)
+# ---------------------------------------------------------------------------
+
+
+def test_tool_phase_partition_no_overlap():
+    """Run-time and neutral tool sets are disjoint (each verb has one phase)."""
+    assert server._RUN_TIME_TOOLS.isdisjoint(server._NEUTRAL_TOOLS)
+    # Spot-check a few canonical assignments from the plan.
+    assert "compile_query" in server._RUN_TIME_TOOLS
+    assert "execute_query" in server._RUN_TIME_TOOLS
+    assert "load_model" in server._NEUTRAL_TOOLS
+    assert "get_obml_reference" in server._NEUTRAL_TOOLS
+    assert "convert_obml_to_osi" in server._NEUTRAL_TOOLS
+
+
+def test_current_phase_multi_model_transitions():
+    """Multi-model: design until a model loads, run while loaded, design again."""
+    server._single_model_mode = False
+    server._loaded_model_ids.clear()
+    assert server._current_phase() == server.PHASE_DESIGN
+
+    server._mark_model_loaded("m001")
+    assert server._current_phase() == server.PHASE_RUN
+
+    server._mark_model_loaded("m002")
+    server._mark_model_removed("m001")
+    assert server._current_phase() == server.PHASE_RUN  # m002 still loaded
+
+    server._mark_model_removed("m002")
+    assert server._current_phase() == server.PHASE_DESIGN
+
+
+def test_current_phase_single_model_always_run():
+    """Single-model mode is permanently run-time (model pre-loaded)."""
+    server._single_model_mode = True
+    server._loaded_model_ids.clear()
+    assert server._current_phase() == server.PHASE_RUN
+
+
+def _fake_tool(name: str):
+    return types.SimpleNamespace(name=name)
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+def test_phase_middleware_hides_runtime_tools_in_design():
+    """on_list_tools drops run-time verbs in the design phase, keeps neutral."""
+    server._single_model_mode = False
+    server._loaded_model_ids.clear()
+    mw = server.PhaseMiddleware()
+    tools = [
+        _fake_tool("load_model"),
+        _fake_tool("get_obml_reference"),
+        _fake_tool("compile_query"),
+        _fake_tool("execute_query"),
+    ]
+
+    async def call_next(_ctx):
+        return tools
+
+    out = _run(mw.on_list_tools(object(), call_next))
+    names = {t.name for t in out}
+    assert names == {"load_model", "get_obml_reference"}
+
+
+def test_phase_middleware_lists_all_tools_in_run():
+    """on_list_tools returns everything once a model is loaded."""
+    server._single_model_mode = False
+    server._loaded_model_ids.clear()
+    server._mark_model_loaded("m001")
+    mw = server.PhaseMiddleware()
+    tools = [_fake_tool("load_model"), _fake_tool("compile_query")]
+
+    async def call_next(_ctx):
+        return tools
+
+    out = _run(mw.on_list_tools(object(), call_next))
+    assert {t.name for t in out} == {"load_model", "compile_query"}
+
+
+def test_phase_middleware_guard_blocks_runtime_call_in_design():
+    """Calling a run-time verb in the design phase raises a structured error."""
+    server._single_model_mode = False
+    server._loaded_model_ids.clear()
+    mw = server.PhaseMiddleware()
+    ctx = types.SimpleNamespace(message=types.SimpleNamespace(name="compile_query"))
+
+    async def call_next(_ctx):
+        return "should-not-run"
+
+    with pytest.raises(_ToolError, match="No model loaded"):
+        _run(mw.on_call_tool(ctx, call_next))
+
+
+def test_phase_middleware_guard_allows_neutral_call_in_design():
+    """Neutral verbs are callable in the design phase."""
+    server._single_model_mode = False
+    server._loaded_model_ids.clear()
+    mw = server.PhaseMiddleware()
+    ctx = types.SimpleNamespace(message=types.SimpleNamespace(name="load_model"))
+
+    async def call_next(_ctx):
+        return "ok"
+
+    assert _run(mw.on_call_tool(ctx, call_next)) == "ok"
+
+
+def test_phase_middleware_guard_allows_runtime_call_in_run():
+    """Run-time verbs pass the guard once a model is loaded."""
+    server._single_model_mode = False
+    server._loaded_model_ids.clear()
+    server._mark_model_loaded("m001")
+    mw = server.PhaseMiddleware()
+    ctx = types.SimpleNamespace(message=types.SimpleNamespace(name="compile_query"))
+
+    async def call_next(_ctx):
+        return "ok"
+
+    assert _run(mw.on_call_tool(ctx, call_next)) == "ok"
+
+
+def test_load_model_marks_loaded_and_emits_relist_signal(mock_api: respx.MockRouter):
+    """load_model records the model and prompts a re-list (design → run)."""
+    _mock_create_session(mock_api)
+    mock_api.post("/v1/sessions/test-session-1/models").mock(
+        return_value=httpx.Response(
+            201,
+            json={
+                "model_id": "m001",
+                "data_objects": 1,
+                "dimensions": 1,
+                "measures": 1,
+                "metrics": 0,
+                "warnings": [],
+            },
+        )
+    )
+
+    out = server._impl_load_model(
+        model={"version": 1.0, "dataObjects": {}},
+        extends=None,
+        inherits=None,
+        dedup=True,
+    )
+
+    assert "m001" in server._loaded_model_ids
+    assert server._current_phase() == server.PHASE_RUN
+    assert "Run-time tools are now available" in out
+    assert "Re-list tools" in out
+
+
+def test_remove_model_reverse_transition_signal(mock_api: respx.MockRouter):
+    """remove_model forgets the model and signals the reverse transition."""
+    server._api_session_id = "test-session-1"
+    server._mark_model_loaded("m001")
+    mock_api.delete("/v1/sessions/test-session-1/models/m001").mock(
+        return_value=httpx.Response(204)
+    )
+
+    out = server._impl_remove_model("m001")
+
+    assert "m001" not in server._loaded_model_ids
+    assert server._current_phase() == server.PHASE_DESIGN
+    assert "back to the design-time tool set" in out
+
+
+def test_remove_model_keeps_run_phase_when_others_loaded(mock_api: respx.MockRouter):
+    """Removing one of several models stays in the run phase, no reverse signal."""
+    server._api_session_id = "test-session-1"
+    server._mark_model_loaded("m001")
+    server._mark_model_loaded("m002")
+    mock_api.delete("/v1/sessions/test-session-1/models/m001").mock(
+        return_value=httpx.Response(204)
+    )
+
+    out = server._impl_remove_model("m001")
+
+    assert server._current_phase() == server.PHASE_RUN
+    assert "back to the design-time tool set" not in out
+
+
+def test_describe_model_surfaces_effective_settings(mock_api: respx.MockRouter):
+    """describe_model folds in server-resolved dialect/timezone as data."""
+    server._single_model_mode = True
+    mock_api.get("/v1/schema").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "model_id": "default",
+                "data_objects": [],
+                "dimensions": [],
+                "measures": [],
+                "metrics": [],
+            },
+        )
+    )
+    mock_api.get("/v1/settings").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "dialect": {"effective": "duckdb"},
+                "timezone": {"effective": "Europe/Zagreb"},
+            },
+        )
+    )
+
+    out = server._impl_describe_model(None)
+
+    assert "EFFECTIVE (server-resolved):" in out
+    assert "dialect:  duckdb" in out
+    assert "timezone: Europe/Zagreb" in out
+
+
+def test_describe_model_tolerates_missing_settings(mock_api: respx.MockRouter):
+    """describe_model still renders when /settings is unavailable (best-effort)."""
+    server._single_model_mode = True
+    mock_api.get("/v1/schema").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "model_id": "default",
+                "data_objects": [],
+                "dimensions": [],
+                "measures": [],
+                "metrics": [],
+            },
+        )
+    )
+    mock_api.get("/v1/settings").mock(return_value=httpx.Response(503))
+
+    out = server._impl_describe_model(None)
+
+    assert "Model default:" in out
+    assert "EFFECTIVE (server-resolved):" not in out
+
+
+# ---------------------------------------------------------------------------
+# Capability gating (orthogonal to phase): query_execute
+# ---------------------------------------------------------------------------
+
+
+def test_tool_capability_ok_gates_execute_tools():
+    """execute_* are gated by query_execute; other verbs are never gated."""
+    server._query_execute_enabled = False
+    assert not server._tool_capability_ok("execute_query")
+    assert not server._tool_capability_ok("execute_obsql")
+    assert server._tool_capability_ok("compile_query")  # no capability required
+    assert server._tool_capability_ok("load_model")
+
+    server._query_execute_enabled = True
+    assert server._tool_capability_ok("execute_query")
+    assert server._tool_capability_ok("execute_obsql")
+
+
+def test_capability_enabled_unknown_fails_open():
+    """An unmapped capability is treated as enabled (fail open)."""
+    assert server._capability_enabled("some_future_flag") is True
+
+
+def test_phase_middleware_hides_execute_when_capability_disabled():
+    """execute_* are filtered from tools/list when query_execute is off — even in run phase."""
+    server._single_model_mode = False
+    server._query_execute_enabled = False
+    server._loaded_model_ids.clear()
+    server._mark_model_loaded("m001")  # run phase
+    mw = server.PhaseMiddleware()
+    tools = [
+        _fake_tool("compile_query"),
+        _fake_tool("execute_query"),
+        _fake_tool("execute_obsql"),
+    ]
+
+    async def call_next(_ctx):
+        return tools
+
+    out = {t.name for t in _run(mw.on_list_tools(object(), call_next))}
+    assert out == {"compile_query"}
+
+
+def test_phase_middleware_shows_execute_when_capability_enabled():
+    """execute_* appear once query_execute is enabled (and a model is loaded)."""
+    server._single_model_mode = False
+    server._query_execute_enabled = True
+    server._loaded_model_ids.clear()
+    server._mark_model_loaded("m001")
+    mw = server.PhaseMiddleware()
+    tools = [_fake_tool("compile_query"), _fake_tool("execute_query")]
+
+    async def call_next(_ctx):
+        return tools
+
+    out = {t.name for t in _run(mw.on_list_tools(object(), call_next))}
+    assert out == {"compile_query", "execute_query"}
+
+
+def test_capability_guard_blocks_execute_call_when_disabled():
+    """Calling execute_query with query_execute off raises a capability error."""
+    server._single_model_mode = True  # run phase, so only capability gates it
+    server._query_execute_enabled = False
+    mw = server.PhaseMiddleware()
+    ctx = types.SimpleNamespace(message=types.SimpleNamespace(name="execute_query"))
+
+    async def call_next(_ctx):
+        return "should-not-run"
+
+    with pytest.raises(_ToolError, match="query execution is disabled"):
+        _run(mw.on_call_tool(ctx, call_next))
+
+
+def test_capability_guard_allows_execute_call_when_enabled():
+    """execute_query passes the guard when query_execute is enabled."""
+    server._single_model_mode = True
+    server._query_execute_enabled = True
+    mw = server.PhaseMiddleware()
+    ctx = types.SimpleNamespace(message=types.SimpleNamespace(name="execute_query"))
+
+    async def call_next(_ctx):
+        return "ok"
+
+    assert _run(mw.on_call_tool(ctx, call_next)) == "ok"
+
+
+def test_capability_and_phase_compose():
+    """A verb shows only if its phase is active AND its capability is enabled."""
+    server._single_model_mode = False
+    server._query_execute_enabled = True
+    server._loaded_model_ids.clear()  # design phase
+    mw = server.PhaseMiddleware()
+    tools = [_fake_tool("load_model"), _fake_tool("execute_query")]
+
+    async def call_next(_ctx):
+        return tools
+
+    # Design phase: execute_query hidden by phase even though capability is on.
+    out = {t.name for t in _run(mw.on_list_tools(object(), call_next))}
+    assert out == {"load_model"}
+
+
+# ---------------------------------------------------------------------------
+# Discovery collapse: list_artefacts enumeration / lookup + find kind
+# ---------------------------------------------------------------------------
+
+
+def _mock_artefact_endpoints(rsps, dims=None, measures=None, metrics=None, sid="test-session-1"):
+    rsps.get(f"/v1/sessions/{sid}/models/m001/dimensions").mock(
+        return_value=httpx.Response(200, json=dims or [])
+    )
+    rsps.get(f"/v1/sessions/{sid}/models/m001/measures").mock(
+        return_value=httpx.Response(200, json=measures or [])
+    )
+    rsps.get(f"/v1/sessions/{sid}/models/m001/metrics").mock(
+        return_value=httpx.Response(200, json=metrics or [])
+    )
+
+
+def test_list_artefacts_enumerates_all_kinds(mock_api: respx.MockRouter):
+    """No kind/name → every dimension, measure, and metric, in labelled sections."""
+    _mock_create_session(mock_api)
+    _mock_artefact_endpoints(
+        mock_api,
+        dims=[
+            {
+                "name": "Country",
+                "data_object": "Customers",
+                "column": "Country",
+                "result_type": "string",
+            }
+        ],
+        measures=[{"name": "Revenue", "result_type": "float", "aggregation": "sum"}],
+        metrics=[{"name": "Margin", "expression": "{[Profit]}/{[Revenue]}"}],
+    )
+
+    out = server._impl_list_artefacts("m001")
+
+    assert "Dimensions:" in out and "Country" in out
+    assert "Measures:" in out and "Revenue" in out
+    assert "Metrics:" in out and "Margin" in out
+
+
+def test_list_artefacts_filters_by_kind(mock_api: respx.MockRouter):
+    """kind only → just that kind's complete set (single endpoint)."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/measures").mock(
+        return_value=httpx.Response(
+            200, json=[{"name": "Revenue", "result_type": "float", "aggregation": "sum"}]
+        )
+    )
+
+    out = server._impl_list_artefacts("m001", "measure")
+
+    assert "Measures:" in out and "Revenue" in out
+    assert "Dimensions:" not in out and "Metrics:" not in out
+
+
+def test_list_artefacts_name_returns_exact_artefact(mock_api: respx.MockRouter):
+    """name (with kind) → the single matching record, deterministically filtered."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/dimensions").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "name": "Country",
+                    "data_object": "Customers",
+                    "column": "Country",
+                    "result_type": "string",
+                },
+                {
+                    "name": "City",
+                    "data_object": "Customers",
+                    "column": "City",
+                    "result_type": "string",
+                },
+            ],
+        )
+    )
+
+    out = server._impl_list_artefacts("m001", "dimension", "City")
+
+    assert "City" in out
+    assert "Country" not in out
+
+
+def test_list_artefacts_name_not_found(mock_api: respx.MockRouter):
+    """A name with no match across the searched kinds is reported clearly."""
+    _mock_create_session(mock_api)
+    _mock_artefact_endpoints(mock_api)  # all empty
+
+    out = server._impl_list_artefacts("m001", None, "Nope")
+
+    assert "named 'Nope'" in out
+    assert "No" in out
+
+
+def test_list_artefacts_single_model_mode_uses_shortcuts(mock_api: respx.MockRouter):
+    """Single-model mode hits the shortcut collection endpoints."""
+    server._single_model_mode = True
+    mock_api.get("/v1/metrics").mock(
+        return_value=httpx.Response(200, json=[{"name": "Margin", "expression": "{[P]}/{[R]}"}])
+    )
+
+    out = server._impl_list_artefacts(None, "metric")
+
+    assert "Metrics:" in out and "Margin" in out
+
+
+def test_find_artefacts_kind_sent_as_types(mock_api: respx.MockRouter):
+    """find_artefacts maps kind → the API's types=[kind] filter."""
+    _mock_create_session(mock_api)
+    route = mock_api.post("/v1/sessions/test-session-1/models/m001/find").mock(
+        return_value=httpx.Response(
+            200,
+            json={"results": [{"type": "measure", "name": "Revenue", "match_field": "name"}]},
+        )
+    )
+
+    server._impl_find_artefacts("m001", "rev", "measure")
+
+    import json as _json
+
+    sent = _json.loads(route.calls[0].request.read().decode())
+    assert sent["types"] == ["measure"]
+    assert sent["query"] == "rev"

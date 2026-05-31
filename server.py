@@ -26,6 +26,7 @@ import importlib.metadata
 import json
 import logging
 import threading
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from typing import Any, Literal, NoReturn
 from urllib.parse import quote
@@ -170,6 +171,147 @@ _single_model_mode: bool = False
 _query_execute_enabled: bool = False
 _tools_registered: bool = False
 
+# Model ids loaded into the current (multi-model) session. Drives the
+# design-time ↔ run-time tool surface (see "Tool phase model" below).
+_loaded_model_ids: set[str] = set()
+
+
+# ---------------------------------------------------------------------------
+# Tool phase model — design-time vs run-time surface switching
+# ---------------------------------------------------------------------------
+#
+# The surface flips between two phase-scoped tool sets as the lifecycle moves
+# load → query → unload (design/PLAN_tool_phase_switching.md, Option A):
+#
+#   * design-time — no model loaded; authoring + pure file transforms.
+#   * run-time    — a model is loaded; queries and introspection are valid.
+#
+# Phase is *derived from explicit state* (is a model resolvable for this
+# session?), never from hidden per-connection transport state, so it stays
+# stateless-clean. ``tools/list`` is filtered per phase by ``PhaseMiddleware``;
+# a run-time verb invoked in the design phase is rejected with a structured
+# guard error steering the host to ``load_model`` + re-list.
+
+PHASE_DESIGN = "design"
+PHASE_RUN = "run"
+
+# Run-time verbs: only meaningful once a model is loaded. Names span both the
+# single-model and multi-model registrations (same names, different signatures).
+_RUN_TIME_TOOLS: frozenset[str] = frozenset(
+    {
+        "get_model",
+        "describe_model",
+        "get_model_schema",
+        "get_model_diagram",
+        "list_artefacts",
+        "find_artefacts",
+        "explain_artefact",
+        "plan_query",
+        "compile_query",
+        "compile_obsql",
+        "execute_query",
+        "execute_obsql",
+        "list_examples",
+        "get_example",
+        "get_graph",
+        "get_join_graph",
+        "sparql_query",
+        "list_models",
+        "remove_model",
+    }
+)
+
+# Neutral verbs: safe to list in both phases. ``load_model`` is the transition
+# tool (design → run) and stays visible in the run phase too, so additional
+# models can be loaded; ``run_batch`` is self-contained (loads/references a
+# model in one call) so it never depends on prior session state.
+_NEUTRAL_TOOLS: frozenset[str] = frozenset(
+    {
+        "get_obml_reference",
+        "get_obsql_reference",
+        "list_references",
+        "get_json_schema",
+        "list_dialects",
+        "convert_osi_to_obml",
+        "convert_obml_to_osi",
+        "load_model",
+        "run_batch",
+    }
+)
+
+
+def _mark_model_loaded(model_id: str) -> None:
+    """Record a model as loaded — flips the surface to the run-time phase."""
+    if not model_id:
+        return
+    with _state_lock:
+        _loaded_model_ids.add(model_id)
+
+
+def _mark_model_removed(model_id: str) -> None:
+    """Forget a model — flips back to design-time once none remain loaded."""
+    with _state_lock:
+        _loaded_model_ids.discard(model_id)
+
+
+def _current_phase() -> str:
+    """Resolve the active phase from loaded-model state.
+
+    Single-model mode always has a pre-loaded model, so it is permanently in the
+    run-time phase. Multi-model mode is design-time until ``load_model`` succeeds
+    and reverts to design-time once every model is removed.
+    """
+    with _state_lock:
+        if _single_model_mode or _loaded_model_ids:
+            return PHASE_RUN
+        return PHASE_DESIGN
+
+
+def _is_runtime_tool(name: str) -> bool:
+    """True if ``name`` is a run-time-only verb (gated by loaded-model state)."""
+    return name in _RUN_TIME_TOOLS
+
+
+# ---------------------------------------------------------------------------
+# Capability gating — orthogonal to phase
+# ---------------------------------------------------------------------------
+#
+# Some verbs should be omitted not because of lifecycle phase but because the
+# server is *configured* not to support them. Unlike phase, a capability flag is
+# fixed per server config (resolved once at startup), so the tools are always
+# *registered* and simply filtered out of ``tools/list`` (and refused at call
+# time) when their capability is disabled. This composes with phase gating: a
+# verb is visible only if its phase is active *and* its capability is enabled.
+#
+# To add a future "the server can't do X here" flag: register a resolver in
+# ``_CAPABILITY_RESOLVERS`` and map the affected tool names in ``_TOOL_CAPABILITY``.
+
+CAP_QUERY_EXECUTE = "query_execute"
+
+# Tool name → the capability flag it requires. Tools absent from this map need
+# no capability and are always available (subject to phase).
+_TOOL_CAPABILITY: dict[str, str] = {
+    "execute_query": CAP_QUERY_EXECUTE,
+    "execute_obsql": CAP_QUERY_EXECUTE,
+}
+
+# Capability flag → a resolver reading the current (startup-detected) config.
+_CAPABILITY_RESOLVERS: dict[str, Callable[[], bool]] = {
+    CAP_QUERY_EXECUTE: lambda: _query_execute_enabled,
+}
+
+
+def _capability_enabled(cap: str) -> bool:
+    """True if capability ``cap`` is enabled. Unknown capabilities fail open."""
+    resolver = _CAPABILITY_RESOLVERS.get(cap)
+    return resolver() if resolver is not None else True
+
+
+def _tool_capability_ok(name: str) -> bool:
+    """True if the tool's required capability (if any) is enabled."""
+    cap = _TOOL_CAPABILITY.get(name)
+    return cap is None or _capability_enabled(cap)
+
 
 # ---------------------------------------------------------------------------
 # Lazy initialization middleware (HTTP transport only)
@@ -193,6 +335,63 @@ class LazyInitMiddleware(Middleware):
     ) -> Any:
         if not _tools_registered:
             _setup_mode_tools()
+        return await call_next(context)
+
+
+class PhaseMiddleware(Middleware):
+    """Flip the visible tool surface between design-time and run-time phases.
+
+    ``tools/list`` is filtered to the active phase (Option A, "hide-and-flip"):
+    run-time verbs are hidden until a model is loaded. ``tools/call`` carries a
+    guard so a stale host that calls a hidden run-time verb gets a structured
+    "no model loaded — re-list" error rather than an opaque downstream failure.
+
+    Note: the spec ``ttlMs`` / ``cacheScope`` cache hints on the ``tools/list``
+    result (SEP-2549, final 2026-07-28) are not set here — FastMCP's
+    ``on_list_tools`` hook only exposes the tool sequence, not the result
+    envelope, and the fields are still a release candidate. The explicit
+    re-list signal emitted by ``load_model`` / ``remove_model`` is the primary
+    transition mechanism (and the plan-preferred one), so this is no loss today.
+    """
+
+    async def on_list_tools(
+        self,
+        context: MiddlewareContext[Any],
+        call_next: CallNext[Any, Any],
+    ) -> Any:
+        tools = await call_next(context)
+        design_phase = _current_phase() == PHASE_DESIGN
+        visible = []
+        for t in tools:
+            # Capability gate (orthogonal to phase): drop verbs the server is
+            # configured not to support, in any phase.
+            if not _tool_capability_ok(t.name):
+                continue
+            # Phase gate: hide run-time-only verbs until a model is loaded.
+            if design_phase and _is_runtime_tool(t.name):
+                continue
+            visible.append(t)
+        return visible
+
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[Any],
+        call_next: CallNext[Any, Any],
+    ) -> Any:
+        name = getattr(context.message, "name", None)
+        if name and not _tool_capability_ok(name):
+            raise ToolError(
+                f"'{name}' is not available — this server is configured without "
+                "the required capability (query execution is disabled). Use the "
+                "compile_* tools to generate SQL without executing it."
+            )
+        if name and _is_runtime_tool(name) and _current_phase() == PHASE_DESIGN:
+            raise ToolError(
+                f"No model loaded — '{name}' is a run-time tool and is not "
+                "available yet. Call load_model first, then re-list tools: the "
+                "run-time tool set (compile_query, execute_query, describe_model, "
+                "…) becomes available once a model is loaded."
+            )
         return await call_next(context)
 
 
@@ -584,130 +783,6 @@ def list_dialects() -> str:
 
 
 @mcp.tool
-def get_settings() -> str:
-    """Get API configuration settings.
-
-    Returns whether the API is in single-model mode, the session TTL,
-    query execution status, dialect/timezone resolution, and model
-    settings when a model is loaded.
-    """
-    params: dict[str, str] = {}
-    if not _single_model_mode and _api_session_id is not None:
-        params["session_id"] = _api_session_id
-    resp = _api_request(
-        "GET",
-        f"{_API_V1}/settings",
-        retry_on_expired=False,
-        params=params or None,
-    )
-    data = _parse_json(resp)
-    lines = ["API Settings:", ""]
-    if data.get("version"):
-        lines.append(f"  API version: {data['version']}")
-    if data.get("api_version"):
-        lines.append(f"  API prefix: {data['api_version']}")
-    lines.append(f"  Single-model mode: {data.get('single_model_mode', False)}")
-    lines.append(f"  Session TTL: {data.get('session_ttl_seconds', 'N/A')}s")
-    if data.get("session_max_age_seconds"):
-        lines.append(f"  Session max age: {data['session_max_age_seconds']}s")
-    if data.get("max_sessions"):
-        lines.append(f"  Max sessions: {data['max_sessions']}")
-    if data.get("max_models_per_session"):
-        lines.append(f"  Max models/session: {data['max_models_per_session']}")
-    if data.get("model_yaml"):
-        lines.append(f"  Pre-loaded model: yes ({len(data['model_yaml'])} chars)")
-    if data.get("query_execute", False):
-        lines.append("  Query execution: available (use execute_query tool)")
-    else:
-        lines.append("  Query execution: not available")
-
-    dialect_info = data.get("dialect")
-    if dialect_info:
-        lines.append("")
-        lines.append("Dialect resolution:")
-        if dialect_info.get("model"):
-            lines.append(f"  model (defaultDialect): {dialect_info['model']}")
-        if dialect_info.get("env"):
-            lines.append(f"  env (DB_VENDOR): {dialect_info['env']}")
-        lines.append(f"  effective: {dialect_info.get('effective', 'postgres')}")
-
-    tz_info = data.get("timezone")
-    if tz_info:
-        lines.append("")
-        lines.append("Timezone resolution:")
-        if tz_info.get("model"):
-            lines.append(f"  model (defaultTimezone): {tz_info['model']}")
-        if tz_info.get("host"):
-            lines.append(f"  host: {tz_info['host']}")
-        if tz_info.get("database"):
-            lines.append(f"  database: {tz_info['database']}")
-        lines.append(f"  effective: {tz_info.get('effective', 'UTC')}")
-        if tz_info.get("override_database_timezone"):
-            lines.append("  overrideDatabaseTimezone: true")
-        if tz_info.get("now"):
-            lines.append(f"  now: {tz_info['now']}")
-        if tz_info.get("utc"):
-            lines.append(f"  utc: {tz_info['utc']}")
-
-    cache_info = data.get("cache")
-    if cache_info:
-        lines.append("")
-        lines.append("Result cache:")
-        lines.append(f"  backend:           {cache_info.get('backend', '?')}")
-        lines.append(f"  enabled:           {cache_info.get('enabled', False)}")
-        if cache_info.get("min_ttl_seconds") is not None:
-            lines.append(f"  TTL bounds:        {cache_info['min_ttl_seconds']}s")
-            if cache_info.get("max_ttl_seconds") is not None:
-                lines[-1] += f" – {cache_info['max_ttl_seconds']}s"
-        if cache_info.get("unknown_freshness_policy"):
-            lines.append(
-                f"  unknown freshness: {cache_info['unknown_freshness_policy']}  "
-                f"(default TTL: {cache_info.get('unknown_freshness_default_ttl', 0)}s)"
-            )
-        if cache_info.get("max_disk_bytes"):
-            lines.append(f"  max disk:          {cache_info['max_disk_bytes']:,} bytes")
-        if cache_info.get("max_value_bytes"):
-            lines.append(f"  max value size:    {cache_info['max_value_bytes']:,} bytes")
-        if cache_info.get("sweep_interval_seconds") is not None:
-            lines.append(f"  sweep interval:    {cache_info['sweep_interval_seconds']}s")
-        if cache_info.get("heartbeat_endpoint_enabled") is not None:
-            hb_status = (
-                "live"
-                if cache_info["heartbeat_endpoint_enabled"]
-                else "disabled (no token set on API)"
-            )
-            lines.append(f"  heartbeat endpoint: {hb_status}")
-
-    batch_info = data.get("oneshot_batch")
-    if batch_info:
-        lines.append("")
-        lines.append("Oneshot batch limits:")
-        if batch_info.get("max_queries") is not None:
-            lines.append(f"  max queries:      {batch_info['max_queries']}")
-        if batch_info.get("max_parallelism") is not None:
-            lines.append(f"  max parallelism:  {batch_info['max_parallelism']}")
-        if batch_info.get("default_timeout_ms") is not None:
-            lines.append(f"  per-query timeout: {batch_info['default_timeout_ms']}ms")
-        if batch_info.get("batch_timeout_ms") is not None:
-            lines.append(f"  batch timeout:    {batch_info['batch_timeout_ms']}ms")
-
-    ms_info = data.get("model_settings")
-    if ms_info:
-        lines.append("")
-        lines.append("Model settings:")
-        if ms_info.get("defaultDialect"):
-            lines.append(f"  defaultDialect: {ms_info['defaultDialect']}")
-        if ms_info.get("defaultNumericDataType"):
-            lines.append(f"  defaultNumericDataType: {ms_info['defaultNumericDataType']}")
-        if ms_info.get("defaultTimezone"):
-            lines.append(f"  defaultTimezone: {ms_info['defaultTimezone']}")
-        if ms_info.get("overrideDatabaseTimezone"):
-            lines.append("  overrideDatabaseTimezone: true")
-
-    return "\n".join(lines)
-
-
-@mcp.tool
 def convert_osi_to_obml(input_yaml: str) -> str:
     """Convert an OSI (Open Semantic Interchange) YAML model to OBML format.
 
@@ -898,6 +973,41 @@ def _format_metric_summary(met: dict) -> str:
     return f"expr: {met.get('expression', '?')}"
 
 
+def _fetch_effective_settings() -> dict[str, str]:
+    """Best-effort fetch of the server-resolved dialect/timezone.
+
+    These are the three agent-relevant fields the removed ``get_settings`` tool
+    used to surface (``dialect.effective``, ``timezone.effective``; the model's
+    ``defaultNumericDataType`` is already shown in the model SETTINGS block).
+    Folding them into ``describe_model`` / ``load_model`` keeps the information
+    available as *data* without a standalone settings verb.
+
+    Returns a small dict (possibly empty). Enrichment only — any error is
+    swallowed so it can never break the calling tool.
+    """
+    try:
+        params: dict[str, str] = {}
+        if not _single_model_mode and _api_session_id is not None:
+            params["session_id"] = _api_session_id
+        resp = _api_request(
+            "GET",
+            f"{_API_V1}/settings",
+            retry_on_expired=False,
+            params=params or None,
+        )
+        data = _parse_json(resp)
+    except Exception:  # noqa: BLE001 — enrichment must never break the caller
+        return {}
+    out: dict[str, str] = {}
+    dialect = data.get("dialect") or {}
+    if dialect.get("effective"):
+        out["dialect"] = dialect["effective"]
+    tz = data.get("timezone") or {}
+    if tz.get("effective"):
+        out["timezone"] = tz["effective"]
+    return out
+
+
 def _impl_describe_model(model_id: str | None = None) -> str:
     """Describe the contents of a loaded model (shared implementation)."""
     if model_id is None:
@@ -1028,6 +1138,18 @@ def _impl_describe_model(model_id: str | None = None) -> str:
             lines.append(f"  defaultTimezone: {model_settings['default_timezone']}")
         if model_settings.get("override_database_timezone"):
             lines.append("  overrideDatabaseTimezone: true")
+        lines.append("")
+
+    # Server-resolved effective dialect/timezone (the model SETTINGS block above
+    # shows what the model *requested*; this shows what the server *resolved*
+    # after factoring in env / host / database). Enrichment — omitted on error.
+    effective = _fetch_effective_settings()
+    if effective:
+        lines.append("EFFECTIVE (server-resolved):")
+        if effective.get("dialect"):
+            lines.append(f"  dialect:  {effective['dialect']}")
+        if effective.get("timezone"):
+            lines.append(f"  timezone: {effective['timezone']}")
         lines.append("")
 
     # Static filters
@@ -1330,16 +1452,30 @@ def _impl_get_model_schema(model_id: str | None) -> str:
     return json.dumps(_parse_json(resp), indent=2)
 
 
-def _impl_list_dimensions(model_id: str | None) -> str:
-    """List all dimensions (shared implementation)."""
+# Artefact kinds discoverable via list_artefacts / find_artefacts.
+_ARTEFACT_KINDS: tuple[str, ...] = ("dimension", "measure", "metric")
+
+# kind → (plural REST collection segment, list-section header).
+_ARTEFACT_ENDPOINTS: dict[str, tuple[str, str]] = {
+    "dimension": ("dimensions", "Dimensions:"),
+    "measure": ("measures", "Measures:"),
+    "metric": ("metrics", "Metrics:"),
+}
+
+
+def _fetch_artefacts(model_id: str | None, kind: str) -> list[dict]:
+    """Fetch the full set of records for one artefact kind."""
+    segment = _ARTEFACT_ENDPOINTS[kind][0]
     if model_id is None:
-        resp = _shortcut_request("GET", "/dimensions")
+        resp = _shortcut_request("GET", f"/{segment}")
     else:
-        resp = _session_request("GET", f"/models/{model_id}/dimensions")
-    dims = _parse_json(resp)
-    if not dims:
-        return "No dimensions in this model."
-    lines = ["Dimensions:", ""]
+        resp = _session_request("GET", f"/models/{model_id}/{segment}")
+    return _parse_json(resp)
+
+
+def _render_dimension_lines(dims: list[dict]) -> list[str]:
+    """Render dimension records as indented detail lines."""
+    lines: list[str] = []
     for d in dims:
         grain = f"  grain={d['time_grain']}" if d.get("time_grain") else ""
         via = f"  via {d['via']}" if d.get("via") else ""
@@ -1352,29 +1488,12 @@ def _impl_list_dimensions(model_id: str | None) -> str:
             lines.append(f"    description: {d['description']}")
         if d.get("synonyms"):
             lines.append(f"    synonyms: {', '.join(d['synonyms'])}")
-    return "\n".join(lines)
+    return lines
 
 
-def _impl_get_dimension(model_id: str | None, name: str) -> str:
-    """Get a single dimension by name (shared implementation)."""
-    encoded = quote(name, safe="")
-    if model_id is None:
-        resp = _shortcut_request("GET", f"/dimensions/{encoded}")
-    else:
-        resp = _session_request("GET", f"/models/{model_id}/dimensions/{encoded}")
-    return json.dumps(_parse_json(resp), indent=2)
-
-
-def _impl_list_measures(model_id: str | None) -> str:
-    """List all measures (shared implementation)."""
-    if model_id is None:
-        resp = _shortcut_request("GET", "/measures")
-    else:
-        resp = _session_request("GET", f"/models/{model_id}/measures")
-    measures = _parse_json(resp)
-    if not measures:
-        return "No measures in this model."
-    lines = ["Measures:", ""]
+def _render_measure_lines(measures: list[dict]) -> list[str]:
+    """Render measure records as indented detail lines."""
+    lines: list[str] = []
     for m in measures:
         expr = f"  expr: {m['expression']}" if m.get("expression") else ""
         m_name = m.get("name", "?")
@@ -1398,29 +1517,12 @@ def _impl_list_measures(model_id: str | None) -> str:
             lines.append(f"    description: {m['description']}")
         if m.get("synonyms"):
             lines.append(f"    synonyms: {', '.join(m['synonyms'])}")
-    return "\n".join(lines)
+    return lines
 
 
-def _impl_get_measure(model_id: str | None, name: str) -> str:
-    """Get a single measure by name (shared implementation)."""
-    encoded = quote(name, safe="")
-    if model_id is None:
-        resp = _shortcut_request("GET", f"/measures/{encoded}")
-    else:
-        resp = _session_request("GET", f"/models/{model_id}/measures/{encoded}")
-    return json.dumps(_parse_json(resp), indent=2)
-
-
-def _impl_list_metrics(model_id: str | None) -> str:
-    """List all metrics (shared implementation)."""
-    if model_id is None:
-        resp = _shortcut_request("GET", "/metrics")
-    else:
-        resp = _session_request("GET", f"/models/{model_id}/metrics")
-    metrics = _parse_json(resp)
-    if not metrics:
-        return "No metrics in this model."
-    lines = ["Metrics:", ""]
+def _render_metric_lines(metrics: list[dict]) -> list[str]:
+    """Render metric records as indented detail lines."""
+    lines: list[str] = []
     for met in metrics:
         components = ", ".join(met.get("component_measures", []))
         lines.append(f"  {met['name']}  {_format_metric_summary(met)}")
@@ -1432,17 +1534,47 @@ def _impl_list_metrics(model_id: str | None) -> str:
             lines.append(f"    components: {components}")
         if met.get("synonyms"):
             lines.append(f"    synonyms: {', '.join(met['synonyms'])}")
-    return "\n".join(lines)
+    return lines
 
 
-def _impl_get_metric(model_id: str | None, name: str) -> str:
-    """Get a single metric by name (shared implementation)."""
-    encoded = quote(name, safe="")
-    if model_id is None:
-        resp = _shortcut_request("GET", f"/metrics/{encoded}")
-    else:
-        resp = _session_request("GET", f"/models/{model_id}/metrics/{encoded}")
-    return json.dumps(_parse_json(resp), indent=2)
+_ARTEFACT_RENDERERS = {
+    "dimension": _render_dimension_lines,
+    "measure": _render_measure_lines,
+    "metric": _render_metric_lines,
+}
+
+
+def _impl_list_artefacts(
+    model_id: str | None,
+    kind: str | None = None,
+    name: str | None = None,
+) -> str:
+    """Deterministic artefact lookup (shared implementation).
+
+    Exact, complete enumeration — the authoritative set, not ranked candidates
+    (that is ``find_artefacts``). With no ``name``, returns every artefact
+    (optionally narrowed to one ``kind``); with ``name``, returns that exact
+    artefact. Always renders full records at whatever cardinality results.
+    """
+    kinds = [kind] if kind else list(_ARTEFACT_KINDS)
+    sections: list[str] = []
+    for k in kinds:
+        records = _fetch_artefacts(model_id, k)
+        if name is not None:
+            records = [r for r in records if r.get("name") == name]
+        if not records:
+            continue
+        header = _ARTEFACT_ENDPOINTS[k][1]
+        sections.append("\n".join([header, "", *_ARTEFACT_RENDERERS[k](records)]))
+    if sections:
+        return "\n\n".join(sections)
+    # Nothing matched — phrase the empty case for the narrowing that was applied.
+    if name is not None:
+        of_kind = f" {kind}" if kind else " artefact"
+        return f"No{of_kind} named '{name}' found in this model."
+    if kind:
+        return f"No {kind}s in this model."
+    return "No artefacts in this model."
 
 
 def _impl_explain_artefact(model_id: str | None, name: str) -> str:
@@ -1460,11 +1592,11 @@ def _impl_explain_artefact(model_id: str | None, name: str) -> str:
     return "\n".join(lines)
 
 
-def _impl_find_artefacts(model_id: str | None, query: str, types: list[str] | None) -> str:
-    """Search across model artefacts (shared implementation)."""
+def _impl_find_artefacts(model_id: str | None, query: str, kind: str | None) -> str:
+    """Fuzzy, ranked search across model artefacts (shared implementation)."""
     body: dict = {"query": query}
-    if types is not None:
-        body["types"] = types
+    if kind is not None:
+        body["types"] = [kind]
     if model_id is None:
         resp = _shortcut_request("POST", "/find", json_body=body)
     else:
@@ -1627,7 +1759,39 @@ def _impl_load_model(
             tables = ", ".join(risk.get("tables", []))
             parts.append(f"    fan-trap risk on [{tables}]: {risk.get('reason', '')}")
     parts.extend(_format_warnings(data.get("warnings")))
+
+    # Surface server-resolved dialect/timezone as data (see _fetch_effective_settings).
+    effective = _fetch_effective_settings()
+    if effective.get("dialect"):
+        parts.append(f"  effective dialect:  {effective['dialect']}")
+    if effective.get("timezone"):
+        parts.append(f"  effective timezone: {effective['timezone']}")
+
+    # Forward transition (design → run): record the model and prompt a re-list so
+    # the host discovers the now-available run-time tool set.
+    _mark_model_loaded(data["model_id"])
+    parts.append("")
+    parts.append(
+        "Run-time tools are now available (compile_query, execute_query, "
+        "describe_model, plan_query, …). Re-list tools to discover them."
+    )
     return "\n".join(parts)
+
+
+def _impl_remove_model(model_id: str) -> str:
+    """Remove a model and render the reverse-transition summary."""
+    _session_request("DELETE", f"/models/{model_id}")
+    # Reverse transition (run → design): forget the model; if none remain,
+    # prompt a re-list so the host drops the now-invalid run-time verbs.
+    _mark_model_removed(model_id)
+    msg = f"Model {model_id} removed."
+    if _current_phase() == PHASE_DESIGN:
+        msg += (
+            "\n\nNo models remain loaded — back to the design-time tool set. "
+            "Re-list tools: run-time verbs are unavailable until you "
+            "load_model again."
+        )
+    return msg
 
 
 def _impl_plan_query(
@@ -2044,58 +2208,25 @@ def _register_single_model_tools() -> None:
         return _impl_get_model_schema(None)
 
     @mcp.tool
-    def list_dimensions() -> str:
-        """List all dimensions in the model.
+    def list_artefacts(
+        kind: Literal["dimension", "measure", "metric"] | None = None,
+        name: str | None = None,
+    ) -> str:
+        """Look up model artefacts — exact, deterministic, complete.
 
-        Returns dimension details including data object, column, result type,
-        time grain, and synonyms.
-        """
-        return _impl_list_dimensions(None)
+        Use this when you know what you want or want the authoritative set
+        (contrast ``find_artefacts``, which is fuzzy ranked search). Returns
+        full artefact records:
 
-    @mcp.tool
-    def get_dimension(name: str) -> str:
-        """Get a single dimension by name.
-
-        Args:
-            name: The dimension name.
-        """
-        return _impl_get_dimension(None, name)
-
-    @mcp.tool
-    def list_measures() -> str:
-        """List all measures in the model.
-
-        Returns measure details including aggregation type, expression, result
-        type, and synonyms.
-        """
-        return _impl_list_measures(None)
-
-    @mcp.tool
-    def get_measure(name: str) -> str:
-        """Get a single measure by name.
+        - no args → every dimension, measure, and metric in the model;
+        - ``kind`` only → the complete set of that one kind;
+        - ``name`` → that exact artefact (optionally constrained to ``kind``).
 
         Args:
-            name: The measure name.
+            kind: Restrict to one artefact kind (dimension, measure, metric).
+            name: Return only the artefact with this exact name.
         """
-        return _impl_get_measure(None, name)
-
-    @mcp.tool
-    def list_metrics() -> str:
-        """List all metrics in the model.
-
-        Returns metric details including expression, component measures, and
-        synonyms.
-        """
-        return _impl_list_metrics(None)
-
-    @mcp.tool
-    def get_metric(name: str) -> str:
-        """Get a single metric by name.
-
-        Args:
-            name: The metric name.
-        """
-        return _impl_get_metric(None, name)
+        return _impl_list_artefacts(None, kind, name)
 
     @mcp.tool
     def explain_artefact(name: str) -> str:
@@ -2113,19 +2244,22 @@ def _register_single_model_tools() -> None:
     @mcp.tool
     def find_artefacts(
         query: str,
-        types: list[str] | None = None,
+        kind: Literal["dimension", "measure", "metric"] | None = None,
     ) -> str:
-        """Search across model artefacts by name or synonym.
+        """Fuzzy, ranked search across model artefacts — for "I don't know the
+        exact name".
 
-        Finds dimensions, measures, metrics, and data objects whose name or
-        synonym matches the search query (case-insensitive substring match).
+        Matches names and synonyms (exact, synonym, and fuzzy/partial), and
+        returns ranked candidates — not the authoritative complete set (use
+        ``list_artefacts`` for that). Good for resolving a vague term to real
+        artefact names.
 
         Args:
             query: Search term (matched against names and synonyms).
-            types: Object types to search.  Defaults to all types:
-                dimension, measure, metric, data_object.
+            kind: Restrict the search to one artefact kind (dimension,
+                measure, metric).  Omit to search all kinds.
         """
-        return _impl_find_artefacts(None, query, types)
+        return _impl_find_artefacts(None, query, kind)
 
     @mcp.tool
     def get_join_graph() -> str:
@@ -2269,9 +2403,15 @@ def _setup_mode_tools() -> None:
     else:
         logger.info("Multi-model mode — using session-scoped endpoints")
         _register_multi_model_tools()
-    if _query_execute_enabled:
-        logger.info("Query execution enabled — registering execute_query tool")
-        _register_execute_query_tool()
+    # Execute tools are always registered; their visibility is gated at list
+    # time by capability (query_execute) via PhaseMiddleware. This keeps the
+    # surface a pure function of config + phase rather than of what happened to
+    # be registered, and lets future capability flags drop in the same way.
+    _register_execute_query_tool()
+    logger.info(
+        "Query execution %s (execute_* tools gated by capability)",
+        "enabled" if _query_execute_enabled else "disabled",
+    )
     _tools_registered = True
 
 
@@ -2499,8 +2639,7 @@ def _register_multi_model_tools() -> None:
         Args:
             model_id: The id returned by ``load_model``.
         """
-        _session_request("DELETE", f"/models/{model_id}")
-        return f"Model {model_id} removed."
+        return _impl_remove_model(model_id)
 
     @mcp.tool
     def get_model_schema(model_id: str) -> str:
@@ -2516,70 +2655,27 @@ def _register_multi_model_tools() -> None:
         return _impl_get_model_schema(model_id)
 
     @mcp.tool
-    def list_dimensions(model_id: str) -> str:
-        """List all dimensions in a model.
+    def list_artefacts(
+        model_id: str,
+        kind: Literal["dimension", "measure", "metric"] | None = None,
+        name: str | None = None,
+    ) -> str:
+        """Look up model artefacts — exact, deterministic, complete.
 
-        Returns dimension details including data object, column, result type,
-        time grain, and synonyms.
+        Use this when you know what you want or want the authoritative set
+        (contrast ``find_artefacts``, which is fuzzy ranked search). Returns
+        full artefact records:
 
-        Args:
-            model_id: The id returned by ``load_model``.
-        """
-        return _impl_list_dimensions(model_id)
-
-    @mcp.tool
-    def get_dimension(model_id: str, name: str) -> str:
-        """Get a single dimension by name.
-
-        Args:
-            model_id: The id returned by ``load_model``.
-            name: The dimension name.
-        """
-        return _impl_get_dimension(model_id, name)
-
-    @mcp.tool
-    def list_measures(model_id: str) -> str:
-        """List all measures in a model.
-
-        Returns measure details including aggregation type, expression, result
-        type, and synonyms.
+        - ``model_id`` only → every dimension, measure, and metric;
+        - ``kind`` → the complete set of that one kind;
+        - ``name`` → that exact artefact (optionally constrained to ``kind``).
 
         Args:
             model_id: The id returned by ``load_model``.
+            kind: Restrict to one artefact kind (dimension, measure, metric).
+            name: Return only the artefact with this exact name.
         """
-        return _impl_list_measures(model_id)
-
-    @mcp.tool
-    def get_measure(model_id: str, name: str) -> str:
-        """Get a single measure by name.
-
-        Args:
-            model_id: The id returned by ``load_model``.
-            name: The measure name.
-        """
-        return _impl_get_measure(model_id, name)
-
-    @mcp.tool
-    def list_metrics(model_id: str) -> str:
-        """List all metrics in a model.
-
-        Returns metric details including expression, component measures, and
-        synonyms.
-
-        Args:
-            model_id: The id returned by ``load_model``.
-        """
-        return _impl_list_metrics(model_id)
-
-    @mcp.tool
-    def get_metric(model_id: str, name: str) -> str:
-        """Get a single metric by name.
-
-        Args:
-            model_id: The id returned by ``load_model``.
-            name: The metric name.
-        """
-        return _impl_get_metric(model_id, name)
+        return _impl_list_artefacts(model_id, kind, name)
 
     @mcp.tool
     def explain_artefact(model_id: str, name: str) -> str:
@@ -2599,20 +2695,23 @@ def _register_multi_model_tools() -> None:
     def find_artefacts(
         model_id: str,
         query: str,
-        types: list[str] | None = None,
+        kind: Literal["dimension", "measure", "metric"] | None = None,
     ) -> str:
-        """Search across model artefacts by name or synonym.
+        """Fuzzy, ranked search across model artefacts — for "I don't know the
+        exact name".
 
-        Finds dimensions, measures, metrics, and data objects whose name or
-        synonym matches the search query (case-insensitive substring match).
+        Matches names and synonyms (exact, synonym, and fuzzy/partial), and
+        returns ranked candidates — not the authoritative complete set (use
+        ``list_artefacts`` for that). Good for resolving a vague term to real
+        artefact names.
 
         Args:
             model_id: The id returned by ``load_model``.
             query: Search term (matched against names and synonyms).
-            types: Object types to search.  Defaults to all types:
-                dimension, measure, metric, data_object.
+            kind: Restrict the search to one artefact kind (dimension,
+                measure, metric).  Omit to search all kinds.
         """
-        return _impl_find_artefacts(model_id, query, types)
+        return _impl_find_artefacts(model_id, query, kind)
 
     @mcp.tool
     def get_join_graph(model_id: str) -> str:
@@ -2824,7 +2923,12 @@ def _register_multi_model_tools() -> None:
 
 
 def _register_execute_query_tool() -> None:
-    """Register execute_query tool (only when query execution is available)."""
+    """Register the execute_query / execute_obsql tools.
+
+    Always registered; visibility and callability are gated by the
+    ``query_execute`` capability at request time (see PhaseMiddleware /
+    _tool_capability_ok), so a compile-only server lists neither.
+    """
 
     if _single_model_mode:
 
@@ -3635,11 +3739,15 @@ def main() -> None:
             except httpx.HTTPError as exc:
                 logger.error("Cannot reach API to validate pre-loaded model: %s", exc)
                 raise SystemExit(1) from None
-            # mode-independent (10) + single-model (20) + execute (2 when on)?
-            tool_count = 32 if _query_execute_enabled else 30
+            # Registered count — execute_* are always registered now and gated
+            # at list time by capability, so this counts everything registered.
+            # The *visible* surface is smaller when query_execute is off (−2) or
+            # in the design phase (run-time verbs hidden); single-model mode is
+            # always run-time. neutral (7) + single-model (15) + execute (2).
+            tool_count = 24
         else:
-            # mode-independent (10) + multi-model (23) + execute (2 when on)?
-            tool_count = 35 if _query_execute_enabled else 33
+            # neutral (7) + multi-model (18) + execute (2).
+            tool_count = 27
         mode_label = "single-model" if _single_model_mode else "multi-model"
     else:
         # HTTP/SSE: defer mode detection to the first request so the container
@@ -3647,6 +3755,10 @@ def main() -> None:
         mcp.add_middleware(LazyInitMiddleware())
         tool_count = 0
         mode_label = "deferred (lazy init on first request)"
+
+    # Phase-scoped tool surface (design-time ↔ run-time). Added after LazyInit
+    # so its tool-registration on_request runs first on HTTP transports.
+    mcp.add_middleware(PhaseMiddleware())
 
     logger.info("")
     logger.info("Configuration:")

@@ -4,6 +4,85 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.7.4] — 2026-05-31
+
+### Changed
+
+- **Discovery cluster collapsed into `list_artefacts` + `find_artefacts`.**
+  The six artefact tools `list_dimensions` / `list_measures` / `list_metrics`
+  and `get_dimension` / `get_measure` / `get_metric` are replaced by a single
+  `list_artefacts(kind?, name?)` verb, split from search on a real semantic
+  boundary:
+  - `list_artefacts` — **exact, deterministic, complete**. No args → every
+    artefact; `kind` → that kind's full set; `name` → that exact artefact.
+    Always returns full records (artefact definitions are small, so list and
+    single-name lookup are the same shape at different cardinality — a separate
+    `get_*` is unnecessary).
+  - `find_artefacts(query, kind?)` — **fuzzy, ranked search** for "I don't
+    know the exact name". Its old `types: list[str]` argument is now a single
+    `kind` enum.
+  The agent knows which it holds (complete set vs. ranked candidates) from the
+  verb it chose. `explain_artefact` (lineage), `describe_model` (model-level
+  overview), and `list_examples` / `get_example` (canned queries, not model
+  artefacts) are intentionally **not** folded in. Net tool count drops by 5.
+
+### Added
+
+- **Design-time vs run-time tool phase switching (Option A).** The tool
+  surface now flips between two phase-scoped sets as the model lifecycle
+  moves load → query → unload. Before a model is loaded, only design-time
+  verbs are listed (references, schema, converters, `list_dialects`,
+  `load_model`, `run_batch`); run-time verbs (`compile_query`,
+  `execute_query`, `describe_model`, introspection, …) appear once
+  `load_model` succeeds and disappear again once every model is removed.
+  Single-model mode is permanently run-time (model pre-loaded). The phase
+  is derived from explicit loaded-model state, not hidden per-connection
+  state, so it stays stateless-clean. Implemented via a `PhaseMiddleware`
+  that filters `tools/list` and guards `tools/call`.
+- **Structured "no model loaded" guard.** Invoking a run-time verb while in
+  the design phase returns a structured error steering the host to call
+  `load_model` and re-list, instead of an opaque downstream failure.
+- **Unified capability gating (orthogonal to phase).** `execute_query` /
+  `execute_obsql` are now **always registered** and filtered out of
+  `tools/list` (and refused at call time with a structured error) when the
+  server is configured compile-only (`query_execute: false`), rather than
+  being conditionally registered. The mechanism is a general
+  capability-flag → resolver registry (`_TOOL_CAPABILITY` /
+  `_CAPABILITY_RESOLVERS`) composed into `PhaseMiddleware`, so future
+  "server can't do X here" flags drop in without touching registration. A
+  verb is visible only if its phase is active **and** its capability is
+  enabled.
+- **Explicit re-list signal on lifecycle transitions.** `load_model`
+  (design → run) and `remove_model` (run → design, when no models remain)
+  now append a signal prompting the agent to re-discover the changed tool
+  surface — the plan-preferred pull mechanism under the stateless spec
+  (push `notifications/tools/list_changed` is unreliable there). The spec
+  `ttlMs` / `cacheScope` cache hints (SEP-2549, final 2026-07-28) are
+  deferred: FastMCP's `on_list_tools` hook exposes only the tool sequence,
+  not the result envelope, and the fields are still a release candidate.
+
+### Changed
+
+- **`describe_model` and `load_model` now surface the server-resolved
+  effective dialect and timezone** as data (an `EFFECTIVE (server-resolved)`
+  block / summary lines). This preserves the three agent-relevant fields
+  the removed `get_settings` tool used to expose (`dialect.effective`,
+  `timezone.effective`; the model's `defaultNumericDataType` was already
+  shown). Best-effort: omitted silently if `/settings` is unavailable.
+- **Upgraded FastMCP 3.2.4 → 3.3.1** (dependency floor raised to
+  `fastmcp>=3.3,<4`). The middleware hooks the phase surface relies on
+  (`on_list_tools`, `on_call_tool`) are unchanged across the bump.
+
+### Removed
+
+- **`get_settings` MCP tool.** A thin pass-through wrapper over the
+  `GET /v1/settings` API endpoint with no added value, mirroring the
+  existing decision to leave `POST /v1/cache/sweep`,
+  `POST /v1/cache/clear`, `POST /v1/heartbeat`, and `GET /v1/cache/stats`
+  unwrapped. Tool count drops by one in every mode. The settings endpoint
+  (modes, TTL, dialect/timezone resolution, oneshot batch limits, and the
+  cache configuration summary) remains available directly on the API.
+
 ## [2.7.3] — 2026-05-30
 
 ### Removed

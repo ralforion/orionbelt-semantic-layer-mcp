@@ -7,7 +7,7 @@
 
 <p align="center"><strong>Thin MCP server that delegates to the OrionBelt Semantic Layer REST API</strong></p>
 
-[![Version 2.7.3](https://img.shields.io/badge/version-2.7.3-purple.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/releases)
+[![Version 2.7.4](https://img.shields.io/badge/version-2.7.4-purple.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/releases)
 [![OrionBelt Semantic Layer 2.7](https://img.shields.io/badge/OrionBelt_Semantic_Layer-2.7-0054A6.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/blob/main/LICENSE)
@@ -47,7 +47,7 @@ The OrionBelt Semantic Layer platform has two deployment modes. This MCP server 
 - **No business logic** — all tool calls delegate to the REST API (v1 endpoints)
 - **Dual-mode** — auto-detects single-model or multi-model API mode at startup
 - **Auto-session management** — creates an API session on first tool call, caches the ID (multi-model mode)
-- **28–30 tools** (single-model mode) or **31–33 tools** (multi-model mode) for querying (QueryObject + OBSQL natural SQL), execution, batch, planning, discovery, examples, diagrams, RDF/SPARQL, reference docs, and format conversion (execute tools add +2 when `QUERY_EXECUTE=true`)
+- **24 tools** (single-model mode) or **27 tools** (multi-model mode) for querying (QueryObject + OBSQL natural SQL), execution, batch, planning, discovery, examples, diagrams, RDF/SPARQL, reference docs, and format conversion. The visible surface is smaller in the design-time phase and when query execution is disabled (see [Design-time vs run-time tool switching](#design-time-vs-run-time-tool-switching))
 - **4 prompts + 2 resources** for OBML / OBSQL reference and usage guidance
 
 <p align="center">
@@ -121,67 +121,132 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 
 ### Model lifecycle
 
-| MCP Tool                          | Description                                              |
-| --------------------------------- | -------------------------------------------------------- |
-| `get_obml_reference()`            | Returns the full OBML format specification               |
-| `load_model(model, dedup=True)`   | Parse, validate, and store a model (returns health + model_load) |
-| `describe_model(model_id)`        | Inspect data objects, dimensions, measures, metrics      |
-| `remove_model(model_id)`          | Remove a model from the current session                  |
-| `list_models()`                   | List all models loaded in the current session            |
+| MCP Tool                        | Description                                                      |
+| ------------------------------- | ---------------------------------------------------------------- |
+| `get_obml_reference()`          | Returns the full OBML format specification                       |
+| `load_model(model, dedup=True)` | Parse, validate, and store a model (returns health + model_load) |
+| `describe_model(model_id)`      | Inspect data objects, dimensions, measures, metrics              |
+| `remove_model(model_id)`        | Remove a model from the current session                          |
+| `list_models()`                 | List all models loaded in the current session                    |
 
 ### Model discovery
 
-| MCP Tool                          | Description                                              |
-| --------------------------------- | -------------------------------------------------------- |
-| `get_model_schema(model_id)`      | Full model structure as JSON (detailed)                  |
-| `list_dimensions(model_id)`       | List all dimensions in a model                           |
-| `get_dimension(model_id, name)`   | Get a single dimension by name                           |
-| `list_measures(model_id)`         | List all measures in a model                             |
-| `get_measure(model_id, name)`     | Get a single measure by name                             |
-| `list_metrics(model_id)`          | List all metrics in a model                              |
-| `get_metric(model_id, name)`      | Get a single metric by name                              |
-| `explain_artefact(model_id, name)`| Explain lineage of a dimension, measure, or metric       |
-| `find_artefacts(model_id, query)` | Search artefacts (exact / synonym / fuzzy buckets)       |
-| `list_examples(model_id, intent?)`| List authored example queries (filterable by intent tag) |
-| `get_example(model_id, name)`     | Get one example with query + compiled SQL preview        |
-| `get_join_graph(model_id)`        | Return the join graph as an adjacency list               |
+| MCP Tool                           | Description                                              |
+| ---------------------------------- | -------------------------------------------------------- |
+| `get_model_schema(model_id)`       | Full model structure as JSON (detailed)                  |
+| `list_artefacts(model_id, kind?, name?)` | **Exact, deterministic lookup** — all artefacts, one kind, or one named artefact (full records) |
+| `find_artefacts(model_id, query, kind?)` | **Fuzzy, ranked search** — resolve a vague term to real artefact names (exact / synonym / fuzzy) |
+| `explain_artefact(model_id, name)` | Explain lineage of a dimension, measure, or metric       |
+| `list_examples(model_id, intent?)` | List authored example queries (filterable by intent tag) |
+| `get_example(model_id, name)`      | Get one example with query + compiled SQL preview        |
+| `get_join_graph(model_id)`         | Return the join graph as an adjacency list               |
 
 ### Query, execution & diagrams
 
-| MCP Tool                          | Description                                              |
-| --------------------------------- | -------------------------------------------------------- |
-| `compile_query(...)`              | Compile a semantic query (QueryObject) to SQL            |
-| `execute_query(...)`              | Compile and execute a QueryObject, returning SQL + rows  |
-| `compile_obsql(model_id, sql, ...)` | Compile an OBSQL (natural SQL) query to SQL            |
+| MCP Tool                            | Description                                              |
+| ----------------------------------- | -------------------------------------------------------- |
+| `compile_query(...)`                | Compile a semantic query (QueryObject) to SQL            |
+| `execute_query(...)`                | Compile and execute a QueryObject, returning SQL + rows  |
+| `compile_obsql(model_id, sql, ...)` | Compile an OBSQL (natural SQL) query to SQL              |
 | `execute_obsql(model_id, sql, ...)` | Compile and execute an OBSQL query, returning SQL + rows |
-| `plan_query(model_id, ...)`       | Planner view (no SQL); optional warehouse `EXPLAIN`      |
-| `run_batch(queries, ...)`         | One-shot: load a model + run N queries in parallel       |
-| `get_model_diagram(model_id)`     | Generate a Mermaid ER diagram for a loaded model         |
+| `plan_query(model_id, ...)`         | Planner view (no SQL); optional warehouse `EXPLAIN`      |
+| `run_batch(queries, ...)`           | One-shot: load a model + run N queries in parallel       |
+| `get_model_diagram(model_id)`       | Generate a Mermaid ER diagram for a loaded model         |
 
 ### Semantic graph (RDF / SPARQL)
 
-| MCP Tool                          | Description                                              |
-| --------------------------------- | -------------------------------------------------------- |
-| `get_graph(model_id)`             | Return the model as OBSL-Core RDF (Turtle)               |
-| `sparql_query(model_id, query)`   | Run a read-only SPARQL query (SELECT / ASK)              |
+| MCP Tool                        | Description                                 |
+| ------------------------------- | ------------------------------------------- |
+| `get_graph(model_id)`           | Return the model as OBSL-Core RDF (Turtle)  |
+| `sparql_query(model_id, query)` | Run a read-only SPARQL query (SELECT / ASK) |
 
 ### References
 
-| MCP Tool                          | Description                                              |
-| --------------------------------- | -------------------------------------------------------- |
-| `get_obml_reference()`            | OBML (model authoring) grammar reference                 |
-| `get_obsql_reference()`           | OBSQL (natural SQL surface) grammar reference            |
-| `list_references()`               | Index of all references published by the API             |
-| `get_json_schema(name)`           | JSON Schema for `obml` (model) or `query` (QueryObject)  |
+| MCP Tool                | Description                                             |
+| ----------------------- | ------------------------------------------------------- |
+| `get_obml_reference()`  | OBML (model authoring) grammar reference                |
+| `get_obsql_reference()` | OBSQL (natural SQL surface) grammar reference           |
+| `list_references()`     | Index of all references published by the API            |
+| `get_json_schema(name)` | JSON Schema for `obml` (model) or `query` (QueryObject) |
 
 ### Utilities
 
-| MCP Tool                          | Description                                              |
-| --------------------------------- | -------------------------------------------------------- |
-| `list_dialects()`                 | List available SQL dialects and capabilities             |
-| `get_settings()`                  | Get API config (modes, TTL, oneshot batch limits)        |
-| `convert_osi_to_obml(input_yaml)` | Convert OSI YAML to OBML format                          |
-| `convert_obml_to_osi(input_yaml)` | Convert OBML YAML to OSI format                          |
+| MCP Tool                          | Description                                  |
+| --------------------------------- | -------------------------------------------- |
+| `list_dialects()`                 | List available SQL dialects and capabilities |
+| `convert_osi_to_obml(input_yaml)` | Convert OSI YAML to OBML format              |
+| `convert_obml_to_osi(input_yaml)` | Convert OBML YAML to OSI format              |
+
+## Design-time vs run-time tool switching
+
+The server presents a **phase-scoped tool surface**: instead of listing all
+~30 tools at once, it shows only the tools that make sense for where you are in
+the model lifecycle. About half the tools are meaningless until a model is
+loaded (`compile_query`, `execute_query`, `list_artefacts`, …) and the rest are
+about authoring or pure file transforms (`get_obml_reference`,
+`convert_obml_to_osi`, …). Splitting them keeps the surface small and prevents a
+whole class of error — calling a query tool with no model loaded.
+
+### The two phases
+
+| Phase           | When              | Visible tools                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| --------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Design-time** | no model loaded   | `load_model`, `run_batch`, `get_obml_reference`, `get_obsql_reference`, `list_references`, `get_json_schema`, `list_dialects`, `convert_obml_to_osi`, `convert_osi_to_obml`                                                                                                                                                                                                                                                     |
+| **Run-time**    | a model is loaded | everything above **plus** `describe_model`, `compile_query`, `execute_query`, `plan_query`, `compile_obsql`, `execute_obsql`, `list_artefacts`, `find_artefacts`, `explain_artefact`, `get_model_schema`, `get_model_diagram`, `get_graph`, `get_join_graph`, `sparql_query`, `list_examples`, `get_example`, `list_models`, `remove_model` |
+
+The design-time/transition verbs (`load_model`, `run_batch`, references,
+converters) stay visible in both phases — only the run-time verbs are hidden
+until a model is loaded.
+
+### Lifecycle and re-listing
+
+```
+                    load_model  (returns "re-list" signal)
+   ┌──────────────┐ ───────────────────────────────────▶ ┌────────────┐
+   │ design-time  │                                      │  run-time  │
+   │ (no model)   │ ◀─────────────────────────────────── │ (model[s]  │
+   └──────────────┘  remove_model (last model) / TTL     │  loaded)   │
+                     expiry — back to design-time        └────────────┘
+```
+
+The MCP `tools/list` response is filtered to the active phase. Because the
+stateless MCP spec makes push notifications (`notifications/tools/list_changed`)
+unreliable, transitions are **pull-based**: `load_model` (design → run) and
+`remove_model` (run → design, once no models remain) return a short signal
+telling the client to **re-list its tools** and pick up the changed surface.
+
+### Guard against premature calls
+
+If a client calls a run-time verb while still in the design phase (e.g. a stale
+host that hasn't re-listed yet), the server returns a **structured error**
+rather than an opaque failure:
+
+> No model loaded — '`compile_query`' is a run-time tool and is not available
+> yet. Call `load_model` first, then re-list tools.
+
+### Capability gating (orthogonal to phase)
+
+Separately from lifecycle phase, a tool can be hidden because the server is
+*configured* not to support it. The execution tools `execute_query` /
+`execute_obsql` are gated on the API's `query_execute` capability: when the
+server runs **compile-only** they are dropped from `tools/list` and calling them
+returns a structured error (`compile_query` / `compile_obsql` stay available so
+you can still generate SQL). This composes with phase — a verb is listed only if
+its **phase is active *and* its capability is enabled**. The mechanism is a
+general capability registry, so future "the server can't do X here" flags hide
+their tools the same way.
+
+### Single-model mode
+
+When the API runs in **single-model mode** a model is pre-loaded at startup, so
+the server is permanently in the run-time phase — every applicable tool is
+listed from the first request and there is no `load_model` step.
+
+> **Note on caching hints.** The `2026-07-28` MCP spec adds `ttlMs` / `cacheScope`
+> hints on `tools/list` (SEP-2549). These are intentionally **not** set yet — the
+> fields are a release candidate, and FastMCP's list-tools hook exposes only the
+> tool list, not the result envelope. The explicit re-list signal above is the
+> primary (and spec-recommended) transition mechanism in the meantime.
 
 ## Supported SQL Dialects
 
@@ -191,7 +256,7 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 
 1. **Get reference** — call `get_obml_reference()` to learn OBML syntax
 2. **Load model** — call `load_model(model_yaml)` to get a `model_id`
-3. **Explore** — call `describe_model(model_id)` or use discovery tools (`list_dimensions`, `find_artefacts`, `explain_artefact`, etc.)
+3. **Explore** — call `describe_model(model_id)` or use discovery tools (`list_artefacts`, `find_artefacts`, `explain_artefact`)
 4. **Query** — call `compile_query(model_id, dimensions=[...], measures=[...])` to generate SQL
 5. **Execute** — call `execute_query(model_id, dimensions=[...], measures=[...])` to run SQL and get results (requires `QUERY_EXECUTE=true` on the API)
 
@@ -199,13 +264,13 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 
 Use the OrionBelt Semantic Layer MCP server with popular AI agent frameworks and automation platforms:
 
-| Framework | Transport | Guide |
-|-----------|-----------|-------|
+| Framework             | Transport        | Guide                                                                            |
+| --------------------- | ---------------- | -------------------------------------------------------------------------------- |
 | **OpenAI Agents SDK** | stdio, HTTP, SSE | [docs/integrations/openai-agents-sdk.md](docs/integrations/openai-agents-sdk.md) |
-| **LangChain** | stdio, HTTP | [docs/integrations/langchain.md](docs/integrations/langchain.md) |
-| **Google ADK** | stdio, HTTP, SSE | [docs/integrations/google-adk.md](docs/integrations/google-adk.md) |
-| **n8n** | HTTP, SSE | [docs/integrations/n8n.md](docs/integrations/n8n.md) |
-| **CrewAI** | stdio, HTTP | [docs/integrations/crewai.md](docs/integrations/crewai.md) |
+| **LangChain**         | stdio, HTTP      | [docs/integrations/langchain.md](docs/integrations/langchain.md)                 |
+| **Google ADK**        | stdio, HTTP, SSE | [docs/integrations/google-adk.md](docs/integrations/google-adk.md)               |
+| **n8n**               | HTTP, SSE        | [docs/integrations/n8n.md](docs/integrations/n8n.md)                             |
+| **CrewAI**            | stdio, HTTP      | [docs/integrations/crewai.md](docs/integrations/crewai.md)                       |
 
 Each guide includes quick-start examples, multi-agent patterns, and connection options for both the hosted demo and self-hosted deployments.
 
@@ -267,8 +332,8 @@ custom connector**, paste the URL above. No file editing or `npx` required.
 
 > **Why `mcp-remote`?** Claude Desktop's `claude_desktop_config.json` schema
 > currently only validates stdio entries (`command` + `args`). A bare
-> `{"url": "…"}` entry is rejected with *"not valid MCP server configurations
-> and were skipped"*. `mcp-remote` runs a local stdio bridge that forwards to
+> `{"url": "…"}` entry is rejected with _"not valid MCP server configurations
+> and were skipped"_. `mcp-remote` runs a local stdio bridge that forwards to
 > the HTTPS endpoint, so Claude Desktop sees a normal stdio server. **Claude
 > Code** does support `{"type": "url", "url": "…"}` natively — see below.
 
