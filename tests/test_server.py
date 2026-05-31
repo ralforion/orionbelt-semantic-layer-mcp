@@ -3057,15 +3057,28 @@ def test_execute_obsql_tsv_passthrough(mock_api: respx.MockRouter):
 # ---------------------------------------------------------------------------
 
 
-def test_tool_phase_partition_no_overlap():
-    """Run-time and neutral tool sets are disjoint (each verb has one phase)."""
-    assert server._RUN_TIME_TOOLS.isdisjoint(server._NEUTRAL_TOOLS)
-    # Spot-check a few canonical assignments from the plan.
-    assert "compile_query" in server._RUN_TIME_TOOLS
-    assert "execute_query" in server._RUN_TIME_TOOLS
-    assert "load_model" in server._NEUTRAL_TOOLS
-    assert "get_obml_reference" in server._NEUTRAL_TOOLS
-    assert "convert_obml_to_osi" in server._NEUTRAL_TOOLS
+def test_tool_phase_buckets_are_disjoint():
+    """The three phase buckets are pairwise disjoint (each verb has one bucket)."""
+    b1, b2, b3 = server._LIFECYCLE_TOOLS, server._DESIGN_TOOLS, server._RUN_TIME_TOOLS
+    assert b1.isdisjoint(b2)
+    assert b1.isdisjoint(b3)
+    assert b2.isdisjoint(b3)
+    # Spot-check canonical assignments from the spec.
+    assert {"load_model", "remove_model"} <= b1
+    assert {"get_obml_reference", "convert_obml_to_osi", "list_dialects"} <= b2
+    assert {"compile_query", "execute_query", "list_artefacts", "find_artefacts"} <= b3
+
+
+def test_tool_phase_buckets_classify_every_registered_tool():
+    """Every registered agent-facing tool belongs to exactly one bucket."""
+    server._single_model_mode = False
+    server._register_multi_model_tools()
+    server._register_execute_query_tool()
+    registered = {t.name for t in asyncio.run(server.mcp._list_tools())}
+
+    classified = server._LIFECYCLE_TOOLS | server._DESIGN_TOOLS | server._RUN_TIME_TOOLS
+    unclassified = registered - classified
+    assert not unclassified, f"tools missing a phase bucket: {sorted(unclassified)}"
 
 
 def test_current_phase_multi_model_transitions():
@@ -3100,39 +3113,46 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def test_phase_middleware_hides_runtime_tools_in_design():
-    """on_list_tools drops run-time verbs in the design phase, keeps neutral."""
+def _all_bucket_sample():
+    """One fake tool from each bucket for swap assertions."""
+    return [
+        _fake_tool("load_model"),  # bucket 1 — lifecycle
+        _fake_tool("remove_model"),  # bucket 1 — lifecycle
+        _fake_tool("get_obml_reference"),  # bucket 2 — design-only
+        _fake_tool("convert_obml_to_osi"),  # bucket 2 — design-only
+        _fake_tool("compile_query"),  # bucket 3 — run-only
+        _fake_tool("list_artefacts"),  # bucket 3 — run-only
+    ]
+
+
+def test_phase_middleware_design_shows_lifecycle_plus_design_only():
+    """Design phase → lifecycle + design-only; run-only verbs hidden."""
     server._single_model_mode = False
     server._loaded_model_ids.clear()
     mw = server.PhaseMiddleware()
-    tools = [
-        _fake_tool("load_model"),
-        _fake_tool("get_obml_reference"),
-        _fake_tool("compile_query"),
-        _fake_tool("execute_query"),
-    ]
 
     async def call_next(_ctx):
-        return tools
+        return _all_bucket_sample()
 
-    out = _run(mw.on_list_tools(object(), call_next))
-    names = {t.name for t in out}
-    assert names == {"load_model", "get_obml_reference"}
+    names = {t.name for t in _run(mw.on_list_tools(object(), call_next))}
+    assert names == {"load_model", "remove_model", "get_obml_reference", "convert_obml_to_osi"}
 
 
-def test_phase_middleware_lists_all_tools_in_run():
-    """on_list_tools returns everything once a model is loaded."""
+def test_phase_middleware_run_swaps_out_design_tools():
+    """Run phase → lifecycle + run-only; design/reference verbs GONE (a swap)."""
     server._single_model_mode = False
     server._loaded_model_ids.clear()
     server._mark_model_loaded("m001")
     mw = server.PhaseMiddleware()
-    tools = [_fake_tool("load_model"), _fake_tool("compile_query")]
 
     async def call_next(_ctx):
-        return tools
+        return _all_bucket_sample()
 
-    out = _run(mw.on_list_tools(object(), call_next))
-    assert {t.name for t in out} == {"load_model", "compile_query"}
+    names = {t.name for t in _run(mw.on_list_tools(object(), call_next))}
+    assert names == {"load_model", "remove_model", "compile_query", "list_artefacts"}
+    # The key fix: design/reference tools must not leak into the run surface.
+    assert "get_obml_reference" not in names
+    assert "convert_obml_to_osi" not in names
 
 
 def test_phase_middleware_guard_blocks_runtime_call_in_design():
@@ -3149,17 +3169,18 @@ def test_phase_middleware_guard_blocks_runtime_call_in_design():
         _run(mw.on_call_tool(ctx, call_next))
 
 
-def test_phase_middleware_guard_allows_neutral_call_in_design():
-    """Neutral verbs are callable in the design phase."""
+def test_phase_middleware_guard_allows_lifecycle_call_in_design():
+    """Lifecycle verbs (load_model/remove_model) are callable in the design phase."""
     server._single_model_mode = False
     server._loaded_model_ids.clear()
     mw = server.PhaseMiddleware()
-    ctx = types.SimpleNamespace(message=types.SimpleNamespace(name="load_model"))
 
     async def call_next(_ctx):
         return "ok"
 
-    assert _run(mw.on_call_tool(ctx, call_next)) == "ok"
+    for verb in ("load_model", "remove_model"):
+        ctx = types.SimpleNamespace(message=types.SimpleNamespace(name=verb))
+        assert _run(mw.on_call_tool(ctx, call_next)) == "ok"
 
 
 def test_phase_middleware_guard_allows_runtime_call_in_run():

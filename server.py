@@ -180,22 +180,55 @@ _loaded_model_ids: set[str] = set()
 # Tool phase model — design-time vs run-time surface switching
 # ---------------------------------------------------------------------------
 #
-# The surface flips between two phase-scoped tool sets as the lifecycle moves
-# load → query → unload (design/PLAN_tool_phase_switching.md, Option A):
+# The surface SWAPS between two phase-scoped sets as the lifecycle moves
+# load → query → unload (design/PLAN_tool_phase_switching.md, Option A). Tools
+# fall into three buckets:
 #
-#   * design-time — no model loaded; authoring + pure file transforms.
-#   * run-time    — a model is loaded; queries and introspection are valid.
+#   * lifecycle (bucket 1) — ALWAYS listed. Transition verbs that must stay
+#     available in the run phase so a second model can be loaded mid-session
+#     (max_models_per_session = 10).
+#   * design-only (bucket 2) — listed ONLY in the design phase (no model
+#     loaded). Authoring/reference + pure file transforms. HIDDEN in run phase
+#     so the run surface isn't polluted with authoring noise.
+#   * run-only (bucket 3) — listed ONLY in the run phase (a model is loaded):
+#     queries, introspection, execution.
 #
-# Phase is *derived from explicit state* (is a model resolvable for this
-# session?), never from hidden per-connection transport state, so it stays
+#   design phase (no model) → bucket 1 + bucket 2
+#   run phase   (model[s])  → bucket 1 + bucket 3   (a SWAP, not additive)
+#
+# Phase is *derived from explicit loaded-model state* (is a model resolvable for
+# this session?), never from hidden per-connection transport state, so it stays
 # stateless-clean. ``tools/list`` is filtered per phase by ``PhaseMiddleware``;
-# a run-time verb invoked in the design phase is rejected with a structured
+# a run-only verb invoked in the design phase is rejected with a structured
 # guard error steering the host to ``load_model`` + re-list.
 
 PHASE_DESIGN = "design"
 PHASE_RUN = "run"
 
-# Run-time verbs: only meaningful once a model is loaded. Names span both the
+# Bucket 1 — lifecycle/transition verbs. Always listed, in both phases.
+_LIFECYCLE_TOOLS: frozenset[str] = frozenset(
+    {
+        "load_model",
+        "remove_model",
+    }
+)
+
+# Bucket 2 — design-only. Authoring/reference + file transforms. Listed only in
+# the design phase; hidden once a model is loaded.
+_DESIGN_TOOLS: frozenset[str] = frozenset(
+    {
+        "get_obml_reference",
+        "get_obsql_reference",
+        "list_references",
+        "get_json_schema",
+        "list_dialects",
+        "convert_osi_to_obml",
+        "convert_obml_to_osi",
+    }
+)
+
+# Bucket 3 — run-only. Queries, introspection, execution. Listed only once a
+# model is loaded; gated by the structured guard error otherwise. Names span the
 # single-model and multi-model registrations (same names, different signatures).
 _RUN_TIME_TOOLS: frozenset[str] = frozenset(
     {
@@ -217,24 +250,6 @@ _RUN_TIME_TOOLS: frozenset[str] = frozenset(
         "get_join_graph",
         "sparql_query",
         "list_models",
-        "remove_model",
-    }
-)
-
-# Neutral verbs: safe to list in both phases. ``load_model`` is the transition
-# tool (design → run) and stays visible in the run phase too, so additional
-# models can be loaded; ``run_batch`` is self-contained (loads/references a
-# model in one call) so it never depends on prior session state.
-_NEUTRAL_TOOLS: frozenset[str] = frozenset(
-    {
-        "get_obml_reference",
-        "get_obsql_reference",
-        "list_references",
-        "get_json_schema",
-        "list_dialects",
-        "convert_osi_to_obml",
-        "convert_obml_to_osi",
-        "load_model",
         "run_batch",
     }
 )
@@ -268,8 +283,22 @@ def _current_phase() -> str:
 
 
 def _is_runtime_tool(name: str) -> bool:
-    """True if ``name`` is a run-time-only verb (gated by loaded-model state)."""
+    """True if ``name`` is a run-only verb (bucket 3, gated by loaded-model state)."""
     return name in _RUN_TIME_TOOLS
+
+
+def _tool_visible_in_phase(name: str, design_phase: bool) -> bool:
+    """Phase visibility for ``name``: lifecycle always; otherwise swap by phase.
+
+    design phase → lifecycle + design-only; run phase → lifecycle + run-only.
+    A name in no bucket is treated as run-only (conservative: hidden until a
+    model is loaded) — the partition test keeps every registered tool classified.
+    """
+    if name in _LIFECYCLE_TOOLS:
+        return True
+    if design_phase:
+        return name in _DESIGN_TOOLS
+    return name not in _DESIGN_TOOLS
 
 
 # ---------------------------------------------------------------------------
@@ -367,8 +396,9 @@ class PhaseMiddleware(Middleware):
             # configured not to support, in any phase.
             if not _tool_capability_ok(t.name):
                 continue
-            # Phase gate: hide run-time-only verbs until a model is loaded.
-            if design_phase and _is_runtime_tool(t.name):
+            # Phase gate (a swap): design phase shows lifecycle + design-only;
+            # run phase shows lifecycle + run-only (design tools hidden).
+            if not _tool_visible_in_phase(t.name, design_phase):
                 continue
             visible.append(t)
         return visible

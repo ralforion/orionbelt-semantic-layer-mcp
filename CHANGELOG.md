@@ -29,16 +29,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ### Added
 
 - **Design-time vs run-time tool phase switching (Option A).** The tool
-  surface now flips between two phase-scoped sets as the model lifecycle
-  moves load → query → unload. Before a model is loaded, only design-time
-  verbs are listed (references, schema, converters, `list_dialects`,
-  `load_model`, `run_batch`); run-time verbs (`compile_query`,
-  `execute_query`, `describe_model`, introspection, …) appear once
-  `load_model` succeeds and disappear again once every model is removed.
-  Single-model mode is permanently run-time (model pre-loaded). The phase
-  is derived from explicit loaded-model state, not hidden per-connection
-  state, so it stays stateless-clean. Implemented via a `PhaseMiddleware`
-  that filters `tools/list` and guards `tools/call`.
+  surface **swaps** between two phase-scoped sets as the model lifecycle
+  moves load → query → unload, using three buckets:
+  - **lifecycle** (`load_model`, `remove_model`) — always listed, so a second
+    model can be loaded mid-session;
+  - **design-only** (references, `get_json_schema`, `list_dialects`,
+    converters) — listed only before a model is loaded, and **hidden** in the
+    run phase so authoring tools don't pollute the query surface;
+  - **run-only** (`compile_query`, `execute_query`, `describe_model`,
+    `list_artefacts`, introspection, `run_batch`, …) — listed only once a
+    model is loaded.
+
+  Design phase shows lifecycle + design-only; run phase shows lifecycle +
+  run-only (a swap, not additive). Single-model mode is permanently run-time
+  (model pre-loaded). The phase is derived from explicit loaded-model state,
+  not hidden per-connection state, so it stays stateless-clean. Implemented
+  via a `PhaseMiddleware` that filters `tools/list` and guards `tools/call`.
 - **Structured "no model loaded" guard.** Invoking a run-time verb while in
   the design phase returns a structured error steering the host to call
   `load_model` and re-list, instead of an opaque downstream failure.

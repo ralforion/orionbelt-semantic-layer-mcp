@@ -187,37 +187,42 @@ about authoring or pure file transforms (`get_obml_reference`,
 `convert_obml_to_osi`, …). Splitting them keeps the surface small and prevents a
 whole class of error — calling a query tool with no model loaded.
 
-### The two phases
+### Three buckets, swapped by phase
 
-| Phase           | When              | Visible tools                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| --------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Design-time** | no model loaded   | `load_model`, `run_batch`, `get_obml_reference`, `get_obsql_reference`, `list_references`, `get_json_schema`, `list_dialects`, `convert_obml_to_osi`, `convert_osi_to_obml`                                                                                                                                                                                                                                                     |
-| **Run-time**    | a model is loaded | everything above **plus** `describe_model`, `compile_query`, `execute_query`, `plan_query`, `compile_obsql`, `execute_obsql`, `list_artefacts`, `find_artefacts`, `explain_artefact`, `get_model_schema`, `get_model_diagram`, `get_graph`, `get_join_graph`, `sparql_query`, `list_examples`, `get_example`, `list_models`, `remove_model` |
+Tools fall into three buckets. The visible surface is a **swap** at the
+load/unload transition, not additive — the run phase does **not** show the
+design/reference tools:
 
-The design-time/transition verbs (`load_model`, `run_batch`, references,
-converters) stay visible in both phases — only the run-time verbs are hidden
-until a model is loaded.
-
-### Lifecycle and re-listing
+| Bucket           | Listed when            | Tools                                                                                                                                                                                                                                                                                  |
+| ---------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Lifecycle**    | always (both phases)   | `load_model`, `remove_model` — transition verbs; stay available in the run phase so a second model can be loaded mid-session (up to `max_models_per_session`)                                                                                                                          |
+| **Design-only**  | only when no model loaded | `get_obml_reference`, `get_obsql_reference`, `list_references`, `get_json_schema`, `list_dialects`, `convert_obml_to_osi`, `convert_osi_to_obml`                                                                                                                                  |
+| **Run-only**     | only when a model is loaded | `describe_model`, `get_model_schema`, `get_model_diagram`, `list_artefacts`, `find_artefacts`, `explain_artefact`, `plan_query`, `compile_query`, `compile_obsql`, `execute_query`, `execute_obsql`, `list_examples`, `get_example`, `get_graph`, `get_join_graph`, `sparql_query`, `list_models`, `run_batch` |
 
 ```
-                    load_model  (returns "re-list" signal)
-   ┌──────────────┐ ───────────────────────────────────▶ ┌────────────┐
-   │ design-time  │                                      │  run-time  │
-   │ (no model)   │ ◀─────────────────────────────────── │ (model[s]  │
-   └──────────────┘  remove_model (last model) / TTL     │  loaded)   │
-                     expiry — back to design-time        └────────────┘
+                          load_model  (returns "re-list" signal)
+   ┌────────────────────┐ ─────────────────────────────────▶ ┌──────────────────┐
+   │ design phase       │                                     │ run phase        │
+   │ lifecycle + design │ ◀───────────────────────────────── │ lifecycle + run  │
+   └────────────────────┘  remove_model (last model) / TTL    └──────────────────┘
+                           expiry — back to design phase
 ```
+
+So **design phase → lifecycle + design-only**, **run phase → lifecycle +
+run-only**. Design/reference tools are hidden once a model is loaded, keeping
+the run surface focused on querying.
+
+### Re-listing
 
 The MCP `tools/list` response is filtered to the active phase. Because the
 stateless MCP spec makes push notifications (`notifications/tools/list_changed`)
 unreliable, transitions are **pull-based**: `load_model` (design → run) and
 `remove_model` (run → design, once no models remain) return a short signal
-telling the client to **re-list its tools** and pick up the changed surface.
+telling the client to **re-list its tools** and pick up the swapped surface.
 
 ### Guard against premature calls
 
-If a client calls a run-time verb while still in the design phase (e.g. a stale
+If a client calls a run-only verb while still in the design phase (e.g. a stale
 host that hasn't re-listed yet), the server returns a **structured error**
 rather than an opaque failure:
 
