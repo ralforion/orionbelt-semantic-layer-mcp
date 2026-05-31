@@ -31,17 +31,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - **Design-time vs run-time tool phase switching (Option A).** The tool
   surface **swaps** between two phase-scoped sets as the model lifecycle
   moves load → query → unload, using three buckets:
-  - **lifecycle** (`load_model`, `remove_model`) — always listed, so a second
-    model can be loaded mid-session;
+  - **always** (`load_model`, `remove_model` — so a second model can be loaded
+    mid-session; plus `run_batch`, the self-contained one-shot, which needs no
+    prior session state) — listed in both phases;
   - **design-only** (references, `get_json_schema`, `list_dialects`,
     converters) — listed only before a model is loaded, and **hidden** in the
     run phase so authoring tools don't pollute the query surface;
   - **run-only** (`compile_query`, `execute_query`, `describe_model`,
-    `list_artefacts`, introspection, `run_batch`, …) — listed only once a
-    model is loaded.
+    `list_artefacts`, introspection, …) — listed only once a model is loaded.
 
-  Design phase shows lifecycle + design-only; run phase shows lifecycle +
-  run-only (a swap, not additive). Single-model mode is permanently run-time
+  Design phase shows always + design-only; run phase shows always + run-only
+  (a swap, not additive). Single-model mode is permanently run-time
   (model pre-loaded). The phase is derived from explicit loaded-model state,
   not hidden per-connection state, so it stays stateless-clean. Implemented
   via a `PhaseMiddleware` that filters `tools/list` and guards `tools/call`.

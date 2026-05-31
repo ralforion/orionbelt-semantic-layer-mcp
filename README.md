@@ -11,7 +11,7 @@
 [![OrionBelt Semantic Layer 2.7](https://img.shields.io/badge/OrionBelt_Semantic_Layer-2.7-0054A6.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/blob/main/LICENSE)
-[![FastMCP](https://img.shields.io/badge/FastMCP-3.2+-8A2BE2)](https://gofastmcp.com)
+[![FastMCP](https://img.shields.io/badge/FastMCP-3.3+-8A2BE2)](https://gofastmcp.com)
 [![Pydantic v2](https://img.shields.io/badge/Pydantic-v2-E92063.svg?logo=pydantic&logoColor=white)](https://docs.pydantic.dev)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://docs.astral.sh/ruff/)
 
@@ -131,15 +131,15 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 
 ### Model discovery
 
-| MCP Tool                           | Description                                              |
-| ---------------------------------- | -------------------------------------------------------- |
-| `get_model_schema(model_id)`       | Full model structure as JSON (detailed)                  |
-| `list_artefacts(model_id, kind?, name?)` | **Exact, deterministic lookup** — all artefacts, one kind, or one named artefact (full records) |
+| MCP Tool                                 | Description                                                                                      |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `get_model_schema(model_id)`             | Full model structure as JSON (detailed)                                                          |
+| `list_artefacts(model_id, kind?, name?)` | **Exact, deterministic lookup** — all artefacts, one kind, or one named artefact (full records)  |
 | `find_artefacts(model_id, query, kind?)` | **Fuzzy, ranked search** — resolve a vague term to real artefact names (exact / synonym / fuzzy) |
-| `explain_artefact(model_id, name)` | Explain lineage of a dimension, measure, or metric       |
-| `list_examples(model_id, intent?)` | List authored example queries (filterable by intent tag) |
-| `get_example(model_id, name)`      | Get one example with query + compiled SQL preview        |
-| `get_join_graph(model_id)`         | Return the join graph as an adjacency list               |
+| `explain_artefact(model_id, name)`       | Explain lineage of a dimension, measure, or metric                                               |
+| `list_examples(model_id, intent?)`       | List authored example queries (filterable by intent tag)                                         |
+| `get_example(model_id, name)`            | Get one example with query + compiled SQL preview                                                |
+| `get_join_graph(model_id)`               | Return the join graph as an adjacency list                                                       |
 
 ### Query, execution & diagrams
 
@@ -193,24 +193,24 @@ Tools fall into three buckets. The visible surface is a **swap** at the
 load/unload transition, not additive — the run phase does **not** show the
 design/reference tools:
 
-| Bucket           | Listed when            | Tools                                                                                                                                                                                                                                                                                  |
-| ---------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Lifecycle**    | always (both phases)   | `load_model`, `remove_model` — transition verbs; stay available in the run phase so a second model can be loaded mid-session (up to `max_models_per_session`)                                                                                                                          |
-| **Design-only**  | only when no model loaded | `get_obml_reference`, `get_obsql_reference`, `list_references`, `get_json_schema`, `list_dialects`, `convert_obml_to_osi`, `convert_osi_to_obml`                                                                                                                                  |
-| **Run-only**     | only when a model is loaded | `describe_model`, `get_model_schema`, `get_model_diagram`, `list_artefacts`, `find_artefacts`, `explain_artefact`, `plan_query`, `compile_query`, `compile_obsql`, `execute_query`, `execute_obsql`, `list_examples`, `get_example`, `get_graph`, `get_join_graph`, `sparql_query`, `list_models`, `run_batch` |
+| Bucket          | Listed when                 | Tools                                                                                                                                                                                                                                                                                             |
+| --------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Always**      | always (both phases)        | `load_model`, `remove_model` (transition verbs — stay available in the run phase so a second model can be loaded mid-session, up to `max_models_per_session`); `run_batch` (self-contained one-shot — loads/references a model inline, so it needs no prior session state)                        |
+| **Design-only** | only when no model loaded   | `get_obml_reference`, `get_obsql_reference`, `list_references`, `get_json_schema`, `list_dialects`, `convert_obml_to_osi`, `convert_osi_to_obml`                                                                                                                                                  |
+| **Run-only**    | only when a model is loaded | `describe_model`, `get_model_schema`, `get_model_diagram`, `list_artefacts`, `find_artefacts`, `explain_artefact`, `plan_query`, `compile_query`, `compile_obsql`, `execute_query`, `execute_obsql`, `list_examples`, `get_example`, `get_graph`, `get_join_graph`, `sparql_query`, `list_models` |
 
 ```
-                          load_model  (returns "re-list" signal)
-   ┌────────────────────┐ ─────────────────────────────────▶ ┌──────────────────┐
-   │ design phase       │                                     │ run phase        │
-   │ lifecycle + design │ ◀───────────────────────────────── │ lifecycle + run  │
-   └────────────────────┘  remove_model (last model) / TTL    └──────────────────┘
-                           expiry — back to design phase
+                       load_model  (returns "re-list" signal)
+   ┌─────────────────┐ ────────────────────────────────▶ ┌───────────────┐
+   │ design phase    │                                   │ run phase     │
+   │ always + design │ ◀───────────────────────────────  │ always + run  │
+   └─────────────────┘  remove_model (last model) / TTL  └───────────────┘
+                        expiry — back to design phase
 ```
 
-So **design phase → lifecycle + design-only**, **run phase → lifecycle +
-run-only**. Design/reference tools are hidden once a model is loaded, keeping
-the run surface focused on querying.
+So **design phase → always + design-only**, **run phase → always + run-only**.
+Design/reference tools are hidden once a model is loaded, keeping the run
+surface focused on querying.
 
 ### Re-listing
 
@@ -232,12 +232,12 @@ rather than an opaque failure:
 ### Capability gating (orthogonal to phase)
 
 Separately from lifecycle phase, a tool can be hidden because the server is
-*configured* not to support it. The execution tools `execute_query` /
+_configured_ not to support it. The execution tools `execute_query` /
 `execute_obsql` are gated on the API's `query_execute` capability: when the
 server runs **compile-only** they are dropped from `tools/list` and calling them
 returns a structured error (`compile_query` / `compile_obsql` stay available so
 you can still generate SQL). This composes with phase — a verb is listed only if
-its **phase is active *and* its capability is enabled**. The mechanism is a
+its **phase is active _and_ its capability is enabled**. The mechanism is a
 general capability registry, so future "the server can't do X here" flags hide
 their tools the same way.
 

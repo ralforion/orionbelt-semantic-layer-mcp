@@ -184,9 +184,12 @@ _loaded_model_ids: set[str] = set()
 # load → query → unload (design/PLAN_tool_phase_switching.md, Option A). Tools
 # fall into three buckets:
 #
-#   * lifecycle (bucket 1) — ALWAYS listed. Transition verbs that must stay
-#     available in the run phase so a second model can be loaded mid-session
-#     (max_models_per_session = 10).
+#   * always (bucket 1) — ALWAYS listed, in both phases. The lifecycle/
+#     transition verbs (load_model, remove_model), which must stay available in
+#     the run phase so a second model can be loaded mid-session
+#     (max_models_per_session = 10); plus run_batch, the self-contained one-shot
+#     (loads/references a model inline in one call, so it depends on no prior
+#     session state and is valid in either phase).
 #   * design-only (bucket 2) — listed ONLY in the design phase (no model
 #     loaded). Authoring/reference + pure file transforms. HIDDEN in run phase
 #     so the run surface isn't polluted with authoring noise.
@@ -205,11 +208,13 @@ _loaded_model_ids: set[str] = set()
 PHASE_DESIGN = "design"
 PHASE_RUN = "run"
 
-# Bucket 1 — lifecycle/transition verbs. Always listed, in both phases.
-_LIFECYCLE_TOOLS: frozenset[str] = frozenset(
+# Bucket 1 — always listed, in both phases: lifecycle/transition verbs plus the
+# self-contained one-shot batch (depends on no prior session state).
+_ALWAYS_TOOLS: frozenset[str] = frozenset(
     {
         "load_model",
         "remove_model",
+        "run_batch",
     }
 )
 
@@ -250,7 +255,6 @@ _RUN_TIME_TOOLS: frozenset[str] = frozenset(
         "get_join_graph",
         "sparql_query",
         "list_models",
-        "run_batch",
     }
 )
 
@@ -290,11 +294,11 @@ def _is_runtime_tool(name: str) -> bool:
 def _tool_visible_in_phase(name: str, design_phase: bool) -> bool:
     """Phase visibility for ``name``: lifecycle always; otherwise swap by phase.
 
-    design phase → lifecycle + design-only; run phase → lifecycle + run-only.
+    design phase → always + design-only; run phase → always + run-only.
     A name in no bucket is treated as run-only (conservative: hidden until a
     model is loaded) — the partition test keeps every registered tool classified.
     """
-    if name in _LIFECYCLE_TOOLS:
+    if name in _ALWAYS_TOOLS:
         return True
     if design_phase:
         return name in _DESIGN_TOOLS

@@ -3059,12 +3059,12 @@ def test_execute_obsql_tsv_passthrough(mock_api: respx.MockRouter):
 
 def test_tool_phase_buckets_are_disjoint():
     """The three phase buckets are pairwise disjoint (each verb has one bucket)."""
-    b1, b2, b3 = server._LIFECYCLE_TOOLS, server._DESIGN_TOOLS, server._RUN_TIME_TOOLS
+    b1, b2, b3 = server._ALWAYS_TOOLS, server._DESIGN_TOOLS, server._RUN_TIME_TOOLS
     assert b1.isdisjoint(b2)
     assert b1.isdisjoint(b3)
     assert b2.isdisjoint(b3)
     # Spot-check canonical assignments from the spec.
-    assert {"load_model", "remove_model"} <= b1
+    assert {"load_model", "remove_model", "run_batch"} <= b1  # run_batch is always-on
     assert {"get_obml_reference", "convert_obml_to_osi", "list_dialects"} <= b2
     assert {"compile_query", "execute_query", "list_artefacts", "find_artefacts"} <= b3
 
@@ -3076,7 +3076,7 @@ def test_tool_phase_buckets_classify_every_registered_tool():
     server._register_execute_query_tool()
     registered = {t.name for t in asyncio.run(server.mcp._list_tools())}
 
-    classified = server._LIFECYCLE_TOOLS | server._DESIGN_TOOLS | server._RUN_TIME_TOOLS
+    classified = server._ALWAYS_TOOLS | server._DESIGN_TOOLS | server._RUN_TIME_TOOLS
     unclassified = registered - classified
     assert not unclassified, f"tools missing a phase bucket: {sorted(unclassified)}"
 
@@ -3153,6 +3153,29 @@ def test_phase_middleware_run_swaps_out_design_tools():
     # The key fix: design/reference tools must not leak into the run surface.
     assert "get_obml_reference" not in names
     assert "convert_obml_to_osi" not in names
+
+
+def test_run_batch_is_always_listed_and_unguarded():
+    """run_batch (self-contained one-shot) is visible in both phases and never guarded."""
+    server._single_model_mode = False
+    mw = server.PhaseMiddleware()
+
+    async def list_next(_ctx):
+        return [_fake_tool("run_batch"), _fake_tool("compile_query")]
+
+    async def ok(_ctx):
+        return "ok"
+
+    # Visible in the design phase (no model) and run phase (model loaded).
+    server._loaded_model_ids.clear()
+    assert "run_batch" in {t.name for t in _run(mw.on_list_tools(object(), list_next))}
+    server._mark_model_loaded("m001")
+    assert "run_batch" in {t.name for t in _run(mw.on_list_tools(object(), list_next))}
+
+    # Callable in the design phase (not a run-only verb → no guard).
+    server._loaded_model_ids.clear()
+    ctx = types.SimpleNamespace(message=types.SimpleNamespace(name="run_batch"))
+    assert _run(mw.on_call_tool(ctx, ok)) == "ok"
 
 
 def test_phase_middleware_guard_blocks_runtime_call_in_design():
