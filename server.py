@@ -221,12 +221,14 @@ PHASE_DESIGN = "design"
 PHASE_RUN = "run"
 
 # Bucket 1 — always listed, in both phases: lifecycle/transition verbs plus the
-# self-contained one-shot batch (depends on no prior session state).
+# self-contained one-shot batch (depends on no prior session state) and the
+# JSON-schema reference (needed to author execute_query payloads in either phase).
 _ALWAYS_TOOLS: frozenset[str] = frozenset(
     {
         "load_model",
         "remove_model",
         "run_batch",
+        "get_json_schema",
     }
 )
 
@@ -235,7 +237,6 @@ _ALWAYS_TOOLS: frozenset[str] = frozenset(
 _DESIGN_TOOLS: frozenset[str] = frozenset(
     {
         "get_obml_reference",
-        "get_json_schema",
         "list_dialects",
     }
 )
@@ -1766,28 +1767,10 @@ def _register_model_tools() -> None:
     ) -> str:
         """Compile and execute a semantic query (QueryObject), returning SQL + results.
 
-        Pass the query as ``query_json`` — a complete QueryObject as a JSON
-        string. Call ``get_json_schema("query")`` for the exact QueryObject
-        schema, and ``describe_model`` to discover the dimension / measure /
-        metric names to reference. If no ``limit`` is set, a server-side default
-        row limit applies.
-
-        Aggregate example::
-
-            execute_query(query_json='{
-                "select": {"dimensions": ["Country"], "measures": ["Revenue"]},
-                "where": [{"field": "Country", "op": "equals", "value": "US"}],
-                "order_by": [{"field": "Revenue", "direction": "desc"}],
-                "limit": 10
-            }')
-
-        Raw example (un-aggregated rows)::
-
-            execute_query(query_json='{
-                "select": {"fields": ["Orders.OrderDate", "Orders.Amount"],
-                           "distinct": true},
-                "limit": 100
-            }')
+        Pass ``query_json`` (QueryObject JSON string). Call
+        ``get_json_schema("query")`` for the schema, ``describe_model`` for valid
+        names, ``get_example`` for worked queries. If no ``limit`` is set, a
+        server-side default row limit applies.
 
         Args:
             query_json: Complete QueryObject as a JSON string. See

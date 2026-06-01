@@ -4,6 +4,18 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.7.9] — 2026-06-01
+
+### Changed
+
+- **`get_json_schema` is now available in the run phase too.** Moved it from the
+  design-only bucket to the always-on bucket, so it is listed in both the design
+  and run phases — agents need the QueryObject schema to author `execute_query`
+  payloads while a model is loaded.
+- **Trimmed `execute_query`'s description.** Dropped the two inline query
+  examples in favour of a concise pointer: `get_json_schema("query")` for the
+  schema, `describe_model` for valid names, and `get_example` for worked queries.
+
 ## [2.7.8] — 2026-06-01
 
 ### Changed

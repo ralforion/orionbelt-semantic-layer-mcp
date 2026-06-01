@@ -652,7 +652,7 @@ wheels = [
 
 [[package]]
 name = "orionbelt-semantic-layer-mcp"
-version = "2.7.8"
+version = "2.7.9"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },

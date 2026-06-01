@@ -2371,8 +2371,9 @@ def test_tool_phase_buckets_are_disjoint():
     assert b1.isdisjoint(b3)
     assert b2.isdisjoint(b3)
     # Spot-check canonical assignments from the spec.
-    assert {"load_model", "remove_model", "run_batch"} <= b1  # run_batch is always-on
-    assert {"get_obml_reference", "get_json_schema", "list_dialects"} <= b2
+    # run_batch and get_json_schema are always-on (both phases).
+    assert {"load_model", "remove_model", "run_batch", "get_json_schema"} <= b1
+    assert {"get_obml_reference", "list_dialects"} <= b2
     assert {"describe_model", "execute_query", "list_artefacts", "find_artefacts"} <= b3
 
 
@@ -2424,8 +2425,8 @@ def _all_bucket_sample():
     return [
         _fake_tool("load_model"),  # bucket 1 — lifecycle
         _fake_tool("remove_model"),  # bucket 1 — lifecycle
+        _fake_tool("get_json_schema"),  # bucket 1 — always-on (both phases)
         _fake_tool("get_obml_reference"),  # bucket 2 — design-only
-        _fake_tool("get_json_schema"),  # bucket 2 — design-only
         _fake_tool("describe_model"),  # bucket 3 — run-only
         _fake_tool("list_artefacts"),  # bucket 3 — run-only
     ]
@@ -2441,7 +2442,12 @@ def test_phase_middleware_design_shows_lifecycle_plus_design_only():
         return _all_bucket_sample()
 
     names = {t.name for t in _run(mw.on_list_tools(object(), call_next))}
-    assert names == {"load_model", "remove_model", "get_obml_reference", "get_json_schema"}
+    assert names == {
+        "load_model",
+        "remove_model",
+        "get_json_schema",
+        "get_obml_reference",
+    }
 
 
 def test_phase_middleware_run_swaps_out_design_tools():
@@ -2455,10 +2461,17 @@ def test_phase_middleware_run_swaps_out_design_tools():
         return _all_bucket_sample()
 
     names = {t.name for t in _run(mw.on_list_tools(object(), call_next))}
-    assert names == {"load_model", "remove_model", "describe_model", "list_artefacts"}
-    # The key fix: design/reference tools must not leak into the run surface.
+    assert names == {
+        "load_model",
+        "remove_model",
+        "get_json_schema",
+        "describe_model",
+        "list_artefacts",
+    }
+    # The key fix: design-only tools must not leak into the run surface.
     assert "get_obml_reference" not in names
-    assert "get_json_schema" not in names
+    # get_json_schema is always-on (bucket 1) — visible in the run phase too.
+    assert "get_json_schema" in names
 
 
 def test_run_batch_is_always_listed_and_unguarded():
