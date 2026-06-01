@@ -39,7 +39,7 @@ MCP_TRANSPORT=http uv run python server.py
 1. Add an **MCP Client** node to your workflow
 2. Select the credential created above
 3. Choose **List Tools** to see all available OrionBelt tools
-4. Select a tool (e.g., `describe_model`, `compile_query`)
+4. Select a tool (e.g., `describe_model`, `execute_query`)
 5. Fill in the required parameters
 
 ## Example workflows
@@ -51,7 +51,7 @@ Generate a daily SQL query from the semantic model and send it via email.
 ```
 Schedule Trigger (daily 8am)
   → MCP Client: list_measures()
-  → MCP Client: compile_query(dimensions=["Date","Region"], measures=["Revenue"])
+  → MCP Client: execute_query(query_json='{"select": {"dimensions": ["Date","Region"], "measures": ["Revenue"]}}')
   → Email: send compiled SQL to analytics team
 ```
 
@@ -59,7 +59,7 @@ Schedule Trigger (daily 8am)
 
 1. **Schedule Trigger** — set to daily at 08:00
 2. **MCP Client** node (compile query):
-   - Tool: `compile_query`
+   - Tool: `execute_query`
    - Parameters:
      - `dimensions`: `["Date", "Region"]`
      - `measures`: `["Revenue"]`
@@ -97,7 +97,7 @@ GitHub Trigger (push)
   → IF validation errors
       → Slack: notify #data-engineering channel
   → ELSE
-      → MCP Client: compile_query (smoke test)
+      → MCP Client: execute_query (smoke test)
       → Slack: notify success
 ```
 
@@ -128,8 +128,8 @@ n8n's **AI Agent** node can use MCP tools directly, enabling natural language in
 System prompt suggestion for the AI Agent:
 
 > You are a data analytics assistant connected to the OrionBelt Semantic Layer.
-> Available actions: explore models (describe_model, list_dimensions, list_measures),
-> compile semantic queries to SQL (compile_query), and execute queries (execute_query).
+> Available actions: explore models (describe_model, list_artefacts, find_artefacts),
+> and compile + execute queries (execute_query).
 > Always use the appropriate dialect for the target database.
 
 ## Available tools in n8n
@@ -139,7 +139,6 @@ All tools from the MCP server are available. Most commonly used:
 | Tool | Purpose |
 |------|---------|
 | `describe_model(...)` | Inspect model structure |
-| `compile_query(...)` | Generate SQL from semantic query |
 | `execute_query(...)` | Run query and get results |
 | `list_dimensions(...)` | Browse available dimensions |
 | `list_measures(...)` | Browse available measures |

@@ -138,7 +138,7 @@ async with MultiServerMCPClient(
     tools = client.get_tools()
 
     # Filter to only query-related tools
-    query_tools = [t for t in tools if t.name in ("compile_query", "execute_query", "list_dialects")]
+    query_tools = [t for t in tools if t.name in ("execute_query", "list_dialects")]
 
     llm_with_tools = llm.bind_tools(query_tools)
 
@@ -155,7 +155,6 @@ async with MultiServerMCPClient(
 | `get_obml_reference()` | Learn OBML syntax |
 | `load_model(model_yaml)` | Load a semantic model (multi-model mode) |
 | `describe_model(...)` | Inspect model structure |
-| `compile_query(...)` | Generate SQL from semantic query |
 | `execute_query(...)` | Run query and get results |
 | `list_dimensions(...)` | Browse available dimensions |
 | `list_measures(...)` | Browse available measures |
