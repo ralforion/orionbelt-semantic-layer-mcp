@@ -7,7 +7,7 @@
 
 <p align="center"><strong>Thin MCP server that delegates to the OrionBelt Semantic Layer REST API</strong></p>
 
-[![Version 2.7.6](https://img.shields.io/badge/version-2.7.6-purple.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/releases)
+[![Version 2.7.7](https://img.shields.io/badge/version-2.7.7-purple.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/releases)
 [![OrionBelt Semantic Layer 2.7](https://img.shields.io/badge/OrionBelt_Semantic_Layer-2.7-0054A6.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/blob/main/LICENSE)
@@ -47,7 +47,7 @@ The OrionBelt Semantic Layer platform has two deployment modes. This MCP server 
 - **No business logic** — all tool calls delegate to the REST API (v1 endpoints)
 - **Dual-mode** — auto-detects single-model or multi-model API mode at startup
 - **Auto-session management** — creates an API session on first tool call, caches the ID (multi-model mode)
-- **16 tools** (single-model mode) or **19 tools** (multi-model mode) for querying (QueryObject), execution, batch, discovery, examples, diagrams, RDF/SPARQL, OBML reference, and OSI conversion. The visible surface is smaller in the design-time phase and when query execution is disabled (see [Design-time vs run-time tool switching](#design-time-vs-run-time-tool-switching))
+- **17 tools** (single-model mode) or **20 tools** (multi-model mode) for querying (QueryObject), execution, batch, discovery, examples, diagrams, RDF/SPARQL, OBML reference + JSON schemas, and OSI conversion. The visible surface is smaller in the design-time phase and when query execution is disabled (see [Design-time vs run-time tool switching](#design-time-vs-run-time-tool-switching))
 - **4 prompts + 2 resources** for OBML / OBSQL reference and usage guidance
 
 <p align="center">
@@ -157,9 +157,10 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 
 ### References
 
-| MCP Tool               | Description                              |
-| ---------------------- | ---------------------------------------- |
-| `get_obml_reference()` | OBML (model authoring) grammar reference |
+| MCP Tool                | Description                                             |
+| ----------------------- | ------------------------------------------------------- |
+| `get_obml_reference()`  | OBML (model authoring) grammar reference                |
+| `get_json_schema(name)` | JSON Schema for `obml` (model) or `query` (QueryObject) |
 
 ### Utilities
 
@@ -188,7 +189,7 @@ design/reference tools:
 | Bucket          | Listed when                 | Tools                                                                                                                                                                                                                                                                                             |
 | --------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Always**      | always (both phases)        | `load_model`, `remove_model` (transition verbs — stay available in the run phase so a second model can be loaded mid-session, up to `max_models_per_session`); `run_batch` (self-contained one-shot — loads/references a model inline, so it needs no prior session state)                        |
-| **Design-only** | only when no model loaded   | `get_obml_reference`, `list_dialects`, `convert_obml_to_osi`, `convert_osi_to_obml`                                                                                                                                  |
+| **Design-only** | only when no model loaded   | `get_obml_reference`, `get_json_schema`, `list_dialects`, `convert_obml_to_osi`, `convert_osi_to_obml`                                                                                                                                  |
 | **Run-only**    | only when a model is loaded | `describe_model`, `get_model_diagram`, `list_artefacts`, `find_artefacts`, `explain_artefact`, `execute_query`, `list_examples`, `get_example`, `get_model_graph`, `get_join_graph`, `query_model_graph_by_sparql`, `list_models` |
 
 ```

@@ -235,6 +235,7 @@ _ALWAYS_TOOLS: frozenset[str] = frozenset(
 _DESIGN_TOOLS: frozenset[str] = frozenset(
     {
         "get_obml_reference",
+        "get_json_schema",
         "list_dialects",
         "convert_osi_to_obml",
         "convert_obml_to_osi",
@@ -744,6 +745,21 @@ def get_obml_reference() -> str:
     dimensions, measures, metrics, and expressions.
     """
     return _fetch_obml_reference()
+
+
+@mcp.tool
+def get_json_schema(name: Literal["obml", "query"]) -> str:
+    """Get a published JSON Schema by name.
+
+    Returns the raw JSON Schema document as a JSON string so callers can
+    validate documents locally without round-tripping them to the API.
+
+    Args:
+        name: Either ``"obml"`` (the OBML model schema) or ``"query"``
+            (the QueryObject input to ``execute_query``).
+    """
+    resp = _api_request("GET", f"{_API_V1}/reference/schemas/{name}", retry_on_expired=False)
+    return json.dumps(_parse_json(resp), indent=2)
 
 
 @mcp.tool
@@ -2793,11 +2809,11 @@ def main() -> None:
             # list time by capability, so this counts everything registered. The
             # *visible* surface is smaller when query_execute is off (−1) or in
             # the design phase (run-only verbs hidden); single-model mode is
-            # always run-time. design (4) + single-model run-scoped (12).
-            tool_count = 16
+            # always run-time. design (5) + single-model run-scoped (12).
+            tool_count = 17
         else:
-            # design (4) + multi-model run/lifecycle-scoped (15).
-            tool_count = 19
+            # design (5) + multi-model run/lifecycle-scoped (15).
+            tool_count = 20
         mode_label = "single-model" if _single_model_mode else "multi-model"
     else:
         # HTTP/SSE: defer mode detection to the first request so the container

@@ -634,6 +634,23 @@ def test_list_dialects(mock_api: respx.MockRouter):
     assert "unsupported aggregations: median" in result
 
 
+def test_get_json_schema(mock_api: respx.MockRouter):
+    """get_json_schema fetches a published JSON Schema by name (no session needed)."""
+    mock_api.get("/v1/reference/schemas/query").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "title": "QueryObject",
+            },
+        )
+    )
+
+    result = server.get_json_schema("query")
+    assert '"QueryObject"' in result
+    assert "json-schema.org" in result
+
+
 # ---------------------------------------------------------------------------
 # remove_model (multi-model mode)
 # ---------------------------------------------------------------------------

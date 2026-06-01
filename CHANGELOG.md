@@ -4,6 +4,17 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.7.7] — 2026-06-01
+
+### Added
+
+- **Restored the `get_json_schema(name)` tool** (`obml` / `query` JSON Schemas
+  via `GET /v1/reference/schemas/{name}`). It was removed in 2.7.5 while the
+  endpoint 500'd on non-editable installs; **API v2.7.10** now bundles the
+  reference schemas into the wheel, so the endpoint works on PyPI / Docker /
+  Cloud Run. Registered in the design-time bucket. Surface: 16 → 17
+  (single-model), 19 → 20 (multi-model).
+
 ## [2.7.6] — 2026-06-01
 
 ### Fixed
