@@ -178,8 +178,8 @@ async def main():
         name="query_runner",
         model="gemini-2.0-flash",
         instruction=(
-            "You compile and execute semantic queries. Use compile_query "
-            "to generate SQL and execute_query to run queries."
+            "You compile and execute semantic queries. Use execute_query "
+            "to compile and run a QueryObject (query_json)."
         ),
         tools=tools,
     )
@@ -230,7 +230,6 @@ asyncio.run(main())
 | `get_obml_reference()` | Learn OBML syntax |
 | `load_model(model_yaml)` | Load a semantic model (multi-model mode) |
 | `describe_model(...)` | Inspect model structure |
-| `compile_query(...)` | Generate SQL from semantic query |
 | `execute_query(...)` | Run query and get results |
 | `list_dimensions(...)` | Browse available dimensions |
 | `list_measures(...)` | Browse available measures |

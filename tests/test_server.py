@@ -449,12 +449,9 @@ def test_execute_query_single_model_mode(mock_api: respx.MockRouter):
     )
 
     result = server._impl_execute_query(
-        model_id=None,
+        None,
+        '{"select": {"dimensions": ["Country"], "measures": ["Revenue"]}}',
         dialect="postgres",
-        dimensions=["Country"],
-        measures=["Revenue"],
-        query_json=None,
-        use_path_names=None,
     )
     assert '"sql"' in result
     assert '"rows"' in result
@@ -486,12 +483,9 @@ def test_execute_query_with_timezone(mock_api: respx.MockRouter):
     )
 
     result = server._impl_execute_query(
-        model_id=None,
+        None,
+        '{"select": {"dimensions": ["Order Date"], "measures": ["Revenue"]}}',
         dialect="postgres",
-        dimensions=["Order Date"],
-        measures=["Revenue"],
-        query_json=None,
-        use_path_names=None,
     )
     assert '"timezone": "Europe/Zagreb"' in result
 
@@ -517,12 +511,9 @@ def test_execute_query_multi_model_mode(mock_api: respx.MockRouter):
     )
 
     result = server._impl_execute_query(
-        model_id="m001",
+        "m001",
+        '{"select": {"dimensions": ["Country"], "measures": ["Revenue"]}}',
         dialect="postgres",
-        dimensions=["Country"],
-        measures=["Revenue"],
-        query_json=None,
-        use_path_names=None,
     )
     assert '"sql"' in result
     assert '"rows"' in result
@@ -1327,148 +1318,6 @@ def test_get_model_diagram_single_model_mode(mock_api: respx.MockRouter):
 
 
 # ---------------------------------------------------------------------------
-# convert_osi_to_obml
-# ---------------------------------------------------------------------------
-
-
-def test_convert_osi_to_obml(mock_api: respx.MockRouter):
-    """convert_osi_to_obml calls /v1/convert/osi-to-obml."""
-    mock_api.post("/v1/convert/osi-to-obml").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "output_yaml": "version: 1.0\ndataObjects: {}",
-                "warnings": [],
-                "validation": {
-                    "schema_valid": True,
-                    "semantic_valid": True,
-                    "schema_errors": [],
-                    "semantic_errors": [],
-                    "semantic_warnings": [],
-                },
-            },
-        )
-    )
-
-    result = server.convert_osi_to_obml("osi_yaml_content")
-    assert "version: 1.0" in result
-
-
-def test_convert_osi_to_obml_with_validation_errors(mock_api: respx.MockRouter):
-    """convert_osi_to_obml appends warnings and validation errors to output."""
-    mock_api.post("/v1/convert/osi-to-obml").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "output_yaml": "version: 1.0\ndataObjects: {}",
-                "warnings": ["Column 'foo' unmapped"],
-                "validation": {
-                    "schema_valid": False,
-                    "semantic_valid": False,
-                    "schema_errors": ["Missing required field 'code'"],
-                    "semantic_errors": ["Unknown column reference 'bar'"],
-                    "semantic_warnings": ["Unused dimension 'baz'"],
-                },
-            },
-        )
-    )
-
-    result = server.convert_osi_to_obml("osi_yaml_content")
-    assert "version: 1.0" in result
-    assert "Warnings: Column 'foo' unmapped" in result
-    assert "Missing required field 'code'" in result
-    assert "Unknown column reference 'bar'" in result
-    assert "Validation warnings: Unused dimension 'baz'" in result
-
-
-def test_convert_osi_to_obml_with_input_validation(mock_api: respx.MockRouter):
-    """convert_osi_to_obml surfaces input-side validation (API v2.6+)."""
-    mock_api.post("/v1/convert/osi-to-obml").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "output_yaml": "version: 1.0\ndataObjects: {}",
-                "warnings": [],
-                "validation": {
-                    "schema_valid": True,
-                    "semantic_valid": True,
-                    "schema_errors": [],
-                    "semantic_errors": [],
-                    "semantic_warnings": [],
-                },
-                "input_validation": {
-                    "schema_valid": False,
-                    "semantic_valid": True,
-                    "schema_errors": ["Field 'kind' missing under semanticModels[0]"],
-                    "semantic_errors": [],
-                    "semantic_warnings": ["Legacy v0.1 shape detected"],
-                },
-            },
-        )
-    )
-
-    result = server.convert_osi_to_obml("osi_yaml_content")
-    assert "version: 1.0" in result
-    assert "Input validation issues (OSI v0.2 schema)" in result
-    assert "Field 'kind' missing under semanticModels[0]" in result
-    assert "Input validation warnings: Legacy v0.1 shape detected" in result
-
-
-# ---------------------------------------------------------------------------
-# convert_obml_to_osi
-# ---------------------------------------------------------------------------
-
-
-def test_convert_obml_to_osi(mock_api: respx.MockRouter):
-    """convert_obml_to_osi calls /v1/convert/obml-to-osi."""
-    mock_api.post("/v1/convert/obml-to-osi").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "output_yaml": "semantic_model:\n  name: test",
-                "warnings": [],
-                "validation": {
-                    "schema_valid": True,
-                    "semantic_valid": True,
-                    "schema_errors": [],
-                    "semantic_errors": [],
-                    "semantic_warnings": [],
-                },
-            },
-        )
-    )
-
-    result = server.convert_obml_to_osi("obml_yaml_content")
-    assert "semantic_model" in result
-
-
-def test_convert_obml_to_osi_with_validation_errors(mock_api: respx.MockRouter):
-    """convert_obml_to_osi appends warnings and validation errors to output."""
-    mock_api.post("/v1/convert/obml-to-osi").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "output_yaml": "semantic_model:\n  name: test",
-                "warnings": ["Metric 'ratio' uses filtered measures"],
-                "validation": {
-                    "schema_valid": True,
-                    "semantic_valid": False,
-                    "schema_errors": [],
-                    "semantic_errors": ["Invalid expression in metric"],
-                    "semantic_warnings": ["Deprecated aggregation type"],
-                },
-            },
-        )
-    )
-
-    result = server.convert_obml_to_osi("obml_yaml_content")
-    assert "semantic_model" in result
-    assert "Warnings: Metric 'ratio' uses filtered measures" in result
-    assert "Validation errors: Invalid expression in metric" in result
-    assert "Validation warnings: Deprecated aggregation type" in result
-
-
-# ---------------------------------------------------------------------------
 # Session auto-creation & caching
 # ---------------------------------------------------------------------------
 
@@ -1663,12 +1512,9 @@ def test_unsupported_aggregation_error(mock_api: respx.MockRouter):
 
     with pytest.raises(ToolError) as exc_info:
         server._impl_execute_query(
-            model_id="m001",
+            "m001",
+            '{"select": {"measures": ["Median Revenue"]}}',
             dialect="mysql",
-            dimensions=None,
-            measures=["Median Revenue"],
-            query_json=None,
-            use_path_names=None,
         )
 
     msg = str(exc_info.value)
@@ -1701,14 +1547,7 @@ def test_unsupported_grouping_error(mock_api: respx.MockRouter):
         '{"select": {"dimensions": ["Country"], "measures": ["Revenue"]}, "grouping": "cube"}'
     )
     with pytest.raises(ToolError) as exc_info:
-        server._impl_execute_query(
-            model_id="m001",
-            dialect="mysql",
-            dimensions=["Country"],
-            measures=["Revenue"],
-            query_json=query_json,
-            use_path_names=None,
-        )
+        server._impl_execute_query("m001", query_json, dialect="mysql")
 
     msg = str(exc_info.value)
     assert "does not support grouping 'cube'" in msg
@@ -1985,8 +1824,8 @@ def test_write_query_prompt(mock_api):
     """write_query prompt fetches dialects and injects them."""
     _mock_dialects(mock_api)
     result = server.write_query()
-    assert "Simple Mode" in result
-    assert "Full Mode" in result
+    assert "query_json" in result
+    assert 'get_json_schema("query")' in result
     assert "`postgres`" in result
     assert "`mysql`" in result
 
@@ -2533,7 +2372,7 @@ def test_tool_phase_buckets_are_disjoint():
     assert b2.isdisjoint(b3)
     # Spot-check canonical assignments from the spec.
     assert {"load_model", "remove_model", "run_batch"} <= b1  # run_batch is always-on
-    assert {"get_obml_reference", "convert_obml_to_osi", "list_dialects"} <= b2
+    assert {"get_obml_reference", "get_json_schema", "list_dialects"} <= b2
     assert {"describe_model", "execute_query", "list_artefacts", "find_artefacts"} <= b3
 
 
@@ -2586,7 +2425,7 @@ def _all_bucket_sample():
         _fake_tool("load_model"),  # bucket 1 — lifecycle
         _fake_tool("remove_model"),  # bucket 1 — lifecycle
         _fake_tool("get_obml_reference"),  # bucket 2 — design-only
-        _fake_tool("convert_obml_to_osi"),  # bucket 2 — design-only
+        _fake_tool("get_json_schema"),  # bucket 2 — design-only
         _fake_tool("describe_model"),  # bucket 3 — run-only
         _fake_tool("list_artefacts"),  # bucket 3 — run-only
     ]
@@ -2602,7 +2441,7 @@ def test_phase_middleware_design_shows_lifecycle_plus_design_only():
         return _all_bucket_sample()
 
     names = {t.name for t in _run(mw.on_list_tools(object(), call_next))}
-    assert names == {"load_model", "remove_model", "get_obml_reference", "convert_obml_to_osi"}
+    assert names == {"load_model", "remove_model", "get_obml_reference", "get_json_schema"}
 
 
 def test_phase_middleware_run_swaps_out_design_tools():
@@ -2619,7 +2458,7 @@ def test_phase_middleware_run_swaps_out_design_tools():
     assert names == {"load_model", "remove_model", "describe_model", "list_artefacts"}
     # The key fix: design/reference tools must not leak into the run surface.
     assert "get_obml_reference" not in names
-    assert "convert_obml_to_osi" not in names
+    assert "get_json_schema" not in names
 
 
 def test_run_batch_is_always_listed_and_unguarded():

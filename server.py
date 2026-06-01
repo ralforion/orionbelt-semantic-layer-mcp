@@ -237,8 +237,6 @@ _DESIGN_TOOLS: frozenset[str] = frozenset(
         "get_obml_reference",
         "get_json_schema",
         "list_dialects",
-        "convert_osi_to_obml",
-        "convert_obml_to_osi",
     }
 )
 
@@ -780,94 +778,6 @@ def list_dialects() -> str:
     return "\n".join(lines)
 
 
-@mcp.tool
-def convert_osi_to_obml(input_yaml: str) -> str:
-    """Convert an OSI (Open Semantic Interchange) YAML model to OBML format.
-
-    Takes an OSI-format YAML string and returns the equivalent OBML YAML
-    along with any conversion warnings and validation results.
-
-    Args:
-        input_yaml: OSI YAML content to convert.
-    """
-    resp = _api_request(
-        "POST",
-        f"{_API_V1}/convert/osi-to-obml",
-        json_body={"input_yaml": input_yaml},
-        retry_on_expired=False,
-    )
-    data = _parse_json(resp)
-
-    parts = [data["output_yaml"]]
-    if data.get("warnings"):
-        parts.append(f"\nWarnings: {'; '.join(data['warnings'])}")
-    # Input-side validation (API v2.6+: OSI input checked against vendored
-    # OSI v0.2 schema before conversion). Legacy v0.1 inputs may produce
-    # spurious schema_errors that the converter's compat shim absorbs, so
-    # surface these as advisory rather than failure.
-    input_validation = data.get("input_validation") or {}
-    if input_validation:
-        in_errors = input_validation.get("schema_errors", []) + input_validation.get(
-            "semantic_errors", []
-        )
-        if in_errors:
-            parts.append(f"\nInput validation issues (OSI v0.2 schema): {'; '.join(in_errors)}")
-        if input_validation.get("semantic_warnings"):
-            parts.append(
-                f"\nInput validation warnings: {'; '.join(input_validation['semantic_warnings'])}"
-            )
-    validation = data.get("validation", {})
-    if not validation.get("schema_valid", True) or not validation.get("semantic_valid", True):
-        errors = validation.get("schema_errors", []) + validation.get("semantic_errors", [])
-        parts.append(f"\nValidation errors: {'; '.join(errors)}")
-    if validation.get("semantic_warnings"):
-        parts.append(f"\nValidation warnings: {'; '.join(validation['semantic_warnings'])}")
-    return "\n".join(parts)
-
-
-@mcp.tool
-def convert_obml_to_osi(
-    input_yaml: str,
-    model_name: str = "semantic_model",
-    model_description: str = "",
-    ai_instructions: str = "",
-) -> str:
-    """Convert an OBML YAML model to OSI (Open Semantic Interchange) format.
-
-    Takes an OBML-format YAML string and returns the equivalent OSI YAML
-    along with any conversion warnings and validation results.
-
-    Args:
-        input_yaml: OBML YAML content to convert.
-        model_name: Name for the OSI model.
-        model_description: Description for the OSI model.
-        ai_instructions: AI instructions for the OSI model.
-    """
-    resp = _api_request(
-        "POST",
-        f"{_API_V1}/convert/obml-to-osi",
-        json_body={
-            "input_yaml": input_yaml,
-            "model_name": model_name,
-            "model_description": model_description,
-            "ai_instructions": ai_instructions,
-        },
-        retry_on_expired=False,
-    )
-    data = _parse_json(resp)
-
-    parts = [data["output_yaml"]]
-    if data.get("warnings"):
-        parts.append(f"\nWarnings: {'; '.join(data['warnings'])}")
-    validation = data.get("validation", {})
-    if not validation.get("schema_valid", True) or not validation.get("semantic_valid", True):
-        errors = validation.get("schema_errors", []) + validation.get("semantic_errors", [])
-        parts.append(f"\nValidation errors: {'; '.join(errors)}")
-    if validation.get("semantic_warnings"):
-        parts.append(f"\nValidation warnings: {'; '.join(validation['semantic_warnings'])}")
-    return "\n".join(parts)
-
-
 # ---------------------------------------------------------------------------
 # Implementation functions (shared logic for both modes)
 # ---------------------------------------------------------------------------
@@ -1172,127 +1082,22 @@ def _impl_describe_model(model_id: str | None = None) -> str:
     return "\n".join(lines)
 
 
-def _parse_json_param(value: str | None, name: str) -> list | dict | None:
-    """Parse an optional JSON string parameter."""
-    if value is None:
-        return None
-    try:
-        return json.loads(value)
-    except json.JSONDecodeError as exc:
-        raise ToolError(f"Invalid {name} JSON: {exc}") from exc
-
-
-def _build_query_object(
-    dimensions: list[str] | None,
-    measures: list[str] | None,
-    query_json: str | None,
-    use_path_names: list[dict[str, str]] | None,
-    where: str | None = None,
-    having: str | None = None,
-    order_by: str | None = None,
-    limit: int | None = None,
-    offset: int | None = None,
-    dimensions_exclude: bool | None = None,
-    coalesce_dimensions: str | None = None,
-    fields: list[str] | None = None,
-    distinct: bool | None = None,
-) -> dict:
-    """Build a query dict from tool arguments (shared by compile/execute)."""
-    if query_json is not None:
-        try:
-            return json.loads(query_json)
-        except json.JSONDecodeError as exc:
-            raise ToolError(f"Invalid query JSON: {exc}") from exc
-    elif fields is not None:
-        # Raw mode — physical column projection, no aggregation
-        select: dict = {"fields": fields}
-        if distinct is not None:
-            select["distinct"] = distinct
-        query: dict = {"select": select}
-        parsed_where = _parse_json_param(where, "where")
-        if parsed_where is not None:
-            query["where"] = parsed_where
-        parsed_order = _parse_json_param(order_by, "order_by")
-        if parsed_order is not None:
-            query["order_by"] = parsed_order
-        if limit is not None:
-            query["limit"] = limit
-        if offset is not None:
-            query["offset"] = offset
-        return query
-    elif dimensions is not None or measures is not None:
-        dim_list: list[str | dict] = list(dimensions or [])
-        parsed_coalesce = _parse_json_param(coalesce_dimensions, "coalesce_dimensions")
-        if parsed_coalesce is not None:
-            if not isinstance(parsed_coalesce, list):
-                raise ToolError("coalesce_dimensions must be a JSON array")
-            dim_list.extend(parsed_coalesce)
-        query = {
-            "select": {
-                "dimensions": dim_list,
-                "measures": measures or [],
-            },
-        }
-        if use_path_names:
-            query["usePathNames"] = use_path_names
-        parsed_where = _parse_json_param(where, "where")
-        if parsed_where is not None:
-            query["where"] = parsed_where
-        parsed_having = _parse_json_param(having, "having")
-        if parsed_having is not None:
-            query["having"] = parsed_having
-        parsed_order = _parse_json_param(order_by, "order_by")
-        if parsed_order is not None:
-            query["order_by"] = parsed_order
-        if limit is not None:
-            query["limit"] = limit
-        if offset is not None:
-            query["offset"] = offset
-        if dimensions_exclude is not None:
-            query["dimensionsExclude"] = dimensions_exclude
-        return query
-    else:
-        raise ToolError("Provide either dimensions/measures, fields, or query_json.")
-
-
 def _impl_execute_query(
     model_id: str | None,
-    dialect: str | None,
-    dimensions: list[str] | None,
-    measures: list[str] | None,
-    query_json: str | None,
-    use_path_names: list[dict[str, str]] | None,
-    where: str | None = None,
-    having: str | None = None,
-    order_by: str | None = None,
-    limit: int | None = None,
-    offset: int | None = None,
-    dimensions_exclude: bool | None = None,
-    coalesce_dimensions: str | None = None,
-    fields: list[str] | None = None,
-    distinct: bool | None = None,
+    query_json: str,
+    *,
+    dialect: str | None = None,
     output_format: str = "json",
     format_values: bool | None = None,
     locale: str | None = None,
     timezone: str | None = None,
 ) -> str:
-    """Compile and execute a semantic query (shared implementation)."""
+    """Compile and execute a QueryObject given as a JSON string (shared impl)."""
     logger.info("execute_query called (model_id=%s, dialect=%s)", model_id, dialect)
-    query = _build_query_object(
-        dimensions,
-        measures,
-        query_json,
-        use_path_names,
-        where=where,
-        having=having,
-        order_by=order_by,
-        limit=limit,
-        offset=offset,
-        dimensions_exclude=dimensions_exclude,
-        coalesce_dimensions=coalesce_dimensions,
-        fields=fields,
-        distinct=distinct,
-    )
+    try:
+        query = json.loads(query_json)
+    except json.JSONDecodeError as exc:
+        raise ToolError(f"Invalid query JSON: {exc}") from exc
 
     extra_params: dict[str, str] = {"format": output_format}
     if format_values is not None:
@@ -1306,22 +1111,12 @@ def _impl_execute_query(
         params: dict[str, str] = {**extra_params}
         if dialect is not None:
             params["dialect"] = dialect
-        resp = _shortcut_request(
-            "POST",
-            "/query/execute",
-            json_body=query,
-            params=params,
-        )
+        resp = _shortcut_request("POST", "/query/execute", json_body=query, params=params)
     else:
         body: dict = {"model_id": model_id, "query": query}
         if dialect is not None:
             body["dialect"] = dialect
-        resp = _session_request(
-            "POST",
-            "/query/execute",
-            json_body=body,
-            params=extra_params,
-        )
+        resp = _session_request("POST", "/query/execute", json_body=body, params=extra_params)
 
     if output_format == "tsv":
         return resp.text
@@ -1961,54 +1756,47 @@ def _register_model_tools() -> None:
 
     @mcp.tool
     def execute_query(
+        query_json: str,
         model_id: str | None = None,
         dialect: str | None = None,
-        dimensions: list[str] | None = None,
-        measures: list[str] | None = None,
-        fields: list[str] | None = None,
-        distinct: bool | None = None,
-        where: str | None = None,
-        having: str | None = None,
-        order_by: str | None = None,
-        limit: int | None = None,
-        offset: int | None = None,
-        dimensions_exclude: bool | None = None,
-        coalesce_dimensions: str | None = None,
-        query_json: str | None = None,
-        use_path_names: list[dict[str, str]] | None = None,
         output_format: str = "json",
         format_values: bool | None = None,
         locale: str | None = None,
         timezone: str | None = None,
     ) -> str:
-        """Compile and execute a semantic query, returning SQL and results.
+        """Compile and execute a semantic query (QueryObject), returning SQL + results.
 
-        Two query modes: **aggregate** — pass ``dimensions`` and/or ``measures``;
-        **raw** — pass ``fields`` for un-aggregated column access (mutually
-        exclusive with dimensions/measures/having/dimensions_exclude).
-        Alternatively pass a complete ``query_json`` (overrides the rest).
-        Call ``describe_model`` first to discover available names.  If no
-        ``limit`` is specified, a server-side default row limit is enforced.
+        Pass the query as ``query_json`` — a complete QueryObject as a JSON
+        string. Call ``get_json_schema("query")`` for the exact QueryObject
+        schema, and ``describe_model`` to discover the dimension / measure /
+        metric names to reference. If no ``limit`` is set, a server-side default
+        row limit applies.
+
+        Aggregate example::
+
+            execute_query(query_json='{
+                "select": {"dimensions": ["Country"], "measures": ["Revenue"]},
+                "where": [{"field": "Country", "op": "equals", "value": "US"}],
+                "order_by": [{"field": "Revenue", "direction": "desc"}],
+                "limit": 10
+            }')
+
+        Raw example (un-aggregated rows)::
+
+            execute_query(query_json='{
+                "select": {"fields": ["Orders.OrderDate", "Orders.Amount"],
+                           "distinct": true},
+                "limit": 100
+            }')
 
         Args:
+            query_json: Complete QueryObject as a JSON string. See
+                ``get_json_schema("query")`` for the full schema (select with
+                dimensions/measures or fields, where, having, order_by, limit,
+                offset, dimensionsExclude, usePathNames, coalesce groups, …).
             model_id: id from ``load_model`` (multi-model); omit in single-model.
-            dialect: Target SQL dialect.  When omitted the API
-                resolves via model.settings.defaultDialect →
-                server default.
-            dimensions: List of dimension names (aggregate mode).
-            measures: List of measure names (aggregate mode).
-            fields: List of physical column refs as
-                "DataObject.Column" (raw mode).
-            distinct: Emit SELECT DISTINCT (raw mode only).
-            where: Filters as a JSON string.
-            having: Measure/metric filters as a JSON string.
-            order_by: Ordering as a JSON string.
-            limit: Maximum number of rows to return.
-            offset: Number of rows to skip.
-            dimensions_exclude: Anti-join mode (aggregate only).
-            coalesce_dimensions: Coalesce groups as a JSON string.
-            query_json: Complete query as JSON (overrides above).
-            use_path_names: Secondary join path selectors.
+            dialect: Target SQL dialect.  When omitted the API resolves via
+                model.settings.defaultDialect → server default.
             output_format: Response format — "json" (default) or "tsv".
             format_values: Format numeric cells as display strings.
             locale: BCP-47 locale for number formatting (e.g. "de").
@@ -2016,20 +1804,8 @@ def _register_model_tools() -> None:
         """
         return _impl_execute_query(
             _resolve_model_id(model_id),
-            dialect,
-            dimensions,
-            measures,
             query_json,
-            use_path_names,
-            where=where,
-            having=having,
-            order_by=order_by,
-            limit=limit,
-            offset=offset,
-            dimensions_exclude=dimensions_exclude,
-            coalesce_dimensions=coalesce_dimensions,
-            fields=fields,
-            distinct=distinct,
+            dialect=dialect,
             output_format=output_format,
             format_values=format_values,
             locale=locale,
@@ -2261,21 +2037,12 @@ class StaticPrompt(_BasePrompt):
 _WRITE_QUERY_TEXT = """\
 # Querying with OrionBelt
 
-## Simple Mode
+Queries are passed to `execute_query` as a single `query_json` argument — a
+complete **QueryObject** encoded as a JSON string. Call
+`get_json_schema("query")` for the authoritative QueryObject schema, and
+`describe_model` to discover the dimension / measure / metric names to use.
 
-Pass dimension and measure names directly:
-
-```
-execute_query(
-  model_id="abc12345",
-  dimensions=["Customer Country"],
-  measures=["Total Revenue"]
-)
-```
-
-## Full Mode (filters, ordering, limits)
-
-Pass a complete query as JSON:
+## QueryObject shape
 
 ```
 execute_query(
@@ -2295,6 +2062,10 @@ execute_query(
   }'
 )
 ```
+
+A minimal query is just `{"select": {"dimensions": [...], "measures": [...]}}`.
+The fields below (filters, groups, dimensionsExclude, coalesce, raw `fields`,
+…) all go **inside** `query_json`.
 
 ## Filter Operators
 
@@ -2409,26 +2180,16 @@ they join through different fact tables.  The `via` data object must be reachabl
 from the query's fact table, and the dimension's `dataObject` must be reachable
 from `via` in the directed join graph.
 
-When querying, simply use the role-playing dimension name:
+When querying, simply use the role-playing dimension name in `query_json`:
 ```
-execute_query(dimensions=["SalesEmployee"], measures=["Revenue"])
+query_json='{"select": {"dimensions": ["SalesEmployee"], "measures": ["Revenue"]}}'
 ```
 
 ## Coalesce Dimensions
 
 Role-playing dimensions appear as separate columns in CFL output — one row per
-role per person.  To collapse them into a single output column, use
-``coalesce_dimensions``::
-
-    execute_query(
-        measures=["Total Sales", "Total Purchases"],
-        coalesce_dimensions=(
-            '[{{"coalesce": ["SalesEmp", "PurchaseEmp"],'
-            ' "as": "Employee"}}]'
-        ),
-    )
-
-Or in ``query_json``::
+role per person.  To collapse them into a single output column, add a coalesce
+group to the `select.dimensions` array in ``query_json``::
 
     {{"select": {{
         "dimensions": [
@@ -2450,24 +2211,21 @@ Rules:
 ## Raw Mode (Physical Column Access)
 
 Raw mode returns un-aggregated rows — no GROUP BY, no measures, no metrics.
-Pass ``fields`` instead of ``dimensions``/``measures``::
+Put ``fields`` (instead of ``dimensions``/``measures``) inside ``select``::
 
-    execute_query(
-        fields=["Orders.OrderDate", "Customers.Country"],
-        distinct=True,
-        where='[{{"field": "Customers.Country", "op": "equals", "value": "US"}}]',
-        limit=100,
-    )
+    query_json='{{
+      "select": {{"fields": ["Orders.OrderDate", "Customers.Country"],
+                  "distinct": true}},
+      "where": [{{"field": "Customers.Country", "op": "equals", "value": "US"}}],
+      "limit": 100
+    }}'
 
 Fields use ``DataObject.Column`` syntax referencing physical columns.
 
-Raw mode is **mutually exclusive** with:
-- ``dimensions`` / ``measures``
-- ``having``
-- ``dimensionsExclude``
-
-``distinct`` is only valid in raw mode.  ``where``, ``order_by``, ``limit``,
-and ``offset`` work in both modes.
+Raw mode (``select.fields``) is **mutually exclusive** with
+``select.dimensions`` / ``select.measures``, ``having``, and
+``dimensionsExclude``.  ``select.distinct`` is only valid in raw mode;
+``where``, ``order_by``, ``limit``, and ``offset`` work in both modes.
 
 ## Execute Query — Output Formatting
 
@@ -2690,7 +2448,7 @@ def write_obsql_query() -> str:
 
 @mcp.prompt
 def write_query() -> str:
-    """How to use the execute_query tool — simple and full modes."""
+    """How to build the QueryObject (query_json) for the execute_query tool."""
     dialect_list = ", ".join(f"`{d}`" for d in _fetch_dialect_names())
     return _WRITE_QUERY_TEXT.replace("{dialects}", dialect_list)
 

@@ -132,8 +132,8 @@ async def main():
         query_builder = Agent(
             name="Query Builder",
             instructions=(
-                "You write semantic queries. Use compile_query to generate SQL "
-                "and execute_query to run queries and return results. "
+                "You write semantic queries. Use execute_query to compile and run a "
+                "QueryObject (query_json) and return results. "
                 "Always pick the correct dialect for the target database."
             ),
             mcp_servers=[server],
@@ -166,7 +166,6 @@ asyncio.run(main())
 | `get_obml_reference()` | Learn OBML syntax |
 | `load_model(model_yaml)` | Load a semantic model (multi-model mode) |
 | `describe_model(...)` | Inspect model structure |
-| `compile_query(...)` | Generate SQL from semantic query |
 | `execute_query(...)` | Run query and get results |
 | `list_dimensions(...)` | Browse available dimensions |
 | `list_measures(...)` | Browse available measures |

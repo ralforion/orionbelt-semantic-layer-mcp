@@ -4,6 +4,29 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.7.8] — 2026-06-01
+
+### Changed
+
+- **`execute_query` now takes a single `query_json` argument** (a complete
+  QueryObject as a JSON string, **required**) instead of the per-shape
+  convenience params. Removed `dimensions`, `measures`, `fields`, `distinct`,
+  `where`, `having`, `order_by`, `limit`, `offset`, `dimensions_exclude`,
+  `coalesce_dimensions`, and `use_path_names` — all expressible inside
+  `query_json`, whose schema is available via `get_json_schema("query")`. Kept
+  `model_id`, `dialect`, and the output params (`output_format`,
+  `format_values`, `locale`, `timezone`), which are not part of the QueryObject.
+  Dropped the now-unused `_build_query_object` / `_parse_json_param` helpers; the
+  `write_query` prompt and integration docs were rewritten around `query_json`.
+
+### Removed
+
+- **`convert_osi_to_obml` and `convert_obml_to_osi` tools.** The OSI↔OBML
+  `POST /v1/convert/*` endpoints remain on the API; the MCP no longer wraps
+  them. (Model-centric `load_model_from_osi` / `export_model_to_osi` tools may
+  return later, backed by dedicated API endpoints.) Surface: 17 → 15
+  (single-model), 20 → 18 (multi-model).
+
 ## [2.7.7] — 2026-06-01
 
 ### Added

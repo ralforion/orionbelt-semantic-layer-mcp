@@ -120,7 +120,7 @@ with MCPServerAdapter(server_params) as mcp_tools:
         role="Query Engineer",
         goal="Compile optimized semantic queries to SQL for the target database",
         backstory=(
-            "You are a SQL expert. You use compile_query and execute_query "
+            "You are a SQL expert. You use execute_query "
             "to generate and run analytical queries. You always select "
             "the correct SQL dialect and optimize for performance."
         ),
@@ -223,7 +223,6 @@ agent = Agent(
 | `get_obml_reference()` | Learn OBML syntax |
 | `load_model(model_yaml)` | Load a semantic model (multi-model mode) |
 | `describe_model(...)` | Inspect model structure |
-| `compile_query(...)` | Generate SQL from semantic query |
 | `execute_query(...)` | Run query and get results |
 | `list_dimensions(...)` | Browse available dimensions |
 | `list_measures(...)` | Browse available measures |
