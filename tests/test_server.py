@@ -1994,8 +1994,8 @@ def test_obml_reference_resource(mock_api):
 # ---------------------------------------------------------------------------
 
 
-def test_get_client_fallback_when_metadata_unavailable(mock_api, monkeypatch):
-    """_get_client() returns a usable client when package metadata is missing."""
+def test_package_version_none_when_metadata_unavailable(monkeypatch):
+    """_package_version() returns None when the package isn't installed (→ 'dev')."""
     import importlib.metadata
 
     monkeypatch.setattr(
@@ -2004,9 +2004,16 @@ def test_get_client_fallback_when_metadata_unavailable(mock_api, monkeypatch):
             importlib.metadata.PackageNotFoundError("orionbelt-semantic-layer-mcp")
         ),
     )
+    assert server._package_version() is None
+    # __version__ is resolved once at import via `_package_version() or "dev"`.
+    assert server.__version__  # non-empty version string (real version or "dev")
+
+
+def test_get_client_uses_versioned_user_agent(mock_api):
+    """_get_client() stamps the User-Agent with the server version."""
     client = server._get_client()
     assert isinstance(client, httpx.Client)
-    assert "OrionBelt-MCP/dev" in client.headers["user-agent"]
+    assert client.headers["user-agent"] == f"OrionBelt-MCP/{server.__version__}"
 
 
 def test_shutdown_resets_global_state(mock_api):

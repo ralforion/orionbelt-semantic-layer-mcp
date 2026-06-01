@@ -158,7 +158,19 @@ async def _server_lifespan(server):
         _http_client = None
 
 
-mcp = FastMCP("OrionBelt Semantic Layer", lifespan=_server_lifespan)
+def _package_version() -> str | None:
+    """This MCP server's installed version, or None when not installed (dev tree)."""
+    try:
+        return importlib.metadata.version("orionbelt-semantic-layer-mcp")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+# Reported as serverInfo.version on initialize (NOT the FastMCP library version),
+# and used for the User-Agent and startup banner.
+__version__ = _package_version() or "dev"
+
+mcp = FastMCP("OrionBelt Semantic Layer", version=__version__, lifespan=_server_lifespan)
 
 # ---------------------------------------------------------------------------
 # Internal state
@@ -431,14 +443,10 @@ def _get_client() -> httpx.Client:
     if _http_client is None:
         with _state_lock:
             if _http_client is None:  # double-check under lock
-                try:
-                    version = importlib.metadata.version("orionbelt-semantic-layer-mcp")
-                except importlib.metadata.PackageNotFoundError:
-                    version = "dev"
                 _http_client = httpx.Client(
                     base_url=settings.api_base_url,
                     timeout=settings.api_timeout,
-                    headers={"User-Agent": f"OrionBelt-MCP/{version}"},
+                    headers={"User-Agent": f"OrionBelt-MCP/{__version__}"},
                 )
     return _http_client
 
@@ -2707,10 +2715,7 @@ def _check_api_health() -> None:
         )
         raise SystemExit(1) from None
 
-    try:
-        mcp_version = importlib.metadata.version("orionbelt-semantic-layer-mcp")
-    except importlib.metadata.PackageNotFoundError:
-        mcp_version = None
+    mcp_version = _package_version()
     api_version = None
     with contextlib.suppress(ValueError, AttributeError):
         api_version = resp.json().get("version")
@@ -2752,13 +2757,9 @@ def _detect_api_mode() -> tuple[bool, bool]:
 def main() -> None:
     """Run the MCP server using settings from environment / .env file."""
     _configure_logging()
-    try:
-        _version = importlib.metadata.version("orionbelt-semantic-layer-mcp")
-    except importlib.metadata.PackageNotFoundError:
-        _version = "dev"
 
     logger.info("=" * 60)
-    logger.info("OrionBelt Semantic Layer MCP Server v%s", _version)
+    logger.info("OrionBelt Semantic Layer MCP Server v%s", __version__)
     logger.info("Thin MCP server — delegates to OrionBelt Semantic Layer REST API")
     logger.info("=" * 60)
 

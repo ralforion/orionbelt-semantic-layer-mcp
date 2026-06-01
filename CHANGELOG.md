@@ -4,6 +4,18 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.7.6] — 2026-06-01
+
+### Fixed
+
+- **`serverInfo.version` now reports this server's version, not FastMCP's.**
+  `FastMCP(...)` was constructed without a `version`, so the `initialize`
+  response advertised the FastMCP library version (e.g. `3.3.1`) instead of the
+  MCP server's version. It now passes `version=__version__`, resolved once from
+  the installed package metadata (`_package_version()`), which also deduplicates
+  the three places that detected the version (User-Agent header, startup banner,
+  API-compatibility check).
+
 ## [2.7.5] — 2026-05-31
 
 ### Removed
