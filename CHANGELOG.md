@@ -4,6 +4,34 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.8.0] — 2026-06-02
+
+### Added
+
+- **`load_model_from_osi` tool.** Loads a model from an Open Semantic
+  Interchange (OSI) YAML string: the API converts it to OBML server-side and
+  loads it into the session, returning a `model_id`. Surfaces the OSI → OBML
+  conversion warnings and advisory OSI-schema validation alongside the standard
+  model-load summary. Wraps `POST /v1/sessions/{id}/models/from-osi`
+  (multi-model mode; always-on bucket, like `load_model`).
+- **`export_model_to_osi` tool.** Exports a loaded model as OSI YAML, with
+  optional `model_name` / `model_description` / `ai_instructions` overrides.
+  Wraps `GET /v1/sessions/{id}/models/{mid}/osi` (multi-model mode; run-time
+  bucket). These restore the model-centric OSI round-trip foreshadowed when the
+  stateless `convert_osi_to_obml` / `convert_obml_to_osi` tools were removed in
+  2.7.x — now backed by dedicated, session-aware API endpoints.
+
+### Changed
+
+- **Aligned with OrionBelt Semantic Layer API v2.8.0**, which adds the
+  session-scoped OSI load/export endpoints.
+- **Trimmed the `load_model` and `run_batch` tool descriptions.** Dropped the
+  large inline OBML example and duplicated spec details from `load_model`
+  (pointing to `get_json_schema("obml")` / `get_obml_reference()` instead) and
+  condensed `run_batch`'s prose — both were among the largest token consumers in
+  the tool surface. The two non-obvious `load_model` gotchas (joins live inside
+  each dataObject; they reference OBML column names) are retained.
+
 ## [2.7.9] — 2026-06-01
 
 ### Changed
