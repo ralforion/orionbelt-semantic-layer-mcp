@@ -197,8 +197,8 @@ _loaded_model_ids: set[str] = set()
 # fall into three buckets:
 #
 #   * always (bucket 1) — ALWAYS listed, in both phases. The lifecycle/
-#     transition verbs (load_model, remove_model), which must stay available in
-#     the run phase so a second model can be loaded mid-session
+#     transition verbs (load_model, load_model_from_osi, remove_model), which
+#     must stay available in the run phase so a second model can be loaded mid-session
 #     (max_models_per_session = 10); plus run_batch, the self-contained one-shot
 #     (loads/references a model inline in one call, so it depends on no prior
 #     session state and is valid in either phase).
@@ -226,6 +226,7 @@ PHASE_RUN = "run"
 _ALWAYS_TOOLS: frozenset[str] = frozenset(
     {
         "load_model",
+        "load_model_from_osi",
         "remove_model",
         "run_batch",
         "get_json_schema",
@@ -247,6 +248,7 @@ _DESIGN_TOOLS: frozenset[str] = frozenset(
 _RUN_TIME_TOOLS: frozenset[str] = frozenset(
     {
         "get_model",
+        "export_model_to_osi",
         "describe_model",
         "get_model_diagram",
         "list_artefacts",
@@ -1315,7 +1317,7 @@ def _impl_find_artefacts(model_id: str | None, query: str, kind: str | None) -> 
         lines.append("Fuzzy matches (no exact or synonym hit):")
         for f in fuzzy:
             score = f.get("score")
-            score_str = f"  score={score:.2f}" if isinstance(score, (int, float)) else ""
+            score_str = f"  score={score:.2f}" if isinstance(score, int | float) else ""
             reason = f"  ({f['reason']})" if f.get("reason") else ""
             lines.append(f"  [{f.get('kind', '?')}] {f.get('name', '?')}{score_str}{reason}")
     return "\n".join(lines)
@@ -1414,7 +1416,16 @@ def _impl_load_model(
         body["inherits"] = inherits
     resp = _session_request("POST", "/models", json_body=body)
     data = _parse_json(resp)
+    return _render_load_result(data)
 
+
+def _render_load_result(data: dict, extra_lines: list[str] | None = None) -> str:
+    """Render a model-load summary and run the design → run transition.
+
+    Shared by ``_impl_load_model`` and ``_impl_load_model_from_osi``. ``data`` is
+    the parsed ``ModelLoadResponse``. ``extra_lines`` are appended before the
+    re-list footer (used to surface OSI conversion warnings).
+    """
     load_state = data.get("model_load") or "fresh"
     header = (
         f"Model loaded ({load_state}).  model_id: {data['model_id']}"
@@ -1453,6 +1464,9 @@ def _impl_load_model(
     if effective.get("timezone"):
         parts.append(f"  effective timezone: {effective['timezone']}")
 
+    if extra_lines:
+        parts.extend(extra_lines)
+
     # Forward transition (design → run): record the model and prompt a re-list so
     # the host discovers the now-available run-time tool set.
     _mark_model_loaded(data["model_id"])
@@ -1461,6 +1475,69 @@ def _impl_load_model(
         "Run-time tools are now available (execute_query, describe_model, "
         "list_artefacts, find_artefacts, …). Re-list tools to discover them."
     )
+    return "\n".join(parts)
+
+
+def _format_osi_input_validation(input_validation: dict | None) -> list[str]:
+    """Render advisory OSI input-validation lines (OSI v0.2 schema check).
+
+    Legacy OSI v0.1 inputs may produce spurious schema errors the converter's
+    compat shim absorbs, so these are surfaced as advisory, not failure.
+    """
+    iv = input_validation or {}
+    lines: list[str] = []
+    in_errors = iv.get("schema_errors", []) + iv.get("semantic_errors", [])
+    if in_errors:
+        lines.append(f"  input validation issues (OSI v0.2 schema): {'; '.join(in_errors)}")
+    if iv.get("semantic_warnings"):
+        lines.append(f"  input validation warnings: {'; '.join(iv['semantic_warnings'])}")
+    return lines
+
+
+def _impl_load_model_from_osi(osi_yaml: str | None, dedup: bool) -> str:
+    """Convert an OSI YAML model to OBML, load it, and render the summary."""
+    if not osi_yaml or not osi_yaml.strip():
+        raise ToolError(
+            "osi_yaml is mandatory — provide the OSI model as a YAML string."
+        )
+    logger.info("load_model_from_osi called")
+    resp = _session_request(
+        "POST", "/models/from-osi", json_body={"osi_yaml": osi_yaml, "dedup": dedup}
+    )
+    data = _parse_json(resp)
+
+    extra: list[str] = []
+    conversion_warnings = data.get("conversion_warnings") or []
+    if conversion_warnings:
+        extra.append(f"  OSI → OBML conversion warnings: {'; '.join(conversion_warnings)}")
+    extra.extend(_format_osi_input_validation(data.get("input_validation")))
+    return _render_load_result(data, extra_lines=extra)
+
+
+def _impl_export_model_to_osi(
+    model_id: str,
+    model_name: str,
+    model_description: str,
+    ai_instructions: str,
+) -> str:
+    """Export a loaded model as OSI YAML (multi-model only — model_id required)."""
+    params = {
+        "model_name": model_name,
+        "model_description": model_description,
+        "ai_instructions": ai_instructions,
+    }
+    resp = _session_request("GET", f"/models/{model_id}/osi", params=params)
+    data = _parse_json(resp)
+
+    parts = [data["output_yaml"]]
+    if data.get("warnings"):
+        parts.append(f"\nWarnings: {'; '.join(data['warnings'])}")
+    validation = data.get("validation") or {}
+    if not validation.get("schema_valid", True) or not validation.get("semantic_valid", True):
+        errors = validation.get("schema_errors", []) + validation.get("semantic_errors", [])
+        parts.append(f"\nValidation errors: {'; '.join(errors)}")
+    if validation.get("semantic_warnings"):
+        parts.append(f"\nValidation warnings: {'; '.join(validation['semantic_warnings'])}")
     return "\n".join(parts)
 
 
@@ -1827,70 +1904,40 @@ def _register_model_tools() -> None:
     ) -> str:
         """Load a semantic model definition. Returns a model_id.
 
-        ``model`` is mandatory — pass the OBML model as a JSON object::
+        ``model`` is mandatory: the OBML model as a JSON object with top-level
+        keys ``version``, ``dataObjects``, ``dimensions``, ``measures``,
+        ``metrics`` (camelCase throughout). Joins live INSIDE each dataObject
+        (``joins`` list), not at the top level, and reference OBML column names.
 
-            load_model(model={
-                "version": 1.0,
-                "dataObjects": {
-                    "Sales": {
-                        "code": "sales", "schema": "public",
-                        "columns": {"Amount": {"abstractType": "float"},
-                                    "CustomerKey": {"abstractType": "int"}},
-                        "joins": [{"joinTo": "Customers", "joinType": "inner",
-                                   "columnsFrom": ["CustomerKey"],
-                                   "columnsTo": ["CustomerKey"]}]
-                    },
-                    "Customers": {
-                        "code": "customers", "schema": "public",
-                        "columns": {"CustomerKey": {"abstractType": "int"},
-                                    "Country": {"abstractType": "string"}}
-                    }
-                },
-                "dimensions": {
-                    "Country": {
-                        "dataObject": "Customers", "column": "Country",
-                        "resultType": "string"
-                    }
-                },
-                "measures": {
-                    "Revenue": {
-                        "aggregation": "SUM", "resultType": "float",
-                        "columns": [{"dataObject": "Sales", "column": "Amount"}]
-                    }
-                }
-            })
-
-        IMPORTANT: Joins are defined INSIDE each dataObject (not at the top
-        level).  Each join uses ``joinTo`` (target data object name),
-        ``joinType`` (inner/left/right/full), ``columnsFrom`` (columns in
-        this data object), and ``columnsTo`` (columns in the target).
-        Column names in joins reference OBML column names (the keys in
-        ``columns``), not physical database column names.
-
-        Keys use camelCase: ``dataObjects``, ``joinType``, ``columnsFrom``,
-        ``columnsTo``, ``resultType``, ``abstractType``, ``timeGrain``.
-
-        Column ``abstractType`` values: string, int, float, date, boolean.
-        Aggregation values: SUM, COUNT, AVG, MIN, MAX, count_distinct, any_value.
-        Measure expressions: ``{[DataObject].[Column]}`` syntax.
-        Metric expressions: ``{[MeasureName]}`` syntax.
-
-        Call ``get_obml_reference()`` for the full specification.
+        Call ``get_json_schema("obml")`` for the schema or
+        ``get_obml_reference()`` for the full specification with examples.
 
         Args:
-            model: (mandatory) OBML model as a JSON object (top-level keys:
-                version, dataObjects, dimensions, measures, metrics).
-                Joins are defined inside each dataObject, not at the top level.
+            model: (mandatory) OBML model as a JSON object.
             extends: Optional list of analytical fragment objects (dimensions,
                 measures, metrics) to merge into the model before loading.
-            inherits: Optional model_id of an already-loaded parent model in
-                the session.  The child model inherits the parent's data
-                objects and joins, adding or overriding analytical artefacts.
-            dedup: When true (default), if identical OBML content is already
-                loaded in the current session, reuse its model_id instead of
-                re-parsing.  Pass false to force a fresh load.
+            inherits: Optional model_id of an already-loaded parent model whose
+                data objects and joins the child inherits.
+            dedup: When true (default), reuse the model_id of identical OBML
+                already loaded in the session. Pass false to force a fresh load.
         """
         return _impl_load_model(model, extends, inherits, dedup)
+
+    @mcp.tool
+    def load_model_from_osi(osi_yaml: str, dedup: bool = True) -> str:
+        """Load a model from OSI (Open Semantic Interchange) YAML. Returns a model_id.
+
+        Like ``load_model``, but accepts an OSI-format YAML string, converts it
+        to OBML server-side, then loads it into the session. Surfaces the OSI →
+        OBML conversion warnings and advisory OSI-schema validation alongside
+        the model summary.
+
+        Args:
+            osi_yaml: (mandatory) OSI model as a YAML string.
+            dedup: When true (default), reuse the model_id of identical converted
+                OBML already loaded in the session. Pass false to force a fresh load.
+        """
+        return _impl_load_model_from_osi(osi_yaml, dedup)
 
     @mcp.tool
     def remove_model(model_id: str) -> str:
@@ -1918,6 +1965,32 @@ def _register_model_tools() -> None:
         return "\n".join(lines)
 
     @mcp.tool
+    def export_model_to_osi(
+        model_id: str,
+        model_name: str = "semantic_model",
+        model_description: str = "",
+        ai_instructions: str = "",
+    ) -> str:
+        """Export a loaded model as OSI (Open Semantic Interchange) YAML.
+
+        Converts a model already loaded in the session (its faithful OBML
+        source) to OSI format. Returns the OSI YAML plus any conversion
+        warnings and validation results.
+
+        Args:
+            model_id: id of a loaded model (from ``load_model``).
+            model_name: Name for the exported OSI model.
+            model_description: Description for the OSI model.
+            ai_instructions: AI instructions for the OSI model.
+        """
+        return _impl_export_model_to_osi(
+            _resolve_model_id(model_id),
+            model_name,
+            model_description,
+            ai_instructions,
+        )
+
+    @mcp.tool
     def run_batch(
         queries: list[dict],
         model_yaml: str | None = None,
@@ -1932,26 +2005,16 @@ def _register_model_tools() -> None:
     ) -> str:
         """Run N independent queries against one model in a single round trip.
 
-        POSTs ``/v1/oneshot/batch``.  Loads (or references) one OBML model,
-        then runs every query in ``queries`` in parallel.  Returns the raw
-        JSON response (one ``OneshotBatchQueryResult`` per query, keyed by
-        ``id``).  Stable result ordering by caller id.
+        Loads (or references) one OBML model, then runs every query in
+        ``queries`` in parallel. Returns the raw JSON response (one result per
+        query, keyed by ``id``, stable order). Provide exactly one of
+        ``model_yaml`` or ``model_id``.
 
-        Provide exactly one of ``model_yaml`` (raw OBML YAML string) or
-        ``model_id`` (an already-loaded model in ``session_id``).
-
-        Each ``queries`` item is a dict::
-
-            {"id": "q1", "query": {"select": {...}, ...},
-             "execute": true, "dialect": "snowflake"}
-
-        ``id`` is optional — the server auto-assigns ``q0``, ``q1``, … when
-        omitted.  ``execute`` and ``dialect`` per-item override the batch
-        defaults.
-
-        Partial failure is the default per query (``status: error``);
-        ``fail_fast=True`` cancels the rest on first failure.  The server
-        caps ``max_parallelism`` at its configured limit.
+        Each ``queries`` item is a dict ``{"id": "q1", "query": {...},
+        "execute": true, "dialect": "snowflake"}``; ``id`` is optional (server
+        auto-assigns ``q0``, ``q1``, …) and per-item ``execute``/``dialect``
+        override the batch defaults. Per-query partial failure is the default;
+        ``fail_fast`` cancels the rest on first failure.
 
         Args:
             queries: List of query items (see above).
