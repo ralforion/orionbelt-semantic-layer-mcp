@@ -128,7 +128,7 @@ n8n's **AI Agent** node can use MCP tools directly, enabling natural language in
 System prompt suggestion for the AI Agent:
 
 > You are a data analytics assistant connected to the OrionBelt Semantic Layer.
-> Available actions: explore models (describe_model, list_artefacts, find_artefacts),
+> Available actions: explore models (describe_model, find_artefacts),
 > and compile + execute queries (execute_query).
 > Always use the appropriate dialect for the target database.
 

@@ -2374,7 +2374,7 @@ def test_tool_phase_buckets_are_disjoint():
     # run_batch and get_json_schema are always-on (both phases).
     assert {"load_model", "remove_model", "run_batch", "get_json_schema"} <= b1
     assert {"get_obml_reference", "list_dialects"} <= b2
-    assert {"describe_model", "execute_query", "list_artefacts", "find_artefacts"} <= b3
+    assert {"describe_model", "execute_query", "find_artefacts"} <= b3
 
 
 def test_tool_phase_buckets_classify_every_registered_tool():
@@ -2428,7 +2428,7 @@ def _all_bucket_sample():
         _fake_tool("get_json_schema"),  # bucket 1 — always-on (both phases)
         _fake_tool("get_obml_reference"),  # bucket 2 — design-only
         _fake_tool("describe_model"),  # bucket 3 — run-only
-        _fake_tool("list_artefacts"),  # bucket 3 — run-only
+        _fake_tool("find_artefacts"),  # bucket 3 — run-only
     ]
 
 
@@ -2466,7 +2466,7 @@ def test_phase_middleware_run_swaps_out_design_tools():
         "remove_model",
         "get_json_schema",
         "describe_model",
-        "list_artefacts",
+        "find_artefacts",
     }
     # The key fix: design-only tools must not leak into the run surface.
     assert "get_obml_reference" not in names
@@ -2878,3 +2878,68 @@ def test_find_artefacts_kind_sent_as_types(mock_api: respx.MockRouter):
     sent = _json.loads(route.calls[0].request.read().decode())
     assert sent["types"] == ["measure"]
     assert sent["query"] == "rev"
+
+
+# ---------------------------------------------------------------------------
+# Merged tool dispatch (find_artefacts list+find; load_model OBML+OSI)
+# ---------------------------------------------------------------------------
+
+
+def _registered_tool(name: str):
+    """Fetch a registered tool's underlying callable from the FastMCP registry."""
+    server._register_model_tools()
+    tools = asyncio.run(server.mcp._list_tools())
+    return next(t.fn for t in tools if t.name == name)
+
+
+def test_find_artefacts_without_query_enumerates(monkeypatch):
+    """find_artefacts with no query dispatches to the deterministic enumeration."""
+    calls = {}
+    monkeypatch.setattr(
+        server,
+        "_impl_list_artefacts",
+        lambda mid, kind, name: calls.setdefault("list", (mid, kind, name)),
+    )
+    monkeypatch.setattr(server, "_impl_find_artefacts", lambda *a: calls.setdefault("find", a))
+
+    _registered_tool("find_artefacts")(kind="measure", name="Revenue", model_id="m001")
+
+    assert calls["list"] == ("m001", "measure", "Revenue")
+    assert "find" not in calls
+
+
+def test_find_artefacts_with_query_searches(monkeypatch):
+    """find_artefacts with a query dispatches to the fuzzy ranked search."""
+    calls = {}
+    monkeypatch.setattr(
+        server,
+        "_impl_find_artefacts",
+        lambda mid, q, kind: calls.setdefault("find", (mid, q, kind)),
+    )
+    monkeypatch.setattr(server, "_impl_list_artefacts", lambda *a: calls.setdefault("list", a))
+
+    _registered_tool("find_artefacts")(query="rev", kind="measure", model_id="m001")
+
+    assert calls["find"] == ("m001", "rev", "measure")
+    assert "list" not in calls
+
+
+def test_load_model_with_osi_yaml_dispatches_to_osi(monkeypatch):
+    """load_model with osi_yaml routes to the OSI loader, not the OBML loader."""
+    calls = {}
+    monkeypatch.setattr(
+        server, "_impl_load_model_from_osi", lambda y, dedup: calls.setdefault("osi", (y, dedup))
+    )
+    monkeypatch.setattr(server, "_impl_load_model", lambda *a: calls.setdefault("obml", a))
+
+    _registered_tool("load_model")(osi_yaml="name: m\n", dedup=False)
+
+    assert calls["osi"] == ("name: m\n", False)
+    assert "obml" not in calls
+
+
+def test_load_model_rejects_osi_combined_with_obml_args():
+    """osi_yaml is mutually exclusive with model/extends/inherits."""
+    load_model = _registered_tool("load_model")
+    with pytest.raises(_ToolError, match="exactly one source"):
+        load_model(osi_yaml="name: m\n", model={"version": "1.0"})
