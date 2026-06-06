@@ -7,7 +7,7 @@
 
 <p align="center"><strong>Thin MCP server that delegates to the OrionBelt Semantic Layer REST API</strong></p>
 
-[![Version 2.8.0](https://img.shields.io/badge/version-2.8.0-purple.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/releases)
+[![Version 2.8.1](https://img.shields.io/badge/version-2.8.1-purple.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/releases)
 [![OrionBelt Semantic Layer 2.8](https://img.shields.io/badge/OrionBelt_Semantic_Layer-2.8-0054A6.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/blob/main/LICENSE)
@@ -124,8 +124,7 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 | MCP Tool                        | Description                                                      |
 | ------------------------------- | ---------------------------------------------------------------- |
 | `get_obml_reference()`          | Returns the full OBML format specification                       |
-| `load_model(model, dedup=True)` | Parse, validate, and store a model (returns health + model_load) |
-| `load_model_from_osi(osi_yaml, dedup=True)` | Load a model from OSI YAML (converted to OBML server-side)        |
+| `load_model(model? \| osi_yaml?, dedup=True)` | Parse, validate, and store a model (returns health + model_load). Pass `model` (OBML JSON) **or** `osi_yaml` (OSI YAML, converted to OBML server-side) |
 | `describe_model(model_id)`      | Inspect data objects, dimensions, measures, metrics              |
 | `remove_model(model_id)`        | Remove a model from the current session                          |
 | `list_models()`                 | List all models loaded in the current session                    |
@@ -135,8 +134,7 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 
 | MCP Tool                                 | Description                                                                                      |
 | ---------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `list_artefacts(model_id, kind?, name?)` | **Exact, deterministic lookup** — all artefacts, one kind, or one named artefact (full records)  |
-| `find_artefacts(model_id, query, kind?)` | **Fuzzy, ranked search** — resolve a vague term to real artefact names (exact / synonym / fuzzy) |
+| `find_artefacts(model_id, query?, kind?, name?)` | Look up artefacts. With `query` → **fuzzy, ranked search** (resolve a vague term: exact / synonym / fuzzy). Without `query` → **exact, deterministic lookup** (all artefacts, one kind, or one named artefact, full records) |
 | `explain_artefact(model_id, name)`       | Explain lineage of a dimension, measure, or metric                                               |
 | `list_examples(model_id, intent?)`       | List authored example queries (filterable by intent tag)                                         |
 | `get_example(model_id, name)`            | Get one example with query + compiled SQL preview                                                |
@@ -175,7 +173,7 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 The server presents a **phase-scoped tool surface**: instead of listing all
 all tools at once, it shows only the tools that make sense for where you are in
 the model lifecycle. About half the tools are meaningless until a model is
-loaded (`execute_query`, `describe_model`, `list_artefacts`, …) and the rest are
+loaded (`execute_query`, `describe_model`, `find_artefacts`, …) and the rest are
 about authoring or reference (`get_obml_reference`, `get_json_schema`,
 `list_dialects`). Splitting them keeps the surface small and prevents a
 whole class of error — calling a query tool with no model loaded.
@@ -188,9 +186,9 @@ design/reference tools:
 
 | Bucket          | Listed when                 | Tools                                                                                                                                                                                                                                                                                             |
 | --------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Always**      | always (both phases)        | `load_model`, `load_model_from_osi`, `remove_model` (transition verbs — stay available in the run phase so a second model can be loaded mid-session, up to `max_models_per_session`); `run_batch` (self-contained one-shot — loads/references a model inline, so it needs no prior session state); `get_json_schema` (QueryObject/OBML schemas — needed in both phases) |
+| **Always**      | always (both phases)        | `load_model`, `remove_model` (transition verbs — stay available in the run phase so a second model can be loaded mid-session, up to `max_models_per_session`); `run_batch` (self-contained one-shot — loads/references a model inline, so it needs no prior session state); `get_json_schema` (QueryObject/OBML schemas — needed in both phases) |
 | **Design-only** | only when no model loaded   | `get_obml_reference`, `list_dialects`                                                                                                                                  |
-| **Run-only**    | only when a model is loaded | `describe_model`, `get_model_diagram`, `list_artefacts`, `find_artefacts`, `explain_artefact`, `execute_query`, `list_examples`, `get_example`, `get_model_graph`, `get_join_graph`, `query_model_graph_by_sparql`, `list_models`, `export_model_to_osi` |
+| **Run-only**    | only when a model is loaded | `describe_model`, `get_model_diagram`, `find_artefacts`, `explain_artefact`, `execute_query`, `list_examples`, `get_example`, `get_model_graph`, `get_join_graph`, `query_model_graph_by_sparql`, `list_models`, `export_model_to_osi` |
 
 ```
                        load_model  (returns "re-list" signal)
@@ -252,7 +250,7 @@ listed from the first request and there is no `load_model` step.
 
 1. **Get reference** — call `get_obml_reference()` to learn OBML syntax
 2. **Load model** — call `load_model(model_yaml)` to get a `model_id`
-3. **Explore** — call `describe_model(model_id)` or use discovery tools (`list_artefacts`, `find_artefacts`, `explain_artefact`)
+3. **Explore** — call `describe_model(model_id)` or use discovery tools (`find_artefacts`, `explain_artefact`)
 4. **Execute** — call `execute_query(model_id, query_json='{"select": {"dimensions": [...], "measures": [...]}}')` to compile and run SQL, returning rows (requires `QUERY_EXECUTE=true` on the API; see `get_json_schema("query")` for the QueryObject shape)
 
 ## Integration Guides

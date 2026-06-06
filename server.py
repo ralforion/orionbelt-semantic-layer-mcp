@@ -197,7 +197,7 @@ _loaded_model_ids: set[str] = set()
 # fall into three buckets:
 #
 #   * always (bucket 1) — ALWAYS listed, in both phases. The lifecycle/
-#     transition verbs (load_model, load_model_from_osi, remove_model), which
+#     transition verbs (load_model, remove_model), which
 #     must stay available in the run phase so a second model can be loaded mid-session
 #     (max_models_per_session = 10); plus run_batch, the self-contained one-shot
 #     (loads/references a model inline in one call, so it depends on no prior
@@ -226,7 +226,6 @@ PHASE_RUN = "run"
 _ALWAYS_TOOLS: frozenset[str] = frozenset(
     {
         "load_model",
-        "load_model_from_osi",
         "remove_model",
         "run_batch",
         "get_json_schema",
@@ -251,7 +250,6 @@ _RUN_TIME_TOOLS: frozenset[str] = frozenset(
         "export_model_to_osi",
         "describe_model",
         "get_model_diagram",
-        "list_artefacts",
         "find_artefacts",
         "explain_artefact",
         "execute_query",
@@ -428,7 +426,7 @@ class PhaseMiddleware(Middleware):
             raise ToolError(
                 f"No model loaded — '{name}' is a run-time tool and is not "
                 "available yet. Call load_model first, then re-list tools: the "
-                "run-time tool set (execute_query, describe_model, list_artefacts, "
+                "run-time tool set (execute_query, describe_model, find_artefacts, "
                 "…) becomes available once a model is loaded."
             )
         return await call_next(context)
@@ -1140,7 +1138,7 @@ def _impl_get_model_diagram(model_id: str | None, show_columns: bool, theme: str
     return _parse_json(resp)["mermaid"]
 
 
-# Artefact kinds discoverable via list_artefacts / find_artefacts.
+# Artefact kinds discoverable via find_artefacts.
 _ARTEFACT_KINDS: tuple[str, ...] = ("dimension", "measure", "metric")
 
 # kind → (plural REST collection segment, list-section header).
@@ -1473,7 +1471,7 @@ def _render_load_result(data: dict, extra_lines: list[str] | None = None) -> str
     parts.append("")
     parts.append(
         "Run-time tools are now available (execute_query, describe_model, "
-        "list_artefacts, find_artefacts, …). Re-list tools to discover them."
+        "find_artefacts, …). Re-list tools to discover them."
     )
     return "\n".join(parts)
 
@@ -1745,49 +1743,38 @@ def _register_model_tools() -> None:
     # ----- discovery -----
 
     @mcp.tool
-    def list_artefacts(
+    def find_artefacts(
+        query: str | None = None,
         kind: Literal["dimension", "measure", "metric"] | None = None,
         name: str | None = None,
         model_id: str | None = None,
     ) -> str:
-        """Look up model artefacts — exact, deterministic, complete.
+        """Look up model artefacts (dimensions, measures, metrics).
 
-        Use this when you know what you want or want the authoritative set
-        (contrast ``find_artefacts``, which is fuzzy ranked search). Returns
-        full artefact records:
+        Two modes, selected by whether you pass ``query``:
 
-        - no kind/name → every dimension, measure, and metric in the model;
-        - ``kind`` only → the complete set of that one kind;
-        - ``name`` → that exact artefact (optionally constrained to ``kind``).
+        - ``query`` set → fuzzy, ranked search. Matches names and synonyms
+          (exact, synonym, and fuzzy/partial) and returns ranked candidates —
+          for "I don't know the exact name". ``name`` is ignored in this mode.
+        - ``query`` omitted → exact, deterministic, complete enumeration (the
+          authoritative set). No args → every dimension, measure, and metric;
+          ``kind`` only → the complete set of that one kind; ``name`` → that
+          exact artefact (optionally constrained to ``kind``).
+
+        ``kind`` narrows either mode to one artefact kind.
 
         Args:
+            query: Search term (matched against names and synonyms). Omit for
+                deterministic enumeration instead of ranked search.
             kind: Restrict to one artefact kind (dimension, measure, metric).
-            name: Return only the artefact with this exact name.
+            name: In enumeration mode, return only the artefact with this exact
+                name. Ignored when ``query`` is set.
             model_id: id from ``load_model`` (multi-model); omit in single-model.
         """
-        return _impl_list_artefacts(_resolve_model_id(model_id), kind, name)
-
-    @mcp.tool
-    def find_artefacts(
-        query: str,
-        kind: Literal["dimension", "measure", "metric"] | None = None,
-        model_id: str | None = None,
-    ) -> str:
-        """Fuzzy, ranked search across model artefacts — for "I don't know the
-        exact name".
-
-        Matches names and synonyms (exact, synonym, and fuzzy/partial), and
-        returns ranked candidates — not the authoritative complete set (use
-        ``list_artefacts`` for that). Good for resolving a vague term to real
-        artefact names.
-
-        Args:
-            query: Search term (matched against names and synonyms).
-            kind: Restrict the search to one artefact kind (dimension,
-                measure, metric).  Omit to search all kinds.
-            model_id: id from ``load_model`` (multi-model); omit in single-model.
-        """
-        return _impl_find_artefacts(_resolve_model_id(model_id), query, kind)
+        resolved = _resolve_model_id(model_id)
+        if query is not None:
+            return _impl_find_artefacts(resolved, query, kind)
+        return _impl_list_artefacts(resolved, kind, name)
 
     @mcp.tool
     def explain_artefact(name: str, model_id: str | None = None) -> str:
@@ -1898,46 +1885,46 @@ def _register_model_tools() -> None:
     @mcp.tool
     def load_model(
         model: dict | str | None = None,
+        osi_yaml: str | None = None,
         extends: list[dict] | str | None = None,
         inherits: str | None = None,
         dedup: bool = True,
     ) -> str:
         """Load a semantic model definition. Returns a model_id.
 
-        ``model`` is mandatory: the OBML model as a JSON object with top-level
-        keys ``version``, ``dataObjects``, ``dimensions``, ``measures``,
-        ``metrics`` (camelCase throughout). Joins live INSIDE each dataObject
-        (``joins`` list), not at the top level, and reference OBML column names.
+        Provide exactly one source:
 
-        Call ``get_json_schema("obml")`` for the schema or
-        ``get_obml_reference()`` for the full specification with examples.
+        - ``model`` (native OBML): a JSON object with top-level keys
+          ``version``, ``dataObjects``, ``dimensions``, ``measures``,
+          ``metrics`` (camelCase throughout). Joins live INSIDE each
+          dataObject (``joins`` list), not at the top level, and reference OBML
+          column names. Supports ``extends``/``inherits``. Call
+          ``get_json_schema("obml")`` for the schema or ``get_obml_reference()``
+          for the full specification with examples.
+        - ``osi_yaml`` (OSI — Open Semantic Interchange): a YAML string,
+          converted to OBML server-side before loading. Surfaces the OSI → OBML
+          conversion warnings and advisory OSI-schema validation alongside the
+          model summary. ``extends``/``inherits`` do not apply to this source.
 
         Args:
-            model: (mandatory) OBML model as a JSON object.
+            model: OBML model as a JSON object. Mutually exclusive with osi_yaml.
+            osi_yaml: OSI model as a YAML string. Mutually exclusive with model.
             extends: Optional list of analytical fragment objects (dimensions,
-                measures, metrics) to merge into the model before loading.
+                measures, metrics) to merge into the model before loading
+                (OBML source only).
             inherits: Optional model_id of an already-loaded parent model whose
-                data objects and joins the child inherits.
+                data objects and joins the child inherits (OBML source only).
             dedup: When true (default), reuse the model_id of identical OBML
                 already loaded in the session. Pass false to force a fresh load.
         """
+        if osi_yaml is not None:
+            if model is not None or extends is not None or inherits is not None:
+                raise ToolError(
+                    "Provide exactly one source: 'osi_yaml' cannot be combined "
+                    "with 'model', 'extends', or 'inherits'."
+                )
+            return _impl_load_model_from_osi(osi_yaml, dedup)
         return _impl_load_model(model, extends, inherits, dedup)
-
-    @mcp.tool
-    def load_model_from_osi(osi_yaml: str, dedup: bool = True) -> str:
-        """Load a model from OSI (Open Semantic Interchange) YAML. Returns a model_id.
-
-        Like ``load_model``, but accepts an OSI-format YAML string, converts it
-        to OBML server-side, then loads it into the session. Surfaces the OSI →
-        OBML conversion warnings and advisory OSI-schema validation alongside
-        the model summary.
-
-        Args:
-            osi_yaml: (mandatory) OSI model as a YAML string.
-            dedup: When true (default), reuse the model_id of identical converted
-                OBML already loaded in the session. Pass false to force a fresh load.
-        """
-        return _impl_load_model_from_osi(osi_yaml, dedup)
 
     @mcp.tool
     def remove_model(model_id: str) -> str:

@@ -4,6 +4,34 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.8.1] — 2026-06-06
+
+### Changed
+
+- **Tool consolidation to cut context bloat and tool-choice noise.** Two pairs
+  of tools collapsed into one each; no API change (still aligned with OrionBelt
+  Semantic Layer API 2.8). The underlying behaviours are unchanged — only the
+  exposed tool surface shrank.
+  - **`list_artefacts` merged into `find_artefacts`.** `find_artefacts` now
+    takes an optional `query`: with `query` it does the fuzzy ranked search as
+    before; without `query` it does the exact, deterministic enumeration that
+    `list_artefacts` used to (no args → every artefact; `kind` → that whole
+    kind; `name` → that exact artefact). `name` is accepted in the enumeration
+    mode and ignored when `query` is set.
+  - **`load_model_from_osi` merged into `load_model`.** `load_model` now takes
+    an optional `osi_yaml`: pass `model` (OBML JSON) **or** `osi_yaml` (OSI
+    YAML, converted to OBML server-side). The two are mutually exclusive, and
+    `osi_yaml` cannot be combined with `extends`/`inherits` (a `ToolError`
+    spells this out).
+
+### Removed
+
+- **`list_artefacts` and `load_model_from_osi` tools** — subsumed by
+  `find_artefacts` and `load_model` respectively (see above). Callers using the
+  old names should switch: `list_artefacts(kind, name)` →
+  `find_artefacts(kind=…, name=…)` (omit `query`);
+  `load_model_from_osi(osi_yaml)` → `load_model(osi_yaml=…)`.
+
 ## [2.8.0] — 2026-06-02
 
 ### Added
