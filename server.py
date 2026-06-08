@@ -1495,9 +1495,7 @@ def _format_osi_input_validation(input_validation: dict | None) -> list[str]:
 def _impl_load_model_from_osi(osi_yaml: str | None, dedup: bool) -> str:
     """Convert an OSI YAML model to OBML, load it, and render the summary."""
     if not osi_yaml or not osi_yaml.strip():
-        raise ToolError(
-            "osi_yaml is mandatory — provide the OSI model as a YAML string."
-        )
+        raise ToolError("osi_yaml is mandatory — provide the OSI model as a YAML string.")
     logger.info("load_model_from_osi called")
     resp = _session_request(
         "POST", "/models/from-osi", json_body={"osi_yaml": osi_yaml, "dedup": dedup}
