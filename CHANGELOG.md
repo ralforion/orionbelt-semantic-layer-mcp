@@ -4,6 +4,15 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.8.4] — 2026-06-08
+
+### Fixed
+
+- **Tightened load_model docstring to reduce semantic overlap.** Simplified
+  the docstring to focus on action and source choice, moving OBML structure
+  details to the model argument. Removed reference to "OBML schema and full
+  specification" that caused confusion with get_obml_reference.
+
 ## [2.8.3] — 2026-06-08
 
 ### Fixed
