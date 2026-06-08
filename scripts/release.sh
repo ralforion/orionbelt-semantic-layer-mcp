@@ -97,9 +97,27 @@ if ! git diff --quiet; then
     fail "Uncommitted changes. Commit or stash first."
 fi
 
+echo "Checking code formatting..."
+uv run ruff format --check server.py >/dev/null 2>&1 || fail "Code formatting issues detected. Run 'ruff format server.py' to fix."
+ok "Code formatting correct"
+
+echo "Checking linting..."
+uv run ruff check server.py || fail "Linting issues detected. Fix them before releasing."
+ok "Linting checks pass"
+
 echo "Running tests..."
 uv run pytest --tb=short -q || fail "Tests failed"
 ok "All tests pass"
+
+echo "Checking CI status..."
+# Get the latest CI run status for current branch
+CI_STATUS=$(gh run list --branch "$BRANCH" --limit 1 --json conclusion --jq '.[0].conclusion // "pending"' 2>/dev/null || echo "unknown")
+if [[ "$CI_STATUS" != "success" ]]; then
+    echo -e "${YELLOW}Warning: Latest CI run status is '$CI_STATUS' (not 'success')${NC}"
+    echo "Check: https://github.com/$REPO/actions"
+    confirm "Continue despite CI not being green?" || fail "Aborted due to CI status"
+fi
+ok "CI status checked"
 
 echo "Checking version consistency..."
 PYPROJECT_VER=$(grep '^version' "$REPO_ROOT/pyproject.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')

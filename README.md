@@ -273,10 +273,26 @@ Each guide includes quick-start examples, multi-agent patterns, and connection o
 # Run tests
 uv run pytest
 
-# Lint
+# Lint and format
 uv run ruff check server.py
 uv run ruff format server.py tests/
+
+# Set up pre-commit hooks (recommended)
+./scripts/setup-hooks.sh
 ```
+
+### Release Process
+
+The release script (`scripts/release.sh`) includes comprehensive pre-flight checks to prevent issues like the v2.8.2 formatting problem:
+
+- **Code formatting check** - Ensures `ruff format` passes
+- **Linting check** - Ensures `ruff check` passes  
+- **CI status check** - Warns if CI is not green
+- **Test suite** - Runs all tests
+- **Version consistency** - Verifies version across files
+- **Changelog** - Ensures changelog entry exists
+
+Pre-commit hooks are available to catch issues early. Run `./scripts/setup-hooks.sh` to install them.
 
 ## Hosted MCP Server
 
