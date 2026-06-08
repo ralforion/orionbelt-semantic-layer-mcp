@@ -1890,24 +1890,23 @@ def _register_model_tools() -> None:
         inherits: str | None = None,
         dedup: bool = True,
     ) -> str:
-        """Load a semantic model definition. Returns a model_id.
+        """Load a semantic model and return a model_id.
 
-        Provide exactly one source:
-
-        - ``model`` (native OBML): a JSON object with top-level keys
-          ``version``, ``dataObjects``, ``dimensions``, ``measures``,
-          ``metrics`` (camelCase throughout). Joins live INSIDE each
-          dataObject (``joins`` list), not at the top level, and reference OBML
-          column names. Supports ``extends``/``inherits``. The OBML schema and
-          full specification with examples are available as separate references.
-        - ``osi_yaml`` (OSI — Open Semantic Interchange): a YAML string,
-          converted to OBML server-side before loading. Surfaces the OSI → OBML
-          conversion warnings and advisory OSI-schema validation alongside the
-          model summary. ``extends``/``inherits`` do not apply to this source.
+        Provide exactly one source: ``model`` (native OBML JSON) or ``osi_yaml``
+        (OSI YAML, converted to OBML server-side, surfacing conversion warnings).
 
         Args:
-            model: OBML model as a JSON object. Mutually exclusive with osi_yaml.
-            osi_yaml: OSI model as a YAML string. Mutually exclusive with model.
+            model: OBML model as a JSON object with top-level keys: ``version``,
+                ``dataObjects``, ``dimensions``, ``measures``, ``metrics``
+                (camelCase throughout). Joins live INSIDE each dataObject
+                (``joins`` list), not at the top level, and reference OBML column
+                names. Supports ``extends``/``inherits``. Mutually exclusive with
+                osi_yaml.
+            osi_yaml: OSI model as a YAML string. Converted to OBML server-side
+                before loading. Surfaces OSI → OBML conversion warnings and advisory
+                OSI-schema validation alongside the model summary.
+                ``extends``/``inherits`` do not apply to this source. Mutually
+                exclusive with model.
             extends: Optional list of analytical fragment objects (dimensions,
                 measures, metrics) to merge into the model before loading
                 (OBML source only).
