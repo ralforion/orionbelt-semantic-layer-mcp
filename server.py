@@ -1098,7 +1098,10 @@ def _impl_execute_query(
     try:
         query = json.loads(query_json)
     except json.JSONDecodeError as exc:
-        raise ToolError(f"Invalid query JSON: {exc}") from exc
+        raise ToolError(
+            f"Invalid query JSON: {exc}. The QueryObject schema is available via "
+            "get_json_schema('query') and worked examples via get_example."
+        ) from exc
 
     extra_params: dict[str, str] = {"format": output_format}
     if format_values is not None:
@@ -1663,7 +1666,7 @@ def _register_model_tools() -> None:
     is always registered and gated by the ``query_execute`` capability at
     list/call time (see ``PhaseMiddleware``).
 
-    ``model_id`` is the id returned by ``load_model`` in multi-model mode; omit it
+    ``model_id`` is a loaded model's id in multi-model mode; omit it
     in single-model mode, where the one pre-loaded model is always used.
     """
 
@@ -1678,7 +1681,7 @@ def _register_model_tools() -> None:
         its structure.
 
         Args:
-            model_id: id from ``load_model`` (multi-model); omit in single-model.
+            model_id: a loaded model's id (multi-model); omit in single-model.
         """
         return _impl_describe_model(_resolve_model_id(model_id))
 
@@ -1694,7 +1697,7 @@ def _register_model_tools() -> None:
         columns, and join relationships in the model.
 
         Args:
-            model_id: id from ``load_model`` (multi-model); omit in single-model.
+            model_id: a loaded model's id (multi-model); omit in single-model.
             show_columns: Whether to include column details in the diagram.
             theme: Mermaid diagram theme (e.g. "default", "dark", "forest").
         """
@@ -1708,7 +1711,7 @@ def _register_model_tools() -> None:
         columns) in the model.  Useful for understanding table relationships.
 
         Args:
-            model_id: id from ``load_model`` (multi-model); omit in single-model.
+            model_id: a loaded model's id (multi-model); omit in single-model.
         """
         return _impl_get_join_graph(_resolve_model_id(model_id))
 
@@ -1721,7 +1724,7 @@ def _register_model_tools() -> None:
         web integration or further analysis.
 
         Args:
-            model_id: id from ``load_model`` (multi-model); omit in single-model.
+            model_id: a loaded model's id (multi-model); omit in single-model.
         """
         return _impl_get_graph(_resolve_model_id(model_id))
 
@@ -1734,7 +1737,7 @@ def _register_model_tools() -> None:
 
         Args:
             query: SPARQL query string (SELECT or ASK).
-            model_id: id from ``load_model`` (multi-model); omit in single-model.
+            model_id: a loaded model's id (multi-model); omit in single-model.
         """
         return _impl_sparql_query(_resolve_model_id(model_id), query)
 
@@ -1767,7 +1770,7 @@ def _register_model_tools() -> None:
             kind: Restrict to one artefact kind (dimension, measure, metric).
             name: In enumeration mode, return only the artefact with this exact
                 name. Ignored when ``query`` is set.
-            model_id: id from ``load_model`` (multi-model); omit in single-model.
+            model_id: a loaded model's id (multi-model); omit in single-model.
         """
         resolved = _resolve_model_id(model_id)
         if query is not None:
@@ -1784,7 +1787,7 @@ def _register_model_tools() -> None:
 
         Args:
             name: The dimension, measure, or metric name to explain.
-            model_id: id from ``load_model`` (multi-model); omit in single-model.
+            model_id: a loaded model's id (multi-model); omit in single-model.
         """
         return _impl_explain_artefact(_resolve_model_id(model_id), name)
 
@@ -1799,7 +1802,7 @@ def _register_model_tools() -> None:
             intent: Optional intent-tag filter.  Falls back through exact →
                 contains → fuzzy tag matching.  When no examples match,
                 the server returns a ``suggestion`` listing available tags.
-            model_id: id from ``load_model`` (multi-model); omit in single-model.
+            model_id: a loaded model's id (multi-model); omit in single-model.
         """
         return _impl_list_examples(_resolve_model_id(model_id), intent)
 
@@ -1809,7 +1812,7 @@ def _register_model_tools() -> None:
 
         Args:
             name: The example's ``name`` field.
-            model_id: id from ``load_model`` (multi-model); omit in single-model.
+            model_id: a loaded model's id (multi-model); omit in single-model.
         """
         return _impl_get_example(_resolve_model_id(model_id), name)
 
@@ -1829,18 +1832,17 @@ def _register_model_tools() -> None:
     ) -> str:
         """Compile and execute a semantic query (QueryObject), returning SQL + results.
 
-        Pass ``query_json`` (QueryObject JSON string). Call
-        ``get_json_schema("query")`` for the schema, ``describe_model`` for valid
-        names, ``get_example`` for worked queries. If no ``limit`` is set, a
-        server-side default row limit applies.
+        Pass ``query_json`` — a QueryObject as a JSON string. If no ``limit`` is set,
+        a server-side default row limit applies.
 
         Args:
-            query_json: Complete QueryObject as a JSON string. See
-                ``get_json_schema("query")`` for the full schema (select with
-                dimensions/measures or fields, where, having, order_by, limit,
-                offset, dimensionsExclude, usePathNames, coalesce groups, …).
-            model_id: id from ``load_model`` (multi-model); omit in single-model.
-            dialect: Target SQL dialect.  When omitted the API resolves via
+            query_json: Complete QueryObject as a JSON string: a ``select`` of
+                dimensions/measures (or ``fields``), plus optional ``where``,
+                ``having``, ``order_by``, ``limit``, ``offset``, ``dimensionsExclude``,
+                ``usePathNames``, and coalesce groups. Dimension/measure names must
+                match those defined in the loaded model.
+            model_id: a loaded model's id (multi-model); omit in single-model.
+            dialect: Target SQL dialect. When omitted the API resolves via
                 model.settings.defaultDialect → server default.
             output_format: Response format — "json" (default) or "tsv".
             format_values: Format numeric cells as display strings.
@@ -1928,7 +1930,7 @@ def _register_model_tools() -> None:
         """Remove a model from the current session.
 
         Args:
-            model_id: The id returned by ``load_model``.
+            model_id: The id of the model to remove.
         """
         return _impl_remove_model(model_id)
 
@@ -1962,7 +1964,7 @@ def _register_model_tools() -> None:
         warnings and validation results.
 
         Args:
-            model_id: id of a loaded model (from ``load_model``).
+            model_id: id of a loaded model.
             model_name: Name for the exported OSI model.
             model_description: Description for the OSI model.
             ai_instructions: AI instructions for the OSI model.

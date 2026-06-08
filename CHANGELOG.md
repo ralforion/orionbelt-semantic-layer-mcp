@@ -4,6 +4,17 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.8.3] — 2026-06-08
+
+### Fixed
+
+- **Further tool description confusability reduction.** Removed additional
+  cross-references to sibling tools that were causing selection errors:
+  - `execute_query`: Removed mentions of `get_json_schema`, `describe_model`,
+    and `get_example` from main description
+  - All model_id args: Changed "id from load_model" to "a loaded model's id"
+    across 11 tools to prevent misdirection to `load_model`
+
 ## [2.8.2] — 2026-06-08
 
 ### Fixed
