@@ -1689,7 +1689,7 @@ def _register_model_tools() -> None:
     def get_model_diagram(
         model_id: str | None = None,
         show_columns: bool = True,
-        theme: str = "default",
+        theme: Literal["default", "dark", "forest", "neutral", "base"] = "default",
     ) -> str:
         """Generate a Mermaid ER diagram for the model.
 
@@ -1699,7 +1699,8 @@ def _register_model_tools() -> None:
         Args:
             model_id: a loaded model's id (multi-model); omit in single-model.
             show_columns: Whether to include column details in the diagram.
-            theme: Mermaid diagram theme (e.g. "default", "dark", "forest").
+            theme: Mermaid diagram theme — one of the built-in themes
+                "default", "dark", "forest", "neutral", or "base".
         """
         return _impl_get_model_diagram(_resolve_model_id(model_id), show_columns, theme)
 

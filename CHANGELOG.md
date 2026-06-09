@@ -4,6 +4,19 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.8.5] — 2026-06-09
+
+### Changed
+
+- **Constrained `get_model_diagram` `theme` to a `Literal` enum.** The parameter
+  now accepts only the five built-in Mermaid themes (`default`, `dark`,
+  `forest`, `neutral`, `base`) instead of a free-form string, so invalid themes
+  are rejected at the input boundary and the constraint is published in the
+  tool's JSON schema. Tightens schema rigor; no behavior change for valid
+  callers (default remains `default`). Surfaced during a security audit
+  (`mcp-security-audit`): the server scored 95/100 Grade A with zero real
+  vulnerabilities across both the run-time and design-time tool surfaces.
+
 ## [2.8.4] — 2026-06-08
 
 ### Fixed
