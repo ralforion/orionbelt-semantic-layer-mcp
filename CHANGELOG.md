@@ -4,6 +4,25 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.9.0] — 2026-06-11
+
+Tracks OrionBelt Semantic Layer API **v2.9.0**.
+
+### Added
+
+- **`export_model_to_osi` gained an `include_ontology` parameter.** When set,
+  the export appends the OSI ontology document as a separate artefact (under an
+  `--- OSI ONTOLOGY ---` heading) alongside the unchanged core-spec OSI YAML,
+  surfacing the new `ontology_yaml` and `ontology_validation` response fields.
+- **`describe_model` now surfaces `defaultLocale`** from the model's
+  `settings.defaultLocale` (BCP-47 tag driving result value formatting),
+  rendered in the SETTINGS block next to `defaultTimezone`.
+
+### Changed
+
+- Bumped the required API version to **2.9.x** (the startup compatibility gate
+  matches on major.minor).
+
 ## [2.8.5] — 2026-06-09
 
 ### Changed

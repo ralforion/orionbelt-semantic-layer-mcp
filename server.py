@@ -1045,6 +1045,8 @@ def _impl_describe_model(model_id: str | None = None) -> str:
             lines.append(f"  defaultNumericDataType: {model_settings['default_numeric_data_type']}")
         if model_settings.get("default_timezone"):
             lines.append(f"  defaultTimezone: {model_settings['default_timezone']}")
+        if model_settings.get("default_locale"):
+            lines.append(f"  defaultLocale: {model_settings['default_locale']}")
         if model_settings.get("override_database_timezone"):
             lines.append("  overrideDatabaseTimezone: true")
         lines.append("")
@@ -1513,17 +1515,30 @@ def _impl_load_model_from_osi(osi_yaml: str | None, dedup: bool) -> str:
     return _render_load_result(data, extra_lines=extra)
 
 
+def _render_osi_validation(validation: dict, label: str) -> list[str]:
+    """Render conversion validation errors/warnings into report lines."""
+    parts: list[str] = []
+    if not validation.get("schema_valid", True) or not validation.get("semantic_valid", True):
+        errors = validation.get("schema_errors", []) + validation.get("semantic_errors", [])
+        parts.append(f"\n{label} validation errors: {'; '.join(errors)}")
+    if validation.get("semantic_warnings"):
+        parts.append(f"\n{label} validation warnings: {'; '.join(validation['semantic_warnings'])}")
+    return parts
+
+
 def _impl_export_model_to_osi(
     model_id: str,
     model_name: str,
     model_description: str,
     ai_instructions: str,
+    include_ontology: bool = False,
 ) -> str:
     """Export a loaded model as OSI YAML (multi-model only — model_id required)."""
     params = {
         "model_name": model_name,
         "model_description": model_description,
         "ai_instructions": ai_instructions,
+        "include_ontology": str(include_ontology).lower(),
     }
     resp = _session_request("GET", f"/models/{model_id}/osi", params=params)
     data = _parse_json(resp)
@@ -1531,12 +1546,13 @@ def _impl_export_model_to_osi(
     parts = [data["output_yaml"]]
     if data.get("warnings"):
         parts.append(f"\nWarnings: {'; '.join(data['warnings'])}")
-    validation = data.get("validation") or {}
-    if not validation.get("schema_valid", True) or not validation.get("semantic_valid", True):
-        errors = validation.get("schema_errors", []) + validation.get("semantic_errors", [])
-        parts.append(f"\nValidation errors: {'; '.join(errors)}")
-    if validation.get("semantic_warnings"):
-        parts.append(f"\nValidation warnings: {'; '.join(validation['semantic_warnings'])}")
+    parts.extend(_render_osi_validation(data.get("validation") or {}, "Core-spec"))
+
+    ontology_yaml = data.get("ontology_yaml")
+    if ontology_yaml:
+        parts.append("\n--- OSI ONTOLOGY ---")
+        parts.append(ontology_yaml)
+        parts.extend(_render_osi_validation(data.get("ontology_validation") or {}, "Ontology"))
     return "\n".join(parts)
 
 
@@ -1956,24 +1972,31 @@ def _register_model_tools() -> None:
         model_name: str = "semantic_model",
         model_description: str = "",
         ai_instructions: str = "",
+        include_ontology: bool = False,
     ) -> str:
         """Export a loaded model as OSI (Open Semantic Interchange) YAML.
 
         Converts a model already loaded in the session (its faithful OBML
         source) to OSI format. Returns the OSI YAML plus any conversion
-        warnings and validation results.
+        warnings and validation results. When include_ontology is set, the
+        OSI ontology document is appended as a separate artefact (under an
+        "OSI ONTOLOGY" heading) with its own validation; the core-spec OSI
+        YAML is unchanged.
 
         Args:
             model_id: id of a loaded model.
             model_name: Name for the exported OSI model.
             model_description: Description for the OSI model.
             ai_instructions: AI instructions for the OSI model.
+            include_ontology: Also emit the OSI ontology document (a separate
+                artefact validated against the OSI ontology schema).
         """
         return _impl_export_model_to_osi(
             _resolve_model_id(model_id),
             model_name,
             model_description,
             ai_instructions,
+            include_ontology,
         )
 
     @mcp.tool

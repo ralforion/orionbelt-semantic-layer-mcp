@@ -346,6 +346,7 @@ def test_describe_model_with_data_types_and_settings(mock_api: respx.MockRouter)
         "settings": {
             "default_numeric_data_type": "decimal(18, 2)",
             "default_timezone": "Europe/Zagreb",
+            "default_locale": "de-DE",
             "override_database_timezone": True,
         },
     }
@@ -359,6 +360,7 @@ def test_describe_model_with_data_types_and_settings(mock_api: respx.MockRouter)
     assert "SETTINGS:" in result
     assert "defaultNumericDataType: decimal(18, 2)" in result
     assert "defaultTimezone: Europe/Zagreb" in result
+    assert "defaultLocale: de-DE" in result
     assert "overrideDatabaseTimezone: true" in result
 
 
@@ -2943,3 +2945,53 @@ def test_load_model_rejects_osi_combined_with_obml_args():
     load_model = _registered_tool("load_model")
     with pytest.raises(_ToolError, match="exactly one source"):
         load_model(osi_yaml="name: m\n", model={"version": "1.0"})
+
+
+# ---------------------------------------------------------------------------
+# export_model_to_osi
+# ---------------------------------------------------------------------------
+
+
+def test_export_model_to_osi_default_omits_ontology(mock_api: respx.MockRouter):
+    """Without include_ontology, only the core-spec OSI YAML is returned."""
+    _mock_create_session(mock_api)
+    route = mock_api.get("/v1/sessions/test-session-1/models/m001/osi").mock(
+        return_value=httpx.Response(200, json={"output_yaml": "spec: core\n", "warnings": []})
+    )
+
+    result = server._impl_export_model_to_osi("m001", "semantic_model", "", "")
+
+    assert "spec: core" in result
+    assert "OSI ONTOLOGY" not in result
+    assert route.calls.last.request.url.params["include_ontology"] == "false"
+
+
+def test_export_model_to_osi_include_ontology(mock_api: respx.MockRouter):
+    """include_ontology=True appends the ontology artefact with its own validation."""
+    _mock_create_session(mock_api)
+    route = mock_api.get("/v1/sessions/test-session-1/models/m001/osi").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "output_yaml": "spec: core\n",
+                "warnings": [],
+                "ontology_yaml": "ontology: doc\n",
+                "ontology_validation": {
+                    "schema_valid": False,
+                    "schema_errors": ["bad node"],
+                    "semantic_warnings": ["loose mapping"],
+                },
+            },
+        )
+    )
+
+    result = server._impl_export_model_to_osi(
+        "m001", "semantic_model", "", "", include_ontology=True
+    )
+
+    assert "spec: core" in result
+    assert "OSI ONTOLOGY" in result
+    assert "ontology: doc" in result
+    assert "Ontology validation errors: bad node" in result
+    assert "Ontology validation warnings: loose mapping" in result
+    assert route.calls.last.request.url.params["include_ontology"] == "true"
