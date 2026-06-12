@@ -4,6 +4,34 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.10.0] — 2026-06-12
+
+Tracks OrionBelt Semantic Layer API **v2.10.0**. Version-lockstep bump — no
+tool signatures change. The API refactored the OBML ⇆ OSI converter into a
+standalone optional `osi-orionbelt` package; the changes are transparent to
+this MCP, which delegates conversion over the unchanged `/models/from-osi` and
+`/models/{id}/osi` endpoints.
+
+### Changed
+
+- **Compatibility raised to API v2.10.x.** The startup version gate (which
+  requires a matching `major.minor`) now expects API `2.10.x`; running against
+  `2.9.x` is no longer supported.
+
+### Notes
+
+- **OSI conversion is now an optional API extra.** If the API is deployed
+  without the converter (`pip install 'orionbelt-semantic-layer[osi]'`), the
+  OSI endpoints return **503**; `load_model(osi_yaml=…)` and
+  `export_model_to_osi` surface this as a clear `API error (503): OSI
+  conversion is unavailable…` `ToolError`. The shipped API images bundle the
+  converter, so this does not affect standard deployments.
+- **OSI vendor-extension round-tripping** is now preserved at model, dataset,
+  field, and measure levels, and OrionBelt/OSI-native payloads are retagged
+  (`ORIONBELT`/`OSI`, legacy `COMMON`/`OBSL` still accepted). This changes only
+  the *content* of OSI YAML passed through the conversion tools, which this MCP
+  forwards verbatim.
+
 ## [2.9.0] — 2026-06-11
 
 Tracks OrionBelt Semantic Layer API **v2.9.0**.
