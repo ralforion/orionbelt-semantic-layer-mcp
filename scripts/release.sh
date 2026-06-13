@@ -94,6 +94,13 @@ command -v gh     >/dev/null || fail "gh CLI not found"
 command -v uv     >/dev/null || fail "uv not found"
 command -v docker >/dev/null || fail "docker not found"
 
+# Sync tags from origin before any tag-dependent logic. `git describe` only
+# sees LOCAL tags, so a stale clone (a tag pushed by gh release create in a
+# prior run but never fetched here) makes the changelog range silently span
+# extra versions. Fetch first so PREV_TAG below is the true previous release.
+echo "Syncing tags from origin..."
+git fetch --tags --force --quiet origin || warn "Could not fetch tags from origin"
+
 if ! git diff --quiet; then
     fail "Uncommitted changes. Commit or stash first."
 fi
@@ -190,7 +197,19 @@ if git tag -l "$TAG" | grep -q "$TAG"; then
     warn "Tag $TAG already exists"
 else
     if confirm "Create GitHub release $TAG?"; then
-        PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || git rev-list --max-parents=0 HEAD)
+        # Newest tag reachable from HEAD that is NOT the tag we're about to
+        # create — i.e. the genuine previous release. Excluding $TAG guards the
+        # case where the release tag already exists locally (re-run/backfill).
+        PREV_TAG=$(git tag --list --sort=-version:refname --merged HEAD \
+            | grep -vFx "$TAG" | head -1)
+        [[ -z "$PREV_TAG" ]] && PREV_TAG=$(git rev-list --max-parents=0 HEAD)
+        # Sanity: the previous tag should be the immediately preceding version.
+        # If it isn't (e.g. v2.9.0 when releasing v2.11.0), the notes range
+        # would swallow an intermediate release — warn loudly rather than ship
+        # a misleading changelog.
+        echo "Previous release tag: ${PREV_TAG} (changelog range ${PREV_TAG}..HEAD)"
+        confirm "Generate notes from ${PREV_TAG}..HEAD?" \
+            || fail "Aborted: confirm the previous tag, then re-run."
         NOTES=$(git log "${PREV_TAG}"..HEAD --oneline --no-merges | head -20)
         # Build notes via printf into a temp file — avoids the bash heredoc-in-$()
         # apostrophe quirk that triggers "unexpected EOF while looking for `''".
