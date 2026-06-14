@@ -111,6 +111,8 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 | Variable          | Default      | Description                           |
 | ----------------- | ------------ | ------------------------------------- |
 | `API_BASE_URL`    | — (required) | OrionBelt Semantic Layer REST API URL |
+| `API_KEY`         | — (unset)    | API credential; required only when the API runs with `AUTH_MODE=api_key` |
+| `API_KEY_HEADER`  | `X-API-Key`  | Header the credential is sent in; must match the API's `API_KEY_HEADER` |
 | `MCP_TRANSPORT`   | `stdio`      | `stdio`, `http`, or `sse`             |
 | `MCP_SERVER_HOST` | `localhost`  | Bind host for HTTP/SSE                |
 | `MCP_SERVER_PORT` | `9000`       | Bind port for HTTP/SSE                |

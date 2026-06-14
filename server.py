@@ -55,6 +55,11 @@ class Settings(BaseSettings):
     )
 
     api_base_url: str
+    # API credential for auth-enabled deployments (AUTH_MODE=api_key on the API).
+    # Leave unset for unauthenticated APIs (AUTH_MODE=none).
+    api_key: str | None = None
+    # Header the credential is sent in; must match the API's API_KEY_HEADER.
+    api_key_header: str = "X-API-Key"
     mcp_transport: Literal["stdio", "http", "sse"] = "stdio"
     mcp_server_host: str = "localhost"
     mcp_server_port: int = 9000
@@ -443,10 +448,15 @@ def _get_client() -> httpx.Client:
     if _http_client is None:
         with _state_lock:
             if _http_client is None:  # double-check under lock
+                headers = {"User-Agent": f"OrionBelt-MCP/{__version__}"}
+                # Send the API credential when configured. Required when the
+                # API runs with AUTH_MODE=api_key; harmless when AUTH_MODE=none.
+                if settings.api_key:
+                    headers[settings.api_key_header] = settings.api_key
                 _http_client = httpx.Client(
                     base_url=settings.api_base_url,
                     timeout=settings.api_timeout,
-                    headers={"User-Agent": f"OrionBelt-MCP/{__version__}"},
+                    headers=headers,
                 )
     return _http_client
 
@@ -556,6 +566,14 @@ def _raise_api_error(response: httpx.Response, detail: str | None = None) -> NoR
     """Raise ToolError from an API error response."""
     if detail is None:
         detail = _parse_error_detail(response)
+    if response.status_code in (401, 403):
+        hint = (
+            "set API_KEY (and API_KEY_HEADER if the API uses a custom header) "
+            "in the MCP environment"
+            if not settings.api_key
+            else "verify API_KEY matches a key configured on the API"
+        )
+        raise ToolError(f"API authentication failed ({response.status_code}): {detail} — {hint}")
     raise ToolError(f"API error ({response.status_code}): {detail}")
 
 

@@ -2995,3 +2995,62 @@ def test_export_model_to_osi_include_ontology(mock_api: respx.MockRouter):
     assert "Ontology validation errors: bad node" in result
     assert "Ontology validation warnings: loose mapping" in result
     assert route.calls.last.request.url.params["include_ontology"] == "true"
+
+
+# ---------------------------------------------------------------------------
+# API-key authentication (for AUTH_MODE=api_key deployments)
+# ---------------------------------------------------------------------------
+
+
+def test_client_sends_no_auth_header_by_default(monkeypatch):
+    """No credential configured → only User-Agent is sent (AUTH_MODE=none APIs)."""
+    monkeypatch.setattr(server.settings, "api_key", None, raising=False)
+    client = server._get_client()
+    assert "X-API-Key" not in client.headers
+    assert "authorization" not in client.headers
+
+
+def test_client_sends_api_key_header_when_configured(monkeypatch):
+    """API_KEY set → credential sent in the default X-API-Key header."""
+    monkeypatch.setattr(server.settings, "api_key", "supersecretkey123456", raising=False)
+    monkeypatch.setattr(server.settings, "api_key_header", "X-API-Key", raising=False)
+    client = server._get_client()
+    assert client.headers["X-API-Key"] == "supersecretkey123456"
+
+
+def test_client_uses_custom_api_key_header(monkeypatch):
+    """API_KEY_HEADER lets the credential ride a custom header name."""
+    monkeypatch.setattr(server.settings, "api_key", "supersecretkey123456", raising=False)
+    monkeypatch.setattr(server.settings, "api_key_header", "Authorization", raising=False)
+    client = server._get_client()
+    assert client.headers["Authorization"] == "supersecretkey123456"
+
+
+def test_auth_error_hints_to_set_api_key(mock_api, monkeypatch):
+    """A 401 with no credential configured guides the user to set API_KEY."""
+    monkeypatch.setattr(server.settings, "api_key", None, raising=False)
+    mock_api.post("/v1/sessions").mock(
+        return_value=httpx.Response(
+            401, json={"detail": {"code": "AUTH_REQUIRED", "message": "Missing credential"}}
+        )
+    )
+    with pytest.raises(_ToolError) as exc:
+        server._create_api_session()
+    msg = str(exc.value)
+    assert "authentication failed (401)" in msg
+    assert "set API_KEY" in msg
+
+
+def test_auth_error_hints_to_verify_key(mock_api, monkeypatch):
+    """A 403 with a credential configured guides the user to verify API_KEY."""
+    monkeypatch.setattr(server.settings, "api_key", "supersecretkey123456", raising=False)
+    mock_api.post("/v1/sessions").mock(
+        return_value=httpx.Response(
+            403, json={"detail": {"code": "AUTH_INVALID", "message": "Bad key"}}
+        )
+    )
+    with pytest.raises(_ToolError) as exc:
+        server._create_api_session()
+    msg = str(exc.value)
+    assert "authentication failed (403)" in msg
+    assert "verify API_KEY" in msg
