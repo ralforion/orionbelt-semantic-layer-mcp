@@ -26,6 +26,9 @@ against an unauthenticated API (`AUTH_MODE=none`) is unchanged.
 - **401/403 API responses raise an actionable error.** Authentication failures
   now point the operator at `API_KEY` / `API_KEY_HEADER` rather than surfacing a
   generic error.
+- **Upgraded FastMCP to 3.4.x** (floor raised to `>=3.4,<4`), which pulls in
+  Starlette 1.x. No code changes required — the middleware, tool, resource, and
+  transport surfaces this server uses are unchanged.
 
 ## [2.11.0] — 2026-06-13
 
