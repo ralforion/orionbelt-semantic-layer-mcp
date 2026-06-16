@@ -4,6 +4,26 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.14.0] — 2026-06-16
+
+Tracks OrionBelt Semantic Layer API **v2.14.0**, which adds **Artefacts
+Composability Resolution (ACR)** — a `composables` endpoint that, for the query
+built so far, reports which other artefacts can still be added and yield a
+valid, fanout-free result. This release wraps that endpoint as an MCP tool.
+(The API skipped a public v2.13; the MCP version tracks the API.)
+
+### Added
+
+- **`find_composables` tool** (model-discovery, run-only). Given an anchor —
+  an in-progress query (`query_json`) or one or more named artefacts
+  (`anchors`, optionally narrowed by `anchor_type`) — returns the directly
+  composable `dimensions`, `measures`, and `metrics`, plus the `cflMeasures` /
+  `cflMetrics` combinable only through the Composite Fact Layer. Routes to the
+  session-scoped `POST/GET /v1/sessions/{id}/models/{mid}/composables` in
+  multi-model mode and the top-level `/v1/composables` shortcut in single-model
+  mode. ACR reuses the planner's join-graph reachability, so anything reported
+  is guaranteed to compile.
+
 ## [2.12.0] — 2026-06-14
 
 Tracks OrionBelt Semantic Layer API **v2.12.0**, which gates every `/v1/*`

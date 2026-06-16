@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import types
 
 import httpx
@@ -527,8 +528,6 @@ def test_execute_query_multi_model_mode(mock_api: respx.MockRouter):
         if call.request.url.path == "/v1/sessions/test-session-1/query/execute"
     ]
     assert len(execute_calls) == 1
-    import json
-
     body = json.loads(execute_calls[0].request.content)
     assert body["model_id"] == "m001"
     assert body["dialect"] == "postgres"
@@ -1282,6 +1281,104 @@ def test_get_join_graph_single_model_mode(mock_api: respx.MockRouter):
     result = server._impl_get_join_graph(None)
     assert "Orders" in result
     assert "many-to-one" in result
+
+
+# ---------------------------------------------------------------------------
+# find_composables (ACR)
+# ---------------------------------------------------------------------------
+
+
+_MOCK_COMPOSABLES = {
+    "anchorObjects": ["Customers", "Orders"],
+    "dimensions": ["Customer Country", "Order Date"],
+    "measures": ["Order Count", "Revenue"],
+    "metrics": ["Revenue per Order"],
+    "cflMeasures": ["Return Count"],
+    "cflMetrics": ["Return Rate"],
+}
+
+
+def test_find_composables_query_anchor_multi_model(mock_api: respx.MockRouter):
+    """find_composables POSTs the query to the session-scoped endpoint."""
+    _mock_create_session(mock_api)
+    route = mock_api.post("/v1/sessions/test-session-1/models/m001/composables").mock(
+        return_value=httpx.Response(200, json=_MOCK_COMPOSABLES)
+    )
+
+    result = server._impl_find_composables(
+        "m001",
+        '{"select": {"dimensions": ["Customer Country"], "measures": ["Revenue"]}}',
+        [],
+        None,
+    )
+
+    assert "Customer Country" in result
+    assert "Revenue per Order" in result
+    assert "Composite Fact Layer" in result
+    assert "Return Rate" in result
+    body = json.loads(route.calls[0].request.content)
+    assert body["select"]["dimensions"] == ["Customer Country"]
+
+
+def test_find_composables_named_anchors_single_model(mock_api: respx.MockRouter):
+    """find_composables GETs the shortcut with repeated anchor params (single-model)."""
+    server._single_model_mode = True
+    route = mock_api.get("/v1/composables").mock(
+        return_value=httpx.Response(200, json=_MOCK_COMPOSABLES)
+    )
+
+    result = server._impl_find_composables(None, None, ["Revenue", "Customer Country"], None)
+
+    assert "Order Date" in result
+    request_url = str(route.calls[0].request.url)
+    assert "anchor=Revenue" in request_url
+    assert "anchor=Customer+Country" in request_url or "anchor=Customer%20Country" in request_url
+    # No session created in single-model mode
+    session_calls = [c for c in mock_api.calls if c.request.url.path == "/v1/sessions"]
+    assert len(session_calls) == 0
+
+
+def test_find_composables_named_anchors_with_type(mock_api: respx.MockRouter):
+    """anchor_type is forwarded as the anchorType query param."""
+    _mock_create_session(mock_api)
+    route = mock_api.get("/v1/sessions/test-session-1/models/m001/composables").mock(
+        return_value=httpx.Response(200, json=_MOCK_COMPOSABLES)
+    )
+
+    server._impl_find_composables("m001", None, ["Revenue"], "measure")
+
+    request_url = str(route.calls[0].request.url)
+    assert "anchorType=measure" in request_url
+
+
+def test_find_composables_empty_anchor(mock_api: respx.MockRouter):
+    """An empty composable set renders a clear message."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/composables").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "anchorObjects": [],
+                "dimensions": [],
+                "measures": [],
+                "metrics": [],
+                "cflMeasures": [],
+                "cflMetrics": [],
+            },
+        )
+    )
+
+    result = server._impl_find_composables("m001", None, [], None)
+    assert "everything composes" in result
+
+
+def test_coerce_anchor_list():
+    """_coerce_anchor_list accepts lists, JSON-array strings, and bare names."""
+    assert server._coerce_anchor_list(None) == []
+    assert server._coerce_anchor_list(["A", "B"]) == ["A", "B"]
+    assert server._coerce_anchor_list('["A", "B"]') == ["A", "B"]
+    assert server._coerce_anchor_list("Revenue") == ["Revenue"]
+    assert server._coerce_anchor_list("") == []
 
 
 # ---------------------------------------------------------------------------

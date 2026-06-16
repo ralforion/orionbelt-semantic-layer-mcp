@@ -262,6 +262,7 @@ _RUN_TIME_TOOLS: frozenset[str] = frozenset(
         "get_example",
         "get_model_graph",
         "get_join_graph",
+        "find_composables",
         "query_model_graph_by_sparql",
         "list_models",
     }
@@ -605,7 +606,7 @@ def _do_request(
     method: str,
     path: str,
     json_body: dict | None,
-    params: dict[str, str] | None = None,
+    params: dict[str, Any] | None = None,
 ) -> httpx.Response:
     """Execute a single HTTP request, wrapping connection/timeout errors."""
     try:
@@ -623,7 +624,7 @@ def _api_request(
     path: str,
     *,
     json_body: dict | None = None,
-    params: dict[str, str] | None = None,
+    params: dict[str, Any] | None = None,
     retry_on_expired: bool = True,
     path_suffix: str | None = None,
 ) -> httpx.Response:
@@ -654,7 +655,7 @@ def _session_request(
     path_suffix: str,
     *,
     json_body: dict | None = None,
-    params: dict[str, str] | None = None,
+    params: dict[str, Any] | None = None,
 ) -> httpx.Response:
     """Make an API request scoped to the current session.
 
@@ -676,7 +677,7 @@ def _shortcut_request(
     path: str,
     *,
     json_body: dict | None = None,
-    params: dict[str, str] | None = None,
+    params: dict[str, Any] | None = None,
 ) -> httpx.Response:
     """Make an API request to a shortcut endpoint (no session required).
 
@@ -1407,6 +1408,92 @@ def _impl_get_join_graph(model_id: str | None) -> str:
     return "\n".join(lines)
 
 
+def _coerce_anchor_list(anchors: list[str] | str | None) -> list[str]:
+    """Normalise the ``anchors`` arg into a list of names.
+
+    Accepts a real list, a JSON-array string (``'["A", "B"]'``), or a single
+    bare name. Returns ``[]`` for ``None``/empty.
+    """
+    if anchors is None:
+        return []
+    if isinstance(anchors, list):
+        return anchors
+    text = anchors.strip()
+    if not text:
+        return []
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ToolError(f"Invalid anchors JSON string: {exc}") from exc
+        if not isinstance(parsed, list):
+            raise ToolError("anchors JSON must be an array of artefact names.")
+        return [str(a) for a in parsed]
+    return [text]
+
+
+def _render_composables(data: dict) -> str:
+    """Render an ACR ComposablesResponse as readable text (shared impl)."""
+    anchor = data.get("anchorObjects") or []
+    header = (
+        f"Composable with anchor on [{', '.join(anchor)}]:"
+        if anchor
+        else "Composable artefacts (empty anchor — everything composes):"
+    )
+    lines = [header, ""]
+
+    def _section(label: str, items: list[str]) -> None:
+        if items:
+            lines.append(f"{label}: {', '.join(items)}")
+
+    _section("Dimensions", data.get("dimensions") or [])
+    _section("Measures", data.get("measures") or [])
+    _section("Metrics", data.get("metrics") or [])
+
+    cfl_measures = data.get("cflMeasures") or []
+    cfl_metrics = data.get("cflMetrics") or []
+    if cfl_measures or cfl_metrics:
+        lines.append("")
+        lines.append("Via Composite Fact Layer (independent fact, unioned at the shared grain):")
+        _section("  CFL measures", cfl_measures)
+        _section("  CFL metrics", cfl_metrics)
+
+    directly_composable = any(data.get(k) for k in ("dimensions", "measures", "metrics"))
+    if not directly_composable and not (cfl_measures or cfl_metrics):
+        lines.append("Nothing else composes with this anchor.")
+    return "\n".join(lines)
+
+
+def _impl_find_composables(
+    model_id: str | None,
+    query_json: str | None,
+    anchors: list[str],
+    anchor_type: str | None,
+) -> str:
+    """Resolve artefacts composable with an anchor (shared implementation)."""
+    if query_json is not None:
+        try:
+            query = json.loads(query_json)
+        except json.JSONDecodeError as exc:
+            raise ToolError(
+                f"Invalid query JSON: {exc}. The QueryObject schema is available via "
+                "get_json_schema('query') and worked examples via get_example."
+            ) from exc
+        if model_id is None:
+            resp = _shortcut_request("POST", "/composables", json_body=query)
+        else:
+            resp = _session_request("POST", f"/models/{model_id}/composables", json_body=query)
+    else:
+        params: dict[str, Any] = {"anchor": anchors}
+        if anchor_type is not None:
+            params["anchorType"] = anchor_type
+        if model_id is None:
+            resp = _shortcut_request("GET", "/composables", params=params)
+        else:
+            resp = _session_request("GET", f"/models/{model_id}/composables", params=params)
+    return _render_composables(_parse_json(resp))
+
+
 def _impl_load_model(
     model: dict | str | None,
     extends: list[dict] | str | None,
@@ -1749,6 +1836,54 @@ def _register_model_tools() -> None:
             model_id: a loaded model's id (multi-model); omit in single-model.
         """
         return _impl_get_join_graph(_resolve_model_id(model_id))
+
+    @mcp.tool
+    def find_composables(
+        query_json: str | None = None,
+        anchors: list[str] | str | None = None,
+        anchor_type: Literal["dimension", "measure", "metric", "dataObject"] | None = None,
+        model_id: str | None = None,
+    ) -> str:
+        """Resolve which artefacts can still be added to a query (ACR).
+
+        Artefacts Composability Resolution: given an anchor — your in-progress
+        query, or one or more named artefacts — returns the dimensions, measures,
+        and metrics that remain composable with it and are guaranteed to compile
+        into a valid, fanout-free result. It walks the same join graph the
+        compiler uses, so anything it reports is safe to add.
+
+        Supply the anchor exactly one of two ways:
+
+        - ``query_json`` — an in-progress QueryObject as a JSON string
+          (recommended). Its ``select`` dimensions and measures form the anchor.
+        - ``anchors`` — one or more artefact names. Repeated names are
+          intersected. Omit both for a fresh query, where everything composes.
+
+        Directly composable artefacts share a fanout-safe root with the anchor.
+        CFL measures/metrics come from an independent fact and compose only
+        through the Composite Fact Layer (UNION ALL at the shared grain); they
+        are reported separately.
+
+        Args:
+            query_json: In-progress QueryObject as a JSON string (the anchor).
+                Mutually exclusive with ``anchors``.
+            anchors: One or more named anchors — a list, a JSON-array string, or
+                a single name. Mutually exclusive with ``query_json``.
+            anchor_type: Disambiguate named anchors to one kind (dimension,
+                measure, metric, dataObject). Only applies with ``anchors``.
+            model_id: a loaded model's id (multi-model); omit in single-model.
+        """
+        if query_json is not None and anchors is not None:
+            raise ToolError(
+                "Provide exactly one anchor source: 'query_json' (a QueryObject) "
+                "or 'anchors' (named artefacts), not both."
+            )
+        return _impl_find_composables(
+            _resolve_model_id(model_id),
+            query_json,
+            _coerce_anchor_list(anchors),
+            anchor_type,
+        )
 
     @mcp.tool
     def get_model_graph(model_id: str | None = None) -> str:
@@ -2640,11 +2775,12 @@ def main() -> None:
             # list time by capability, so this counts everything registered. The
             # *visible* surface is smaller when query_execute is off (−1) or in
             # the design phase (run-only verbs hidden); single-model mode is
-            # always run-time. design (5) + single-model run-scoped (12).
-            tool_count = 17
+            # always run-time. 14 shared tools + get_model.
+            tool_count = 15
         else:
-            # design (5) + multi-model run/lifecycle-scoped (15).
-            tool_count = 20
+            # 14 shared tools + 5 multi-model lifecycle tools (load_model,
+            # remove_model, list_models, run_batch, export_model_to_osi).
+            tool_count = 19
         mode_label = "single-model" if _single_model_mode else "multi-model"
     else:
         # HTTP/SSE: defer mode detection to the first request so the container
