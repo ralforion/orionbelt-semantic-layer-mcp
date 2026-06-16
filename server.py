@@ -2775,11 +2775,12 @@ def main() -> None:
             # list time by capability, so this counts everything registered. The
             # *visible* surface is smaller when query_execute is off (−1) or in
             # the design phase (run-only verbs hidden); single-model mode is
-            # always run-time. design (5) + single-model run-scoped (12).
-            tool_count = 17
+            # always run-time. 14 shared tools + get_model.
+            tool_count = 15
         else:
-            # design (5) + multi-model run/lifecycle-scoped (15).
-            tool_count = 20
+            # 14 shared tools + 5 multi-model lifecycle tools (load_model,
+            # remove_model, list_models, run_batch, export_model_to_osi).
+            tool_count = 19
         mode_label = "single-model" if _single_model_mode else "multi-model"
     else:
         # HTTP/SSE: defer mode detection to the first request so the container

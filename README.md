@@ -47,7 +47,7 @@ The OrionBelt Semantic Layer platform has two deployment modes. This MCP server 
 - **No business logic** — all tool calls delegate to the REST API (v1 endpoints)
 - **Dual-mode** — auto-detects single-model or multi-model API mode at startup
 - **Auto-session management** — creates an API session on first tool call, caches the ID (multi-model mode)
-- **14 tools** (single-model mode) or **18 tools** (multi-model mode) for querying (QueryObject), execution, batch, discovery, examples, diagrams, RDF/SPARQL, OSI export, and OBML reference + JSON schemas. (19 distinct tools exist in total; the API mode selects which subset is active — they overlap in 13 — and no client ever sees all 19 at once.) The visible surface is narrowed further in the design-time phase and when query execution is disabled (see [Design-time vs run-time tool switching](#design-time-vs-run-time-tool-switching))
+- **15 tools** (single-model mode) or **19 tools** (multi-model mode) for querying (QueryObject), execution, batch, discovery, composability (ACR), examples, diagrams, RDF/SPARQL, OSI export, and OBML reference + JSON schemas. (20 distinct tools exist in total; the API mode selects which subset is active — they overlap in 14 — and no client ever sees all 20 at once.) The visible surface is narrowed further in the design-time phase and when query execution is disabled (see [Design-time vs run-time tool switching](#design-time-vs-run-time-tool-switching))
 - **4 prompts + 2 resources** for OBML / OBSQL reference and usage guidance
 
 <p align="center">
