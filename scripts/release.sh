@@ -26,7 +26,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
-REPO="ralfbecher/orionbelt-semantic-layer-mcp"
+REPO="ralforion/orionbelt-semantic-layer-mcp"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -216,7 +216,7 @@ else
         NOTES_FILE=$(mktemp)
         {
             printf '## Changes\n\n%s\n\n' "$NOTES"
-            printf '**Full Changelog**: https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/compare/%s...%s\n' \
+            printf '**Full Changelog**: https://github.com/ralforion/orionbelt-semantic-layer-mcp/compare/%s...%s\n' \
                 "$PREV_TAG" "$TAG"
         } >"$NOTES_FILE"
         gh release create "$TAG" \
@@ -307,6 +307,6 @@ echo -e "${GREEN}  Release v${VERSION} complete!${NC}"
 echo -e "${GREEN}═══════════════════════════════════════${NC}"
 echo ""
 echo "Verify:"
-echo "  GitHub:    https://github.com/ralfbecher/orionbelt-semantic-layer-mcp/releases/tag/v${VERSION}"
+echo "  GitHub:    https://github.com/ralforion/orionbelt-semantic-layer-mcp/releases/tag/v${VERSION}"
 echo "  PyPI:      https://pypi.org/project/orionbelt-semantic-layer-mcp/${VERSION}/"
 echo "  Docker:    https://hub.docker.com/r/ralforion/orionbelt-semantic-layer-mcp"
