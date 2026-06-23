@@ -4,6 +4,39 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.16.0] — 2026-06-23
+
+Tracks OrionBelt Semantic Layer API **v2.16.0**. This is a version-tracking
+release: no MCP tool is added, removed, or changed, and no request/response
+shape the MCP wraps is altered. The API's v2.16.0 work is internal or on
+surfaces the MCP passes through verbatim:
+
+- **OBML and the QueryObject are now camelCase-only contracts.** The duplicate
+  snake_case spellings were dropped from both JSON Schemas (OBML
+  `max_staleness` / `intent_tags`; the query `order_by` is now `orderBy`), and
+  **model-load and query endpoints now validate payloads against the published
+  JSON Schema, returning `422` on a violation** (snake_case keys, a string
+  `version`, or uppercase enum values are rejected). The MCP never authors OBML
+  or rewrites query keys — it forwards the host's payload as-is — so this is
+  enforced host-side; a `422` surfaces through the normal API-error path. The
+  authoritative schema served by `get_json_schema` is fetched live from the
+  API, so it already reflects the camelCase-only contract.
+
+### Changed
+
+- **`execute_query` docs use canonical camelCase.** The worked `query_json`
+  example and the query-writing reference switched the lone snake_case query
+  key `order_by` to `orderBy`, matching the now camelCase-only query schema.
+  (Response-reading code that consumes the API's snake_case response envelopes
+  — `data_objects`, `path_name`, `result_type`, etc. — is unchanged; only the
+  host-facing query payload examples moved.)
+- **Internal refactors and CI quality gates** (OBML contract manifest + drift
+  gate, explicit compiler wrapper passes, service-layer extraction, module
+  splits, architecture/coverage guards) with no SQL or endpoint behavior change.
+
+The bump keeps the MCP's `major.minor` aligned with the API, which the startup
+compatibility check requires.
+
 ## [2.15.0] — 2026-06-18
 
 Tracks OrionBelt Semantic Layer API **v2.15.0**. This is a version-tracking

@@ -2008,7 +2008,7 @@ def _register_model_tools() -> None:
         Args:
             query_json: Complete QueryObject as a JSON string: a ``select`` of
                 dimensions/measures (or ``fields``), plus optional ``where``,
-                ``having``, ``order_by``, ``limit``, ``offset``, ``dimensionsExclude``,
+                ``having``, ``orderBy``, ``limit``, ``offset``, ``dimensionsExclude``,
                 ``usePathNames``, and coalesce groups. Dimension/measure names must
                 match those defined in the loaded model.
             model_id: a loaded model's id (multi-model); omit in single-model.
@@ -2263,7 +2263,7 @@ execute_query(
     "where": [
       {"field": "Customer Country", "op": "equals", "value": "US"}
     ],
-    "order_by": [
+    "orderBy": [
       {"field": "Total Revenue", "direction": "desc"}
     ],
     "limit": 10
@@ -2413,7 +2413,7 @@ Rules:
 - At least 2 members; all must be existing model dimensions
 - All members must share the same ``resultType``
 - The ``as`` alias must not collide with any model dimension or measure name
-- ``order_by`` may reference the alias directly
+- ``orderBy`` may reference the alias directly
 - ``where`` filters use the underlying dimension names (per-leg filtering)
 
 ## Raw Mode (Physical Column Access)
@@ -2433,7 +2433,7 @@ Fields use ``DataObject.Column`` syntax referencing physical columns.
 Raw mode (``select.fields``) is **mutually exclusive** with
 ``select.dimensions`` / ``select.measures``, ``having``, and
 ``dimensionsExclude``.  ``select.distinct`` is only valid in raw mode;
-``where``, ``order_by``, ``limit``, and ``offset`` work in both modes.
+``where``, ``orderBy``, ``limit``, and ``offset`` work in both modes.
 
 ## Execute Query — Output Formatting
 
@@ -2455,7 +2455,7 @@ resolves it via: model ``settings.defaultDialect`` → server ``DB_VENDOR`` env 
 The API hashes its result cache on compiled SQL.  Two behaviours keep that
 deterministic:
 
-- **Auto-ORDER BY on LIMIT** — when a query sets `limit` without `order_by`
+- **Auto-ORDER BY on LIMIT** — when a query sets `limit` without `orderBy`
   the compiler appends `ORDER BY <all dims>` (or `<all raw fields>`) so
   the cache never freezes an arbitrary slice.  Aggregate-only queries
   (no dimensions, no fields) are exempt — they already return one row.
@@ -2465,7 +2465,7 @@ deterministic:
   `ttl_source = "no_cache:non_deterministic_sql"` so callers can see why
   a fresh round-trip happened.
 
-If you need pagination, always set an explicit `order_by` and pair `limit`
+If you need pagination, always set an explicit `orderBy` and pair `limit`
 with `offset`.
 
 ## Tips
