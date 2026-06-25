@@ -15,6 +15,7 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
+          cache-suffix: audit  # avoid racing the CI workflow's identical cache key
 
       - name: Install Python
         run: uv python install 3.12
@@ -42,7 +43,7 @@ jobs:
 
       - name: Upload report
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: mcp-audit-report
           path: runs/*/report.md
