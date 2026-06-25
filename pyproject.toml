@@ -10,7 +10,7 @@ requires-python = ">=3.12"
 license = "Apache-2.0"
 readme = "README.md"
 authors = [
-    {name = "Ralf Becher, RALFORION d.o.o.", email = "ralf.becher@web.de"}
+    {name = "Ralf Becher, RALFORION d.o.o.", email = "info@ralforion.com"}
 ]
 keywords = ["mcp", "semantic-layer", "orionbelt", "llm"]
 classifiers = [
