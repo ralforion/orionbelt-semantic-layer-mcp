@@ -1,0 +1,48 @@
+name: MCP Server Quality Audit
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: |
+          uv sync --all-extras --all-groups          # project + its deps (server.py)
+          uv pip install "mcp-xray-audit[live]"       # auditor + stdio transport
+
+      # The server runs a startup health check and exits if the OBSL API is
+      # unreachable, so the audit must spawn it against a live backend (prod).
+      # Keyless static + consolidation audit — no LLM probe, no API key needed.
+      - name: Run audit
+        run: |
+          uv run mcp-xray analyze \
+            --stdio "env MCP_TRANSPORT=stdio API_BASE_URL=https://orionbelt.ralforion.com uv run python server.py" \
+            --out runs/ci
+
+      - name: Render report to job summary
+        if: always()
+        run: |
+          for f in runs/*/report.md; do
+            [ -f "$f" ] && cat "$f" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-audit-report
+          path: runs/*/report.md
