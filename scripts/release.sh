@@ -11,16 +11,19 @@
 #   1. Create & merge PR (fix/ or feature/ branch → main, squash)
 #   2. Create GitHub release with changelog
 #   3. Publish to PyPI
-#   4. Push Docker image to Docker Hub (multi-arch)
 #
-# Cloud Run deployment is intentionally not part of this script:
+# Docker Hub publishing is intentionally NOT part of this script: the
+# .github/workflows/docker-publish.yml workflow builds and pushes the
+# multi-arch image (and :latest) automatically when step 2 pushes the
+# v* tag.
+#
+# Cloud Run deployment is also not part of this script:
 # the MCP service is rebuilt and rolled by the OBSL repo's
 # scripts/deploy-gcloud.sh as part of the bundled API+UI+MCP rollout.
 #
 # Prerequisites:
 #   - gh CLI authenticated
-#   - DOCKERHUB_RALFORION_PAT set (for Docker Hub)
-#   - uv, docker, twine available
+#   - uv, twine available
 #
 set -euo pipefail
 
@@ -92,7 +95,6 @@ step "Pre-flight checks"
 
 command -v gh     >/dev/null || fail "gh CLI not found"
 command -v uv     >/dev/null || fail "uv not found"
-command -v docker >/dev/null || fail "docker not found"
 
 # Sync tags from origin before any tag-dependent logic. `git describe` only
 # sees LOCAL tags, so a stale clone (a tag pushed by gh release create in a
@@ -140,7 +142,7 @@ ok "CHANGELOG entry present"
 # ---------------------------------------------------------------------------
 # 1. Create & merge PR
 # ---------------------------------------------------------------------------
-step "1/4  Create & merge PR"
+step "1/3  Create & merge PR"
 
 if ! git ls-remote --exit-code origin "$BRANCH" >/dev/null 2>&1; then
     echo "Pushing branch to origin..."
@@ -190,7 +192,7 @@ fi
 # ---------------------------------------------------------------------------
 # 2. GitHub release
 # ---------------------------------------------------------------------------
-step "2/4  Create GitHub release"
+step "2/3  Create GitHub release"
 
 TAG="v${VERSION}"
 if git tag -l "$TAG" | grep -q "$TAG"; then
@@ -224,13 +226,14 @@ else
             --notes-file "$NOTES_FILE"
         rm -f "$NOTES_FILE"
         ok "GitHub release $TAG created"
+        echo "  → docker-publish.yml will build & push the image for $TAG"
     fi
 fi
 
 # ---------------------------------------------------------------------------
 # 3. Publish to PyPI
 # ---------------------------------------------------------------------------
-step "3/4  Publish to PyPI"
+step "3/3  Publish to PyPI"
 
 if confirm "Build and publish to PyPI?"; then
     rm -rf dist/
@@ -259,42 +262,6 @@ if confirm "Build and publish to PyPI?"; then
         ok "Smoke test passed: pip install orionbelt-semantic-layer-mcp==${VERSION} resolves and imports cleanly"
     else
         warn "Smoke test failed after 2 minutes — verify manually at https://pypi.org/project/orionbelt-semantic-layer-mcp/${VERSION}/"
-    fi
-fi
-
-# ---------------------------------------------------------------------------
-# 4. Push Docker image to Docker Hub
-# ---------------------------------------------------------------------------
-step "4/4  Push Docker image to Docker Hub"
-
-if confirm "Build and push MCP Docker image to Docker Hub?"; then
-    DOCKER_USER="ralforion"
-    if [[ -z "${DOCKERHUB_RALFORION_PAT:-}" ]]; then
-        fail "DOCKERHUB_RALFORION_PAT not set"
-    fi
-    echo "Logging in to Docker Hub as $DOCKER_USER..."
-    echo "$DOCKERHUB_RALFORION_PAT" | docker login -u "$DOCKER_USER" --password-stdin
-
-    # Build from a clean archive of HEAD so uncommitted state isn't shipped.
-    BUILD_CTX=$(mktemp -d)
-    trap 'rm -rf "$BUILD_CTX"' EXIT
-    git archive HEAD | tar -x -C "$BUILD_CTX"
-
-    echo "Building and pushing $DOCKER_USER/orionbelt-semantic-layer-mcp:$VERSION ..."
-    docker buildx build \
-        --platform linux/amd64,linux/arm64 \
-        --provenance=false \
-        --sbom=false \
-        -t "$DOCKER_USER/orionbelt-semantic-layer-mcp:$VERSION" \
-        -t "$DOCKER_USER/orionbelt-semantic-layer-mcp:latest" \
-        --push "$BUILD_CTX"
-    ok "Docker Hub deployed"
-
-    # Switch back to default Docker Hub account if configured.
-    if [[ -n "${DOCKERHUB_DEFAULT_USER:-}" && -n "${DOCKERHUB_DEFAULT_PAT:-}" ]]; then
-        echo ""
-        echo "Switching back to $DOCKERHUB_DEFAULT_USER..."
-        echo "$DOCKERHUB_DEFAULT_PAT" | docker login -u "$DOCKERHUB_DEFAULT_USER" --password-stdin
     fi
 fi
 
