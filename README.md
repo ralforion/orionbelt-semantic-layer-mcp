@@ -7,8 +7,8 @@
 
 <p align="center"><strong>Thin MCP server that delegates to the OrionBelt Semantic Layer REST API</strong></p>
 
-[![Version 2.16.0](https://img.shields.io/badge/version-2.16.0-purple.svg)](https://github.com/ralforion/orionbelt-semantic-layer-mcp/releases)
-[![OrionBelt Semantic Layer 2.16](https://img.shields.io/badge/OrionBelt_Semantic_Layer-2.16-0054A6.svg)](https://github.com/ralforion/orionbelt-semantic-layer)
+[![Version 2.17.0](https://img.shields.io/badge/version-2.17.0-purple.svg)](https://github.com/ralforion/orionbelt-semantic-layer-mcp/releases)
+[![OrionBelt Semantic Layer 2.17](https://img.shields.io/badge/OrionBelt_Semantic_Layer-2.17-0054A6.svg)](https://github.com/ralforion/orionbelt-semantic-layer)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/ralforion/orionbelt-semantic-layer-mcp/blob/main/LICENSE)
 [![FastMCP](https://img.shields.io/badge/FastMCP-3.4+-8A2BE2)](https://gofastmcp.com)

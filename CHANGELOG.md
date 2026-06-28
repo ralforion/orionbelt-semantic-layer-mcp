@@ -4,6 +4,17 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.17.0] — 2026-06-28
+
+Tracks OrionBelt Semantic Layer API **v2.17.0**. This is a version-tracking
+release: no MCP tool is added, removed, or changed, and no request/response
+shape the MCP wraps is altered. The API's v2.17.0 work does not touch the REST
+surface the MCP delegates to — it is a local-first `obsl` command-line interface
+plus Docker Hub publishing/image-rename CI, none of which the MCP wraps.
+
+The bump keeps the MCP's `major.minor` aligned with the API, which the startup
+compatibility check requires.
+
 ## [2.16.0] — 2026-06-23
 
 Tracks OrionBelt Semantic Layer API **v2.16.0**. This is a version-tracking
