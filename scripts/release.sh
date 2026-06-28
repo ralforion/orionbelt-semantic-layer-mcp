@@ -10,7 +10,12 @@
 # Steps (each with confirmation prompt):
 #   1. Create & merge PR (fix/ or feature/ branch → main, squash)
 #   2. Create GitHub release with changelog
-#   3. Publish to PyPI
+#   3. Verify the PyPI publish (smoke test)
+#
+# PyPI publishing is intentionally NOT done by this script: the
+# .github/workflows/pypi-publish.yml workflow builds the sdist/wheel and
+# publishes via Trusted Publishing (OIDC) when step 2 pushes the v* tag.
+# Step 3 only waits for and smoke-tests that release.
 #
 # Docker Hub publishing is intentionally NOT part of this script: the
 # .github/workflows/docker-publish.yml workflow builds and pushes the
@@ -23,7 +28,7 @@
 #
 # Prerequisites:
 #   - gh CLI authenticated
-#   - uv, twine available
+#   - uv available
 #
 set -euo pipefail
 
@@ -231,37 +236,39 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3. Publish to PyPI
+# 3. Verify the PyPI publish (CI-driven)
 # ---------------------------------------------------------------------------
-step "3/3  Publish to PyPI"
+step "3/3  Verify PyPI publish"
 
-if confirm "Build and publish to PyPI?"; then
-    rm -rf dist/
-    uv build
-    uv publish
-    ok "Published to PyPI"
+# The v* tag pushed in step 2 triggers .github/workflows/pypi-publish.yml,
+# which builds and publishes via Trusted Publishing (OIDC). Here we just wait
+# for that release to land and smoke-test it — no local build/upload.
+echo "  → pypi-publish.yml builds & publishes ${TAG} to PyPI"
 
-    # Smoke-test that PyPI actually serves the new version. PyPI's CDN
-    # propagation is usually a few seconds but can take up to ~60s on a
-    # cold cache, so retry for up to 2 minutes before giving up. Uses
+if confirm "Wait for and smoke-test the PyPI release?"; then
+    # Poll PyPI until the CI workflow has built, uploaded, and the CDN serves
+    # the new version. This spans the CI run (build + publish) plus PyPI CDN
+    # propagation, so retry for up to 5 minutes before giving up. Uses
     # ``uv run --no-project`` so the test ignores the local source tree
     # and only resolves what's on PyPI.
-    echo "Smoke-testing pip install from PyPI..."
+    echo "Waiting for CI to publish, then smoke-testing pip install from PyPI..."
     SMOKE_OK=0
-    for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    for i in $(seq 1 30); do
         if uv run --no-project --with "orionbelt-semantic-layer-mcp==${VERSION}" -- \
                 python -c "import server" \
                 >/dev/null 2>&1; then
             SMOKE_OK=1
             break
         fi
-        echo "  attempt $i/12: not yet available, retrying in 10s..."
+        echo "  attempt $i/30: not yet available, retrying in 10s..."
         sleep 10
     done
     if [[ "$SMOKE_OK" == "1" ]]; then
         ok "Smoke test passed: pip install orionbelt-semantic-layer-mcp==${VERSION} resolves and imports cleanly"
     else
-        warn "Smoke test failed after 2 minutes — verify manually at https://pypi.org/project/orionbelt-semantic-layer-mcp/${VERSION}/"
+        warn "Smoke test failed after 5 minutes — check the workflow run at"
+        warn "  https://github.com/$REPO/actions/workflows/pypi-publish.yml"
+        warn "and verify manually at https://pypi.org/project/orionbelt-semantic-layer-mcp/${VERSION}/"
     fi
 fi
 
