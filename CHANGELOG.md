@@ -4,6 +4,26 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.18.0] — 2026-07-03
+
+Tracks OrionBelt Semantic Layer API **v2.18.0**. This is a version-tracking
+release: no MCP tool is added, removed, or changed, and no request/response
+shape the MCP wraps is altered.
+
+The API's v2.18.0 work adds an **Arrow IPC result format** to the execute
+endpoints — `format=arrow` (or an Arrow `Accept` header) returns a typed,
+locale-neutral `application/vnd.apache.arrow.stream`, gzip'd per the client's
+`Accept-Encoding`, and the result cache now stores Arrow IPC internally. Arrow
+is a binary stream aimed at the interactive UI and data clients; it is not
+exposed through the MCP surface, which returns text to an LLM and continues to
+advertise `output_format` of `json` (default) or `tsv`. The remaining v2.18.0
+changes (interactive filter/sort in the UI, measure/metric HAVING click-filters,
+the YAML editor "Jump to" navigator, cache codec internals) are on surfaces the
+MCP does not wrap.
+
+The bump keeps the MCP's `major.minor` aligned with the API, which the startup
+compatibility check requires.
+
 ## [2.17.0] — 2026-06-28
 
 Tracks OrionBelt Semantic Layer API **v2.17.0**. This is a version-tracking
