@@ -4,6 +4,31 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.19.0] — 2026-07-05
+
+Tracks OrionBelt Semantic Layer API **v2.19.0**. This is a version-tracking
+release: no MCP tool is added, removed, or changed, and no request/response
+shape the MCP wraps is altered.
+
+The API's v2.19.0 work adds **auto-synthesized row-count measures** — every
+countable `dataObject` now yields a grain-anchored row-count measure (default
+`"Sales Count"`), a governed named measure referenced in `select.measures`
+rather than an ad-hoc `COUNT(*)`. New authoring knobs (`countable` /
+`countLabel` per object, `exposeCounts` / `countLabelPattern` at model level)
+live in the OBML JSON Schema, which the MCP serves live via
+`get_json_schema("obml")`, so the new knobs surface automatically. The derived
+count measures are computed on read and flow through the schema, explain,
+search, and measure endpoints the MCP already wraps (the API switched those
+routes from `model.measures` to `effective_measures`) — the `MeasureDetail` /
+`SchemaResponse` shapes are unchanged, so the counts appear with no MCP code
+change. The remaining v2.19.0 changes are on surfaces the MCP does not wrap:
+two **pgwire SQL-injection fixes** in the Postgres wire's extended-protocol
+parameter substitution, and a `format_values` docstring clarification (the flag
+now also applies to the Arrow transport, which the MCP does not use).
+
+The bump keeps the MCP's `major.minor` aligned with the API, which the startup
+compatibility check requires.
+
 ## [2.18.0] — 2026-07-03
 
 Tracks OrionBelt Semantic Layer API **v2.18.0**. This is a version-tracking
