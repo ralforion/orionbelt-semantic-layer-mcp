@@ -4,6 +4,34 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.20.0] — 2026-07-06
+
+Tracks OrionBelt Semantic Layer API **v2.20.0**. This is a version-tracking
+release: no MCP tool is added, removed, or changed, and no request/response
+shape the MCP wraps is altered.
+
+The API's v2.20.0 work is concentrated on surfaces the MCP does not wrap. The
+`format=arrow` response became a length-prefixed result frame
+(`application/vnd.orionbelt.result+arrow`: `[u32 json length][JSON envelope]
+[gzip'd Arrow data]`), with the row data cached and the metadata envelope
+rebuilt fresh per request — but the MCP uses the JSON transport, which is
+unchanged, so nothing changes here. The Ontology Graph is now rendered from the
+exported OBSL ontology (UI), gaining an **Export Onto** Turtle download, rotate
+controls, and two new ontology predicates (`obsl:anchoredTo`,
+`obsl:referencesColumn`) that live in the RDF/SHACL surface the MCP does not
+serve.
+
+The v2.20.0 fixes likewise sit below the MCP's wrapped shapes: cache hits now
+report the cache-read time in `execution_time_ms` (was the original DB
+execution time), empty/all-null results keep their column types on a cache hit
+(the column schema is now cached), and `format=arrow` Accept negotiation and the
+ontology graph's orphan expression/count nodes were corrected. The JSON schema
+the MCP serves via `get_json_schema("obml")` and the `SchemaResponse` /
+`QueryExecuteResponse` shapes are untouched.
+
+The bump keeps the MCP's `major.minor` aligned with the API, which the startup
+compatibility check requires.
+
 ## [2.19.0] — 2026-07-05
 
 Tracks OrionBelt Semantic Layer API **v2.19.0**. This is a version-tracking
