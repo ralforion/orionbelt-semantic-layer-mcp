@@ -4,6 +4,31 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.21.0] — 2026-07-13
+
+Tracks OrionBelt Semantic Layer API **v2.21.0**. This is a version-tracking
+release: no MCP tool is added, removed, or changed, and no request/response
+shape the MCP wraps is altered.
+
+The API's v2.21.0 work is a **cross-session content-addressed model cache**:
+identical OBML loaded into different sessions now compiles once and is shared
+under a stable, content-derived `model_id` (widened to 16 hex characters)
+instead of a random per-session id, and identical model + SQL now shares
+result-cache entries across sessions. The MCP treats `model_id` as an opaque
+token, so the wider, stable id flows through unchanged.
+
+Most relevant here: the release **fixes the single-model shortcut resolution to
+scope to protected sessions**. In admin-curated single-model mode the top-level
+shortcut endpoints now ignore transient user sessions, so a duplicated
+per-session copy of the curated model no longer triggers a spurious "multiple
+models loaded across sessions" error — the exact 409 the MCP's own startup
+model check hit against the demo deployment on the v2.20.0 audit. No MCP code
+changes for this; it is resolved entirely on the API side of the shortcut
+routes the MCP already calls.
+
+The bump keeps the MCP's `major.minor` aligned with the API, which the startup
+compatibility check requires.
+
 ## [2.20.0] — 2026-07-06
 
 Tracks OrionBelt Semantic Layer API **v2.20.0**. This is a version-tracking
