@@ -1,14 +1,14 @@
 <!-- mcp-name: io.github.ralforion/orionbelt-semantic-layer-mcp -->
 <p align="center">
-  <img src="https://raw.githubusercontent.com/ralforion/orionbelt-semantic-layer-mcp/main/docs/assets/ORIONBELT_Logo.png" alt="OrionBelt Logo" width="400">
+  <img src="https://raw.githubusercontent.com/ralforion/orionbelt-semantic-layer-mcp/main/docs/assets/ORIONBELT_Logo.png" alt="OrionBelt® Logo" width="400">
 </p>
 
-<h1 align="center">OrionBelt Semantic Layer MCP</h1>
+<h1 align="center">OrionBelt® Semantic Layer MCP</h1>
 
-<p align="center"><strong>Thin MCP server that delegates to the OrionBelt Semantic Layer REST API</strong></p>
+<p align="center"><strong>Thin MCP server that delegates to the OrionBelt® Semantic Layer REST API</strong></p>
 
 [![Version 2.21.0](https://img.shields.io/badge/version-2.21.0-purple.svg)](https://github.com/ralforion/orionbelt-semantic-layer-mcp/releases)
-[![OrionBelt Semantic Layer 2.21](https://img.shields.io/badge/OrionBelt_Semantic_Layer-2.21-0054A6.svg)](https://github.com/ralforion/orionbelt-semantic-layer)
+[![OrionBelt® Semantic Layer 2.21](https://img.shields.io/badge/OrionBelt_Semantic_Layer-2.21-0054A6.svg)](https://github.com/ralforion/orionbelt-semantic-layer)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/ralforion/orionbelt-semantic-layer-mcp/blob/main/LICENSE)
 [![FastMCP](https://img.shields.io/badge/FastMCP-3.4+-8A2BE2)](https://gofastmcp.com)
@@ -28,18 +28,18 @@
 [![Docker pulls](https://img.shields.io/docker/pulls/ralforion/orionbelt-semantic-layer-mcp?logo=docker&logoColor=white&color=2496ED)](https://hub.docker.com/r/ralforion/orionbelt-semantic-layer-mcp)
 [![Image size](https://img.shields.io/docker/image-size/ralforion/orionbelt-semantic-layer-mcp/latest?logo=docker&logoColor=white&color=2496ED)](https://hub.docker.com/r/ralforion/orionbelt-semantic-layer-mcp/tags)
 
-A thin MCP server that delegates all business logic to the [OrionBelt Semantic Layer](https://github.com/ralforion/orionbelt-semantic-layer) REST API via HTTP. No embedded engine — pure API pass-through.
+A thin MCP server that delegates all business logic to the [OrionBelt® Semantic Layer](https://github.com/ralforion/orionbelt-semantic-layer) REST API via HTTP. No embedded engine — pure API pass-through.
 
 ## Architecture
 
-The OrionBelt Semantic Layer platform has two deployment modes. This MCP server supports both:
+The OrionBelt® Semantic Layer platform has two deployment modes. This MCP server supports both:
 
-- **Standalone** — Deploy the [OrionBelt Semantic Layer API](https://github.com/ralforion/orionbelt-semantic-layer) anywhere (Cloud Run, Docker, localhost) and point this MCP server at it via `API_BASE_URL`.
+- **Standalone** — Deploy the [OrionBelt® Semantic Layer API](https://github.com/ralforion/orionbelt-semantic-layer) anywhere (Cloud Run, Docker, localhost) and point this MCP server at it via `API_BASE_URL`.
 - **Hosted** — Connect to the public Cloud Run deployment with zero local setup (see [Hosted MCP Server](#hosted-mcp-server) below).
 
 ```
 ┌────────────┐       ┌──────────────────────────────────────────────────────┐
-│ LLM Client │       │                OrionBelt Platform                    │
+│ LLM Client │       │                OrionBelt® Platform                   │
 │            │       │                                                      │
 │  Claude,   │──MCP──│──> server.py  ──HTTP /v1──>  Semantic Layer REST API │
 │  Cursor,   │       │    (FastMCP                   (FastAPI: parse OBML,  │
@@ -55,12 +55,12 @@ The OrionBelt Semantic Layer platform has two deployment modes. This MCP server 
 - **4 prompts + 2 resources** for OBML / OBSQL reference and usage guidance
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/ralforion/orionbelt-semantic-layer-mcp/main/docs/assets/architecture.png" alt="OrionBelt Analytics Architecture" width="900">
+  <img src="https://raw.githubusercontent.com/ralforion/orionbelt-semantic-layer-mcp/main/docs/assets/architecture.png" alt="OrionBelt® Analytics Architecture" width="900">
 </p>
 
 ## Live Demo
 
-A public demo of the OrionBelt Semantic Layer API is available at:
+A public demo of the OrionBelt® Semantic Layer API is available at:
 
 > **API endpoint:** `https://orionbelt.ralforion.com` — [Swagger UI](https://orionbelt.ralforion.com/docs) | [ReDoc](https://orionbelt.ralforion.com/redoc) | [Gradio UI](https://orionbelt.ralforion.com/ui/?__theme=dark)
 
@@ -114,7 +114,7 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 
 | Variable          | Default      | Description                           |
 | ----------------- | ------------ | ------------------------------------- |
-| `API_BASE_URL`    | — (required) | OrionBelt Semantic Layer REST API URL |
+| `API_BASE_URL`    | — (required) | OrionBelt® Semantic Layer REST API URL |
 | `API_KEY`         | — (unset)    | API credential; required only when the API runs with `AUTH_MODE=api_key` |
 | `API_KEY_HEADER`  | `X-API-Key`  | Header the credential is sent in; must match the API's `API_KEY_HEADER` |
 | `MCP_TRANSPORT`   | `stdio`      | `stdio`, `http`, or `sse`             |
@@ -262,7 +262,7 @@ listed from the first request and there is no `load_model` step.
 
 ## Integration Guides
 
-Use the OrionBelt Semantic Layer MCP server with popular AI agent frameworks and automation platforms:
+Use the OrionBelt® Semantic Layer MCP server with popular AI agent frameworks and automation platforms:
 
 | Framework             | Transport        | Guide                                                                            |
 | --------------------- | ---------------- | -------------------------------------------------------------------------------- |
@@ -304,7 +304,7 @@ Pre-commit hooks are available to catch issues early. Run `./scripts/setup-hooks
 ## Hosted MCP Server
 
 A public hosted instance of this MCP server runs on Google Cloud Run, connected
-to the live OrionBelt Semantic Layer demo API. No local install, no API key.
+to the live OrionBelt® Semantic Layer demo API. No local install, no API key.
 
 ### Endpoint
 
@@ -341,7 +341,7 @@ or `%APPDATA%\Claude\claude_desktop_config.json` (Windows) and add:
 ```
 
 Fully quit Claude Desktop (⌘Q on macOS — closing the window isn't enough) and
-reopen. The OrionBelt tools then appear in the tools menu.
+reopen. The OrionBelt® tools then appear in the tools menu.
 
 Alternatively, in newer Claude Desktop builds: **Settings → Connectors → Add
 custom connector**, paste the URL above. No file editing or `npx` required.
@@ -397,4 +397,10 @@ Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for detai
   <a href="https://ralforion.com">
     <img src="https://raw.githubusercontent.com/ralforion/orionbelt-semantic-layer-mcp/main/docs/assets/RALFORION_doo_Logo.png" alt="RALFORION d.o.o." width="200">
   </a>
+</p>
+
+<p align="center">
+  Copyright © 2026 RALFORION d.o.o.
+  <br>
+  OrionBelt® is a registered trademark of RALFORION d.o.o.
 </p>
