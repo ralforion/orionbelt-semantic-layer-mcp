@@ -387,7 +387,7 @@ for a stdlib-only Python smoke test that walks the full handshake.
 
 ## License
 
-Copyright 2025 [RALFORION d.o.o.](https://ralforion.com)
+Copyright 2026 [RALFORION d.o.o.](https://ralforion.com)
 
 Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
 
