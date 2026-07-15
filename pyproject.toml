@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "orionbelt-semantic-layer-mcp"
-version = "2.21.0"
+version = "2.22.0"
 description = "Thin MCP server for OrionBelt Semantic Layer — delegates to REST API"
 requires-python = ">=3.12"
 license = "Apache-2.0"

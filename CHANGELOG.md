@@ -4,6 +4,34 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.22.0] — 2026-07-15
+
+Tracks OrionBelt Semantic Layer API **v2.22.0**. This is a version-tracking
+release: no MCP tool is added, removed, or changed, and no request/response
+shape the MCP wraps is altered. The API's REST surface (routers, schemas, the
+query model, the OBML schema) is byte-identical to v2.21.0.
+
+The API's v2.22.0 work is **Python 3.14 support** (all three Docker images move
+to `python:3.14-slim`, and 3.14 joins the CI test matrix), an upgrade to
+**sqlglot 30** — which renamed the `Select` args colliding with Python keywords
+(`from` → `from_`, `with` → `with_`) and forced matching changes in the OBSQL
+translator and pgwire router — and **widened `pyarrow`/`structlog` constraints**
+so the cp314 wheels the 3.14 images need can resolve. All of it is internal to
+the API: the MCP speaks HTTP and is unaffected by the API's SQL-parsing or
+packaging internals.
+
+Also fixed in the API, and likewise invisible here, are four `osi-orionbelt`
+0.1.1 converter bugs (metrics whose SQL referenced physical codes were dropped
+on the OSI round trip, colliding dimension names were silently overwritten,
+display names containing spaces emitted invalid OBML, and `validate_osi` raised
+`AttributeError` on malformed input). The MCP wraps no OSI conversion endpoint.
+
+This repo had already independently picked up Python 3.14 in its own test
+matrix and Docker base image, so no packaging change was needed here.
+
+The bump keeps the MCP's `major.minor` aligned with the API, which the startup
+compatibility check requires.
+
 ## [2.21.0] — 2026-07-13
 
 Tracks OrionBelt Semantic Layer API **v2.21.0**. This is a version-tracking
