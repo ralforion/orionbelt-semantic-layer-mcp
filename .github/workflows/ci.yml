@@ -59,10 +59,23 @@ jobs:
 
   # The release image is built only on v* tags (docker-publish.yml), so without
   # this job a base-image or dependency bump that breaks the container would not
-  # surface until a release tag was already pushed. Builds amd64 only and never
-  # pushes — this is a pre-merge gate, not a publish.
+  # surface until a release tag was already pushed. Never pushes — this is a
+  # pre-merge gate, not a publish.
+  #
+  # One leg per platform, mirroring the release image's platform list. Each leg
+  # builds a single platform on its own native runner: `load: true` cannot
+  # export a multi-platform image, and native runners let each arch actually run
+  # its own container instead of being emulated under QEMU.
   docker:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v7
 
@@ -73,12 +86,12 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          platforms: linux/amd64
+          platforms: ${{ matrix.platform }}
           push: false
           load: true
           tags: obsl-mcp:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
 
       - name: Smoke test
         run: |
@@ -104,6 +117,15 @@ jobs:
 
           # The image must not run as root.
           test "$(docker exec obsl-ci id -un)" = "app"
+
+          # Guard against a leg silently exercising the wrong architecture.
+          case "${{ matrix.platform }}" in
+            linux/amd64) want=x86_64 ;;
+            linux/arm64) want=aarch64 ;;
+          esac
+          got=$(docker exec obsl-ci python -c "import platform; print(platform.machine())")
+          echo "arch: $got"
+          test "$got" = "$want"
 
       - name: Container logs
         if: always()
