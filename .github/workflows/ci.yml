@@ -56,3 +56,55 @@ jobs:
 
       - name: Ruff format check
         run: uv run ruff format --check server.py tests/
+
+  # The release image is built only on v* tags (docker-publish.yml), so without
+  # this job a base-image or dependency bump that breaks the container would not
+  # surface until a release tag was already pushed. Builds amd64 only and never
+  # pushes — this is a pre-merge gate, not a publish.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: obsl-mcp:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          # HTTP transport defers API detection to the first request (LazyInit-
+          # Middleware), so the listener must come up without a reachable API.
+          docker run -d --name obsl-ci -e API_BASE_URL=http://127.0.0.1:9999 obsl-mcp:ci
+
+          for _ in $(seq 1 30); do
+            if docker exec obsl-ci python -c "import socket; socket.create_connection(('localhost', 9000), timeout=2).close()" 2>/dev/null; then
+              echo "listener up"
+              exec_ok=1
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "${exec_ok:-}" != "1" ]; then
+            echo "::error::server did not start listening on 9000"
+            docker logs obsl-ci || true
+            exit 1
+          fi
+
+          # The image must not run as root.
+          test "$(docker exec obsl-ci id -un)" = "app"
+
+      - name: Container logs
+        if: always()
+        run: docker logs obsl-ci || true
