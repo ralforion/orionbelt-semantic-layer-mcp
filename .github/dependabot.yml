@@ -1,0 +1,70 @@
+version: 2
+
+# Dependabot keeps the three dependency surfaces of this repo current:
+#   github-actions → the pinned actions in .github/workflows/
+#   uv             → pyproject.toml + uv.lock (Dependabot runs `uv lock` itself)
+#   docker         → the base image in Dockerfile
+#
+# Updates are grouped so a week's bumps arrive as one PR per ecosystem instead
+# of a swarm. PRs land on a branch and are squash-merged like any other change.
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore"
+      include: scope
+    labels:
+      - dependencies
+      - github-actions
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore"
+      include: scope
+    labels:
+      - dependencies
+      - python
+    groups:
+      python-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # pyproject already caps these at the next major (<4, <1, <3). Adopting a
+      # new major means widening that cap by hand, alongside an API-tracking
+      # release — not on Dependabot's schedule.
+      - dependency-name: "fastmcp"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "httpx"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "pydantic-settings"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore"
+      include: scope
+    labels:
+      - dependencies
+      - docker
