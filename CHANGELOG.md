@@ -4,6 +4,35 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.23.0] — 2026-07-21
+
+Tracks OrionBelt Semantic Layer API **v2.23.0**. No MCP tool is added, removed,
+or changed, and the MCP wraps no new endpoint — but this release is **not**
+behaviorally invisible the way a pure packaging bump is, because the MCP relays
+REST query results verbatim and the API changed the shape of DECIMAL cells.
+
+The API's v2.23.0 headline is **exact high-precision DECIMAL preservation**
+(API issue #136). Values wider than IEEE-754 double precision (past ~15–16
+significant digits) previously lost precision because the executor cast every
+`Decimal` to `float`. The `Decimal` is now carried end to end, and **raw REST
+JSON delivers DECIMAL cells as exact decimal strings** (e.g.
+`"123456789012345678.90"`) instead of rounded floats. Because `execute_query`
+and `run_batch` pass the API's JSON response through unchanged, **MCP consumers
+now see governed DECIMAL columns as decimal strings**, and the `columns[].type`
+hint for such columns is `"decimal(p, s)"` (alongside the existing `string`,
+`number`, `datetime`, `binary`). This needed no MCP code change — the
+passthrough already preserved strings — but it is a consumer-visible output
+shape, so it is called out here. `format_values` output, TSV output, and the
+number/datetime/binary types are unchanged.
+
+Also fixed in the API, and invisible here, is an Arrow Flight catalog-probe
+regression under sqlglot 30 (#237) and the driver test suites now running in CI
+(#238, #239) — all internal to the API's Flight SQL surface, which the MCP does
+not touch.
+
+The bump keeps the MCP's `major.minor` aligned with the API, which the startup
+compatibility check requires.
+
 ## [2.22.0] — 2026-07-15
 
 Tracks OrionBelt Semantic Layer API **v2.22.0**. This is a version-tracking
