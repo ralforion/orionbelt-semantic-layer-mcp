@@ -63,6 +63,11 @@ class Settings(BaseSettings):
     mcp_transport: Literal["stdio", "http", "sse"] = "stdio"
     mcp_server_host: str = "localhost"
     mcp_server_port: int = 9000
+    # Run the HTTP transport without a per-connection MCP session (no
+    # Mcp-Session-Id, no SSE resumability). Safe here — nothing is derived from
+    # transport state — and lets instances scale without session affinity.
+    # Ignored for stdio; forced off for sse, which requires a session.
+    mcp_stateless_http: bool = True
     # Cloud Run injects PORT; takes precedence over MCP_SERVER_PORT.
     port: int | None = None
     log_level: str = "INFO"
@@ -218,7 +223,10 @@ _loaded_model_ids: set[str] = set()
 #
 # Phase is *derived from explicit loaded-model state* (is a model resolvable for
 # this session?), never from hidden per-connection transport state, so it stays
-# stateless-clean. ``tools/list`` is filtered per phase by ``PhaseMiddleware``;
+# stateless-clean — which is what lets the HTTP transport run with
+# ``stateless_http=True`` (see ``_stateless_http_enabled``) and scale across
+# instances without session affinity. ``tools/list`` is filtered per phase by
+# ``PhaseMiddleware``;
 # a run-only verb invoked in the design phase is rejected with a structured
 # guard error steering the host to ``load_model`` + re-list.
 
@@ -2736,6 +2744,34 @@ def _detect_api_mode() -> tuple[bool, bool]:
         return False, False
 
 
+def _stateless_http_enabled() -> bool:
+    """Whether the HTTP transport should run without per-connection session state.
+
+    Stateless mode drops the MCP transport session entirely: no
+    ``Mcp-Session-Id``, no stream resumability, no out-of-band server→client
+    messages — every request is self-contained. Nothing here depends on that
+    state (the tool phase is derived from explicit loaded-model state, never
+    from the connection — see "Tool phase model"; no tool sends progress,
+    sampling, or elicitation requests), so instances behind a load balancer no
+    longer need session affinity.
+
+    Note this is the *transport* session only. The API session
+    (``_api_session_id``) and the loaded-model set stay process-global and are
+    shared by every client of an instance, exactly as before.
+
+    SSE cannot run stateless (it is a long-lived per-connection stream, and
+    FastMCP rejects the combination), so it is forced off there.
+    """
+    if settings.mcp_transport == "sse":
+        if settings.mcp_stateless_http:
+            logger.warning(
+                "MCP_STATELESS_HTTP is ignored on the sse transport — SSE requires a "
+                "per-connection session. Use MCP_TRANSPORT=http for stateless operation."
+            )
+        return False
+    return settings.mcp_stateless_http
+
+
 def main() -> None:
     """Run the MCP server using settings from environment / .env file."""
     _configure_logging()
@@ -2782,12 +2818,15 @@ def main() -> None:
             # remove_model, list_models, run_batch, export_model_to_osi).
             tool_count = 19
         mode_label = "single-model" if _single_model_mode else "multi-model"
+        stateless = False
     else:
         # HTTP/SSE: defer mode detection to the first request so the container
         # starts immediately (good for Cloud Run cold starts).
         mcp.add_middleware(LazyInitMiddleware())
         tool_count = 0
         mode_label = "deferred (lazy init on first request)"
+        # Resolved once — the sse fallback logs a warning on the way.
+        stateless = _stateless_http_enabled()
 
     # Phase-scoped tool surface (design-time ↔ run-time). Added after LazyInit
     # so its tool-registration on_request runs first on HTTP transports.
@@ -2800,6 +2839,7 @@ def main() -> None:
     if settings.mcp_transport != "stdio":
         logger.info("  Host:       %s", settings.mcp_server_host)
         logger.info("  Port:       %s", settings.effective_port)
+        logger.info("  Stateless:  %s", stateless)
     logger.info("  Log Level:  %s", settings.log_level)
     logger.info("  Log Format: %s", settings.log_format)
     logger.info("  Timeout:    %ss", settings.api_timeout)
@@ -2819,6 +2859,7 @@ def main() -> None:
                 host=settings.mcp_server_host,
                 port=settings.effective_port,
                 log_level=settings.log_level.lower(),
+                stateless_http=stateless,
             )
     except KeyboardInterrupt:
         logger.info("Shutting down…")

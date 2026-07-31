@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
+import logging
 import types
 
 import httpx
@@ -3151,3 +3153,37 @@ def test_auth_error_hints_to_verify_key(mock_api, monkeypatch):
     msg = str(exc.value)
     assert "authentication failed (403)" in msg
     assert "verify API_KEY" in msg
+
+
+# ---------------------------------------------------------------------------
+# Stateless HTTP transport
+# ---------------------------------------------------------------------------
+
+
+def test_stateless_http_enabled_by_default_on_http(monkeypatch):
+    """HTTP transport runs without per-connection session state by default."""
+    monkeypatch.setattr(server.settings, "mcp_transport", "http", raising=False)
+    monkeypatch.setattr(server.settings, "mcp_stateless_http", True, raising=False)
+    assert server._stateless_http_enabled() is True
+
+
+def test_stateless_http_can_be_disabled(monkeypatch):
+    """MCP_STATELESS_HTTP=false restores per-connection MCP sessions."""
+    monkeypatch.setattr(server.settings, "mcp_transport", "http", raising=False)
+    monkeypatch.setattr(server.settings, "mcp_stateless_http", False, raising=False)
+    assert server._stateless_http_enabled() is False
+
+
+def test_stateless_http_forced_off_for_sse(monkeypatch, caplog):
+    """SSE needs a per-connection session — stateless is ignored, with a warning."""
+    monkeypatch.setattr(server.settings, "mcp_transport", "sse", raising=False)
+    monkeypatch.setattr(server.settings, "mcp_stateless_http", True, raising=False)
+    with caplog.at_level(logging.WARNING, logger="orionbelt.mcp"):
+        assert server._stateless_http_enabled() is False
+    assert "sse" in caplog.text.lower()
+
+
+def test_stateless_http_accepted_by_fastmcp_http_app():
+    """The flag we pass through is a real FastMCP http_app/run parameter."""
+    params = inspect.signature(server.mcp.run_http_async).parameters
+    assert "stateless_http" in params
