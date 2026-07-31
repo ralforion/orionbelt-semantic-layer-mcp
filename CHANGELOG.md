@@ -4,6 +4,26 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+MCP-only changes; no API version bump and no tool added, removed, or changed.
+
+**Stateless HTTP transport.** The `http` transport now runs with FastMCP's
+`stateless_http=True` by default, dropping the per-connection MCP session: no
+`Mcp-Session-Id`, no stream resumability, no server-initiated messages — each
+request is self-contained. Nothing here depended on that state (the design-time
+↔ run-time tool phase is derived from explicit loaded-model state, never from
+the connection, and no tool issues progress/sampling/elicitation requests), so
+instances can sit behind a load balancer without session affinity. The new
+`MCP_STATELESS_HTTP` env var (default `true`) restores the old per-connection
+sessions when set to `false`; it is ignored for `stdio` and forced off for
+`sse`, which requires a long-lived per-connection stream. Note this covers the
+*transport* session only — the upstream API session and the loaded-model set
+remain process-global and shared per instance, unchanged.
+
+**Dependencies.** fastmcp pinned resolution moved 3.4.4 → 3.4.5 (the declared
+range `>=3.4,<4` is unchanged).
+
 ## [2.23.0] — 2026-07-21
 
 Tracks OrionBelt Semantic Layer API **v2.23.0**. No MCP tool is added, removed,

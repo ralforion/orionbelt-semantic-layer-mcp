@@ -92,6 +92,19 @@ uv run server.py
 MCP_TRANSPORT=http uv run python server.py
 ```
 
+The HTTP transport runs **stateless** by default (`MCP_STATELESS_HTTP=true`):
+every request is self-contained, with no `Mcp-Session-Id`, no stream
+resumability, and no server-initiated messages. Nothing here needs that state —
+the tool phase is derived from explicit loaded-model state rather than from the
+connection, and no tool sends progress, sampling, or elicitation requests — so
+instances can sit behind a load balancer without session affinity. Set
+`MCP_STATELESS_HTTP=false` to restore per-connection sessions; `sse` always runs
+stateful, since it is a long-lived per-connection stream.
+
+Note this is the *transport* session only. The upstream API session and the set
+of loaded models remain process-global and shared by every client of an
+instance, unchanged by this flag.
+
 ### MCP client configuration
 
 Add to your MCP client config (e.g. `claude_desktop_config.json`):
@@ -120,6 +133,7 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 | `MCP_TRANSPORT`   | `stdio`      | `stdio`, `http`, or `sse`             |
 | `MCP_SERVER_HOST` | `localhost`  | Bind host for HTTP/SSE                |
 | `MCP_SERVER_PORT` | `9000`       | Bind port for HTTP/SSE                |
+| `MCP_STATELESS_HTTP` | `true`    | Run the HTTP transport without a per-connection MCP session (no `Mcp-Session-Id`, no stream resumability) so instances scale without session affinity. Ignored for stdio; forced off for `sse` |
 | `LOG_LEVEL`       | `INFO`       | Logging level                         |
 | `API_TIMEOUT`     | `30`         | HTTP timeout in seconds               |
 
