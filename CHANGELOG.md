@@ -6,7 +6,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
-## [2.24.0] — unreleased
+## [2.24.0] — 2026-08-04
 
 Tracks OrionBelt Semantic Layer API **v2.24.0**. One tool loses a parameter;
 no tool is added or removed, so the tool counts are unchanged (15 single-model
