@@ -6,7 +6,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
-MCP-only changes; no API version bump and no tool added, removed, or changed.
+## [2.24.0] — unreleased
+
+Tracks OrionBelt Semantic Layer API **v2.24.0**. One tool loses a parameter;
+no tool is added or removed, so the tool counts are unchanged (15 single-model
+/ 19 multi-model / 20 distinct).
+
+**Removed: `include_ontology` on `export_model_to_osi`.** The API removed the
+OSI ontology emit — generating an ontology *out of* a logical semantic model is
+backwards, and the Ossie ontology is a separate spec layer rather than core.
+`GET /v1/sessions/{id}/models/{mid}/osi` now answers **410 Gone** to
+`include_ontology=true` and no longer returns `ontology_yaml` /
+`ontology_validation` at all, so the parameter is dropped here rather than
+forwarded to a guaranteed error. Core-spec OSI export — the tool's default and
+only behaviour — is unchanged, as is `load_model(osi_yaml=...)` in the other
+direction. Callers that passed `include_ontology=false` (the default) see no
+difference; callers that passed `true` were relying on a surface that no longer
+exists upstream. Note the OBSL RDF ontology graph (`get_model_graph`,
+`query_model_graph_by_sparql`) is a separate, core feature and is untouched.
+
+**Prompt reference updated for the cross-fact grain work.** The API gained
+`anchor:` on measures (the data object whose grain a multi-fact expression is
+evaluated at) and query-level `allowFanOut` (records that join-induced row
+duplication is intended, suppressing the fan-out warning; the SQL is identical
+either way). Both are document fields the MCP passes through opaquely, and both
+already reach callers through the live `get_json_schema` / `get_obml_reference`
+fetches — so no tool signature changes. The static `write_query` prompt now
+documents `allowFanOut`, and the `debug_validation` prompt gains the new
+`ANCHOR_REQUIRED_AMBIGUOUS_KEY` error and `CONFORMED_GRAIN_ASSUMED` warning.
 
 **Stateless HTTP transport.** The `http` transport now runs with FastMCP's
 `stateless_http=True` by default, dropping the per-connection MCP session: no
