@@ -3090,6 +3090,46 @@ def test_export_model_to_osi_never_sends_include_ontology(mock_api: respx.MockRo
     assert "include_ontology" not in route.calls.last.request.url.params
 
 
+def test_export_model_to_osi_accepts_explicit_false(mock_api: respx.MockRouter):
+    """A caller still passing the old default is served, not rejected."""
+    _mock_create_session(mock_api)
+    route = mock_api.get("/v1/sessions/test-session-1/models/m001/osi").mock(
+        return_value=httpx.Response(200, json={"output_yaml": "spec: core\n", "warnings": []})
+    )
+
+    result = server._impl_export_model_to_osi(
+        "m001", "semantic_model", "", "", include_ontology=False
+    )
+
+    assert "spec: core" in result
+    assert "include_ontology" not in route.calls.last.request.url.params
+
+
+def test_export_model_to_osi_refuses_include_ontology_true():
+    """include_ontology=True fails locally with a clear message, not a raw 410.
+
+    No respx router is installed, so any outbound request would error — the
+    refusal has to happen before the session is even created.
+    """
+    with pytest.raises(_ToolError, match="no longer supported"):
+        server._impl_export_model_to_osi("m001", "semantic_model", "", "", include_ontology=True)
+
+
+def test_export_model_to_osi_tool_schema_still_accepts_include_ontology():
+    """The MCP schema keeps the param, so explicit-false callers still validate.
+
+    The generated schema sets ``additionalProperties: false``, so dropping the
+    parameter outright would make ``include_ontology: false`` a pydantic
+    validation error before the handler ever runs.
+    """
+    server._register_model_tools()
+    tools = asyncio.run(server.mcp._list_tools())
+    schema = next(t.parameters for t in tools if t.name == "export_model_to_osi")
+
+    assert schema["additionalProperties"] is False
+    assert "include_ontology" in schema["properties"]
+
+
 # ---------------------------------------------------------------------------
 # API-key authentication (for AUTH_MODE=api_key deployments)
 # ---------------------------------------------------------------------------

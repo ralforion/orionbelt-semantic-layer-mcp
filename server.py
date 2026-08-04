@@ -1644,14 +1644,26 @@ def _impl_export_model_to_osi(
     model_name: str,
     model_description: str,
     ai_instructions: str,
+    include_ontology: bool = False,
 ) -> str:
     """Export a loaded model as OSI YAML (multi-model only — model_id required).
 
-    The API's OSI ontology emit was removed in OBSL 2.24 — the route now
-    answers 410 to ``include_ontology=true`` and no longer returns
-    ``ontology_yaml`` / ``ontology_validation``, so the parameter is gone
-    here rather than forwarded to a guaranteed error.
+    The API's OSI ontology emit was removed in OBSL 2.24 — the route answers
+    410 to ``include_ontology=true`` and no longer returns ``ontology_yaml`` /
+    ``ontology_validation``. ``include_ontology`` is kept as a deprecated
+    parameter that mirrors the API's own stance: accepted (and omitted from
+    the request) when false, so callers still passing the old default are not
+    rejected by schema validation, and refused with a clear message when true
+    rather than round-tripping to a 410.
     """
+    if include_ontology:
+        raise ToolError(
+            "include_ontology is no longer supported: the OSI ontology emit was "
+            "removed in OrionBelt Semantic Layer 2.24 (generating an ontology from "
+            "a logical model is out of scope). Omit the parameter — the core-spec "
+            "OSI export is unchanged. For the OBSL RDF ontology graph, which is a "
+            "separate feature, use get_model_graph or query_model_graph_by_sparql."
+        )
     params = {
         "model_name": model_name,
         "model_description": model_description,
@@ -2131,6 +2143,7 @@ def _register_model_tools() -> None:
         model_name: str = "semantic_model",
         model_description: str = "",
         ai_instructions: str = "",
+        include_ontology: bool = False,
     ) -> str:
         """Export a loaded model as OSI (Open Semantic Interchange) YAML.
 
@@ -2143,12 +2156,17 @@ def _register_model_tools() -> None:
             model_name: Name for the exported OSI model.
             model_description: Description for the OSI model.
             ai_instructions: AI instructions for the OSI model.
+            include_ontology: Deprecated and removed — do not set. The OSI
+                ontology emit no longer exists; setting this is an error.
+                Kept only so callers passing the old default (false) are not
+                rejected.
         """
         return _impl_export_model_to_osi(
             _resolve_model_id(model_id),
             model_name,
             model_description,
             ai_instructions,
+            include_ontology,
         )
 
     @mcp.tool
