@@ -1646,12 +1646,28 @@ def _impl_export_model_to_osi(
     ai_instructions: str,
     include_ontology: bool = False,
 ) -> str:
-    """Export a loaded model as OSI YAML (multi-model only — model_id required)."""
+    """Export a loaded model as OSI YAML (multi-model only — model_id required).
+
+    The API's OSI ontology emit was removed in OBSL 2.24 — the route answers
+    410 to ``include_ontology=true`` and no longer returns ``ontology_yaml`` /
+    ``ontology_validation``. ``include_ontology`` is kept as a deprecated
+    parameter that mirrors the API's own stance: accepted (and omitted from
+    the request) when false, so callers still passing the old default are not
+    rejected by schema validation, and refused with a clear message when true
+    rather than round-tripping to a 410.
+    """
+    if include_ontology:
+        raise ToolError(
+            "include_ontology is no longer supported: the OSI ontology emit was "
+            "removed in OrionBelt Semantic Layer 2.24 (generating an ontology from "
+            "a logical model is out of scope). Omit the parameter — the core-spec "
+            "OSI export is unchanged. For the OBSL RDF ontology graph, which is a "
+            "separate feature, use get_model_graph or query_model_graph_by_sparql."
+        )
     params = {
         "model_name": model_name,
         "model_description": model_description,
         "ai_instructions": ai_instructions,
-        "include_ontology": str(include_ontology).lower(),
     }
     resp = _session_request("GET", f"/models/{model_id}/osi", params=params)
     data = _parse_json(resp)
@@ -1660,12 +1676,6 @@ def _impl_export_model_to_osi(
     if data.get("warnings"):
         parts.append(f"\nWarnings: {'; '.join(data['warnings'])}")
     parts.extend(_render_osi_validation(data.get("validation") or {}, "Core-spec"))
-
-    ontology_yaml = data.get("ontology_yaml")
-    if ontology_yaml:
-        parts.append("\n--- OSI ONTOLOGY ---")
-        parts.append(ontology_yaml)
-        parts.extend(_render_osi_validation(data.get("ontology_validation") or {}, "Ontology"))
     return "\n".join(parts)
 
 
@@ -2139,18 +2149,17 @@ def _register_model_tools() -> None:
 
         Converts a model already loaded in the session (its faithful OBML
         source) to OSI format. Returns the OSI YAML plus any conversion
-        warnings and validation results. When include_ontology is set, the
-        OSI ontology document is appended as a separate artefact (under an
-        "OSI ONTOLOGY" heading) with its own validation; the core-spec OSI
-        YAML is unchanged.
+        warnings and validation results.
 
         Args:
             model_id: id of a loaded model.
             model_name: Name for the exported OSI model.
             model_description: Description for the OSI model.
             ai_instructions: AI instructions for the OSI model.
-            include_ontology: Also emit the OSI ontology document (a separate
-                artefact validated against the OSI ontology schema).
+            include_ontology: Deprecated and removed — do not set. The OSI
+                ontology emit no longer exists; setting this is an error.
+                Kept only so callers passing the old default (false) are not
+                rejected.
         """
         return _impl_export_model_to_osi(
             _resolve_model_id(model_id),
@@ -2329,6 +2338,17 @@ HAVING filter fields reference a measure or metric name.
 Set `"dimensionsExclude": true` to return dimension value combinations that
 do NOT exist in the data (anti-join via EXCEPT).  Requires 2+ dimensions on
 independent branches and no measures.
+
+## allowFanOut
+
+A measure reading both a base-grain column and one from a data object the
+joins replicate is evaluated per base row — right for an extended price
+(`quantity * list price`), wrong for anything reading the replicated row's
+own magnitude.  Nothing in the model separates the two, so the compiler
+warns rather than refusing.  Set `"allowFanOut": true` on the query to
+record that the duplication is understood and intended, which silences the
+warning.  The generated SQL is identical either way — this suppresses a
+diagnostic, it does not change the result.
 
 ## Supported Dialects
 
@@ -2597,6 +2617,17 @@ references unknown column.
   filterContext.include[].field — must be a dimension name or DataObject.Column.
 - `GRAIN_NOT_SUBSET`: Effective grain dimensions are not a subset of query dimensions.
   Fix: Ensure all grain dimensions are included in the query's dimension list.
+- `ANCHOR_REQUIRED_AMBIGUOUS_KEY`: A measure expression reads two independent facts
+  that share more than one dimension, so there is no single grain to conform them
+  at — each shared key gives a different answer.
+  Fix: Set `anchor:` on the measure, naming the data object whose grain the
+  expression is evaluated at (one of the facts it reads, or an object they all
+  join to).
+- `CONFORMED_GRAIN_ASSUMED` (warning, not an error): A cross-fact measure expression
+  had no declared join path and no `anchor:`, so the facts were conformed to the one
+  data object they all join to. The warning names the object chosen. `SUM` is
+  invariant across the readings, but `AVG` / `MIN` / `MAX` are not.
+  Fix: If the chosen grain is not what you meant, set `anchor:` explicitly.
 
 ## Resolution Errors (at query time)
 
