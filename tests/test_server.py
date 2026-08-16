@@ -315,6 +315,56 @@ def test_describe_model(mock_api: respx.MockRouter):
     assert "synonyms: sales, income" in result
 
 
+def test_describe_model_shows_measure_default_value(mock_api: respx.MockRouter):
+    """A measure's defaultValue changes its answer over no rows, so describe it."""
+    _mock_create_session(mock_api)
+    payload = {
+        **_DESCRIBE_RESPONSE,
+        "measures": [
+            # 0 is falsy but meaningful — it pins the empty aggregate to 0
+            # instead of the SQL-standard NULL.
+            {
+                "name": "Electronics Sales",
+                "result_type": "float",
+                "aggregation": "sum",
+                "expression": None,
+                "defaultValue": 0,
+            },
+            {"name": "Total Revenue", "result_type": "float", "aggregation": "sum"},
+        ],
+    }
+    mock_api.get("/v1/sessions/test-session-1/models/m001").mock(
+        return_value=httpx.Response(200, json=payload)
+    )
+
+    result = server._impl_describe_model("m001")
+    electronics, revenue = (
+        line
+        for line in result.splitlines()
+        if "Electronics Sales" in line or "Total Revenue" in line
+    )
+    assert "defaultValue: 0" in electronics
+    # Unset means the SQL-standard NULL — nothing to render.
+    assert "defaultValue" not in revenue
+
+
+def test_render_measure_lines_default_value():
+    """_render_measure_lines (find_artefacts) renders defaultValue in both spellings."""
+    lines = server._render_measure_lines(
+        [
+            {"name": "Snake", "result_type": "int", "aggregation": "sum", "default_value": 0},
+            {"name": "Camel", "result_type": "string", "aggregation": "max", "defaultValue": "n/a"},
+            {"name": "Falsy", "result_type": "bool", "aggregation": "max", "defaultValue": False},
+            {"name": "Unset", "result_type": "int", "aggregation": "sum"},
+        ]
+    )
+    assert "defaultValue: 0" in lines[0]
+    # JSON-rendered, so a string default stays distinguishable from a number.
+    assert 'defaultValue: "n/a"' in lines[1]
+    assert "defaultValue: false" in lines[2]
+    assert "defaultValue" not in lines[3]
+
+
 def test_describe_model_with_data_types_and_settings(mock_api: respx.MockRouter):
     """describe_model shows data_type on measures/metrics and model settings."""
     _mock_create_session(mock_api)
@@ -1344,6 +1394,49 @@ def test_get_join_graph(mock_api: respx.MockRouter):
     assert "Customers" in result
     assert "many-to-one" in result
     assert "Customer ID" in result
+
+
+def test_get_join_graph_shows_required_edges(mock_api: respx.MockRouter):
+    """A required join compiles to INNER, so the graph has to say so."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/join-graph").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "nodes": ["Orders", "Customers", "Regions"],
+                "edges": [
+                    {
+                        "from_object": "Orders",
+                        "to_object": "Customers",
+                        "cardinality": "many-to-one",
+                        "columns_from": ["Customer ID"],
+                        "columns_to": ["Cust ID"],
+                        "secondary": False,
+                        "path_name": None,
+                        "required": True,
+                    },
+                    {
+                        "from_object": "Customers",
+                        "to_object": "Regions",
+                        "cardinality": "many-to-one",
+                        "columns_from": ["Region ID"],
+                        "columns_to": ["ID"],
+                        "secondary": False,
+                        "path_name": None,
+                        "required": False,
+                    },
+                ],
+            },
+        )
+    )
+
+    result = server._impl_get_join_graph("m001")
+    orders_line, customers_line = (
+        line for line in result.splitlines() if "--[many-to-one]-->" in line
+    )
+    assert "[required: INNER]" in orders_line
+    # The default LEFT join stays unannotated.
+    assert "required" not in customers_line
 
 
 def test_get_join_graph_no_edges(mock_api: respx.MockRouter):

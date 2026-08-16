@@ -911,6 +911,24 @@ def list_dialects() -> str:
 # ---------------------------------------------------------------------------
 
 
+def _default_value_tag(rec: dict) -> str:
+    """Render a measure's ``defaultValue`` when set, else an empty string.
+
+    The value reported when the aggregate has nothing to add up; unset means the
+    SQL-standard NULL. It changes the answer a filtered measure gives, so it
+    belongs in any description of the measure. ``0`` and ``False`` are
+    meaningful values here, hence the check against ``None`` rather than
+    falsiness, and the value is JSON-rendered so ``0`` and ``"0"`` stay
+    distinguishable.
+    """
+    val = rec.get("default_value")
+    if val is None:
+        val = rec.get("defaultValue")
+    if val is None:
+        return ""
+    return f"  defaultValue: {json.dumps(val)}"
+
+
 def _format_warning(w: Any) -> str:
     """Render a single warning. Accepts the structured ``StructuredWarning``
     shape introduced in API v2.2 (object with ``code``/``severity``/
@@ -1110,7 +1128,8 @@ def _impl_describe_model(model_id: str | None = None) -> str:
         m_type = m.get("result_type", "?")
         m_agg = m.get("aggregation", "?")
         dtype = f"  dataType: {m['data_type']}" if m.get("data_type") else ""
-        lines.append(f"  {m_name}  ({m_type}, {m_agg}{expr}{dtype})")
+        default_val = _default_value_tag(m)
+        lines.append(f"  {m_name}  ({m_type}, {m_agg}{expr}{dtype}{default_val})")
         # Two-column statistical aggregates (corr, covar_*, regr_*) — column
         # order is significant in the compiled SQL, so surface it explicitly.
         cols = m.get("columns") or []
@@ -1321,7 +1340,10 @@ def _render_measure_lines(measures: list[dict]) -> list[str]:
         total = "  total" if m.get("total") else ""
         grain_tag = "  grain" if m.get("grain") else ""
         fc_tag = "  filterContext" if m.get("filter_context") or m.get("filterContext") else ""
-        lines.append(f"  {m_name}  ({m_type}, {m_agg}{expr}{dtype}{total}{grain_tag}{fc_tag})")
+        default_val = _default_value_tag(m)
+        lines.append(
+            f"  {m_name}  ({m_type}, {m_agg}{expr}{dtype}{default_val}{total}{grain_tag}{fc_tag})"
+        )
         cols = m.get("columns") or []
         if len(cols) > 1 and not m.get("expression"):
             col_refs = [
@@ -1506,10 +1528,14 @@ def _impl_get_join_graph(model_id: str | None) -> str:
                 else ""
             )
             secondary = " [secondary]" if e.get("secondary") else ""
+            # A required join compiles to INNER rather than the default LEFT, so
+            # an unmatched row disappears from every query crossing this edge —
+            # not something to leave implicit in a join graph.
+            required = " [required: INNER]" if e.get("required") else ""
             path = f" path={e['path_name']}" if e.get("path_name") else ""
             lines.append(
                 f"  {e['from_object']} --[{e['cardinality']}]--> "
-                f"{e['to_object']}{cols}{secondary}{path}"
+                f"{e['to_object']}{cols}{secondary}{required}{path}"
             )
     else:
         lines.append("No joins defined.")

@@ -33,6 +33,22 @@ companion: `get_function_catalog` says what an entry means, `list_dialects` says
 where it does not run. No dialect declares an entry yet, so today it renders
 nothing.
 
+**A measure's `defaultValue` is described.** `MeasureDetail` gained the field:
+the value reported when the aggregate has nothing to add up, which a filtered
+measure reaches routinely and which engines disagree about (ClickHouse returns
+0 over an empty row set where Postgres and DuckDB return NULL). It changes the
+answer, and both measure renderers — `describe_model` and the one behind
+`find_artefacts` — dropped it, so a model could report 0 where the description
+implied NULL. `0` and `false` are meaningful values here, so the check is
+against `None` rather than falsiness, and the value is JSON-rendered to keep
+`0` and `"0"` apart.
+
+**A join graph says which edges are required.** `JoinEdge` gained `required`:
+false compiles to `LEFT JOIN`, true to `INNER JOIN`. `get_join_graph` already
+annotated `[secondary]` and `path=`, but not the flag that decides whether an
+unmatched row survives — now rendered as `[required: INNER]`. The default
+LEFT join stays unannotated.
+
 **Three new error codes in the `debug_validation` prompt.**
 `WRONG_FUNCTION_ARITY` (model validation — a catalog function called with the
 wrong argument count; only catalog names are checked), `UNSUPPORTED_FUNCTION`
