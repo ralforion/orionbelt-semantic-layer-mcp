@@ -27,6 +27,7 @@ def _reset_state():
     server._http_client = None
     server._obml_reference_cache = None
     server._dialect_names_cache = None
+    server._function_catalog_cache = None
     server._single_model_mode = False
     server._query_execute_enabled = False
     server._loaded_model_ids.clear()
@@ -37,6 +38,7 @@ def _reset_state():
     server._api_session_id = None
     server._obml_reference_cache = None
     server._dialect_names_cache = None
+    server._function_catalog_cache = None
     server._single_model_mode = False
     server._query_execute_enabled = False
     server._loaded_model_ids.clear()
@@ -643,6 +645,101 @@ def test_get_json_schema(mock_api: respx.MockRouter):
     result = server.get_json_schema("query")
     assert '"QueryObject"' in result
     assert "json-schema.org" in result
+
+
+# ---------------------------------------------------------------------------
+# get_function_catalog
+# ---------------------------------------------------------------------------
+
+
+_MOCK_FUNCTION_CATALOG = {
+    "functions": [
+        {
+            "name": "concat",
+            "signature": "concat(a, b, ...)",
+            "group": "string",
+            "min_args": 2,
+            "max_args": None,
+            "result_type": "string",
+            "summary": "Concatenate values into one string.",
+            "semantics": "Propagates NULL: any NULL argument makes the whole result NULL.",
+            "examples": [
+                {"call": "concat('a', 'b')", "expect": "ab"},
+                {"call": "concat('a', NULL)", "expect": None},
+            ],
+        },
+        {
+            "name": "div",
+            "signature": "div(a, b)",
+            "group": "numeric",
+            "min_args": 2,
+            "max_args": 2,
+            "result_type": "int",
+            "summary": "Integer division.",
+            "semantics": "Truncates toward zero, so div(-7, 2) is -3.",
+            "examples": [{"call": "div(7, 2)", "expect": 3}],
+        },
+    ],
+    "escape_hatch": "A function outside the catalog is emitted verbatim into the SQL.",
+}
+
+
+def _mock_function_catalog(rsps: respx.MockRouter):
+    """Add a mock for GET /v1/reference/functions."""
+    return rsps.get("/v1/reference/functions").mock(
+        return_value=httpx.Response(200, json=_MOCK_FUNCTION_CATALOG)
+    )
+
+
+def test_get_function_catalog(mock_api: respx.MockRouter):
+    """get_function_catalog renders entries grouped, with semantics and examples."""
+    _mock_function_catalog(mock_api)
+
+    result = server.get_function_catalog()
+
+    # Grouped by `group`, in API order.
+    assert result.index("string:") < result.index("numeric:")
+    # Fixed-arity entry: signature, result type, arity, summary, semantics, example.
+    assert "div(a, b) -> int  [2 args] — Integer division." in result
+    assert "semantics: Truncates toward zero, so div(-7, 2) is -3." in result
+    assert "e.g. div(7, 2) = 3" in result
+    # The escape hatch closes the text.
+    assert result.endswith("A function outside the catalog is emitted verbatim into the SQL.")
+
+
+def test_get_function_catalog_variadic_entry(mock_api: respx.MockRouter):
+    """A null max_args renders as an open-ended arity; a null expect stays legible."""
+    _mock_function_catalog(mock_api)
+
+    result = server.get_function_catalog()
+
+    assert "concat(a, b, ...) -> string  [2+ args]" in result
+    # `null` is a documented expected value, not a missing one.
+    assert "e.g. concat('a', NULL) = null" in result
+
+
+def test_get_function_catalog_is_cached(mock_api: respx.MockRouter):
+    """The catalog is static per API version — a second call makes no second request."""
+    route = _mock_function_catalog(mock_api)
+
+    first = server.get_function_catalog()
+    second = server.get_function_catalog()
+
+    assert first == second
+    assert route.call_count == 1
+
+
+def test_get_function_catalog_on_older_api(mock_api: respx.MockRouter):
+    """A 404 means the API predates the catalog — say so, don't leak the raw error."""
+    mock_api.get("/v1/reference/functions").mock(
+        return_value=httpx.Response(404, json={"detail": "Not Found"})
+    )
+
+    with pytest.raises(_ToolError, match="predates the portable function catalog"):
+        server.get_function_catalog()
+
+    # A failed fetch must not poison the cache.
+    assert server._function_catalog_cache is None
 
 
 # ---------------------------------------------------------------------------
@@ -2474,7 +2571,7 @@ def test_tool_phase_buckets_are_disjoint():
     # Spot-check canonical assignments from the spec.
     # run_batch and get_json_schema are always-on (both phases).
     assert {"load_model", "remove_model", "run_batch", "get_json_schema"} <= b1
-    assert {"get_obml_reference", "list_dialects"} <= b2
+    assert {"get_obml_reference", "get_function_catalog", "list_dialects"} <= b2
     assert {"describe_model", "execute_query", "find_artefacts"} <= b3
 
 

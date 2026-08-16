@@ -51,7 +51,7 @@ The OrionBelt® Semantic Layer platform has two deployment modes. This MCP serve
 - **No business logic** — all tool calls delegate to the REST API (v1 endpoints)
 - **Dual-mode** — auto-detects single-model or multi-model API mode at startup
 - **Auto-session management** — creates an API session on first tool call, caches the ID (multi-model mode)
-- **15 tools** (single-model mode) or **19 tools** (multi-model mode) for querying (QueryObject), execution, batch, discovery, composability (ACR), examples, diagrams, RDF/SPARQL, OSI export, and OBML reference + JSON schemas. (20 distinct tools exist in total; the API mode selects which subset is active — they overlap in 14 — and no client ever sees all 20 at once.) The visible surface is narrowed further in the design-time phase and when query execution is disabled (see [Design-time vs run-time tool switching](#design-time-vs-run-time-tool-switching))
+- **16 tools** (single-model mode) or **20 tools** (multi-model mode) for querying (QueryObject), execution, batch, discovery, composability (ACR), examples, diagrams, RDF/SPARQL, OSI export, and OBML reference + function catalog + JSON schemas. (21 distinct tools exist in total; the API mode selects which subset is active — they overlap in 15 — and no client ever sees all 21 at once.) The visible surface is narrowed further in the design-time phase and when query execution is disabled (see [Design-time vs run-time tool switching](#design-time-vs-run-time-tool-switching))
 - **4 prompts + 2 resources** for OBML / OBSQL reference and usage guidance
 
 <p align="center">
@@ -178,10 +178,11 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 
 ### References
 
-| MCP Tool                | Description                                             |
-| ----------------------- | ------------------------------------------------------- |
-| `get_obml_reference()`  | OBML (model authoring) grammar reference                |
-| `get_json_schema(name)` | JSON Schema for `obml` (model) or `query` (QueryObject) |
+| MCP Tool                  | Description                                             |
+| ------------------------- | ------------------------------------------------------- |
+| `get_obml_reference()`    | OBML (model authoring) grammar reference                |
+| `get_function_catalog()`  | Portable scalar functions usable in OBML expressions, with their pinned cross-dialect semantics |
+| `get_json_schema(name)`   | JSON Schema for `obml` (model) or `query` (QueryObject) |
 
 ### Utilities
 
@@ -195,8 +196,8 @@ The server presents a **phase-scoped tool surface**: instead of listing all
 all tools at once, it shows only the tools that make sense for where you are in
 the model lifecycle. About half the tools are meaningless until a model is
 loaded (`execute_query`, `describe_model`, `find_artefacts`, …) and the rest are
-about authoring or reference (`get_obml_reference`, `get_json_schema`,
-`list_dialects`). Splitting them keeps the surface small and prevents a
+about authoring or reference (`get_obml_reference`, `get_function_catalog`,
+`get_json_schema`, `list_dialects`). Splitting them keeps the surface small and prevents a
 whole class of error — calling a query tool with no model loaded.
 
 ### Three buckets, swapped by phase
@@ -208,7 +209,7 @@ design/reference tools:
 | Bucket          | Listed when                 | Tools                                                                                                                                                                                                                                                                                             |
 | --------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Always**      | always (both phases)        | `load_model`, `remove_model` (transition verbs — stay available in the run phase so a second model can be loaded mid-session, up to `max_models_per_session`); `run_batch` (self-contained one-shot — loads/references a model inline, so it needs no prior session state); `get_json_schema` (QueryObject/OBML schemas — needed in both phases) |
-| **Design-only** | only when no model loaded   | `get_obml_reference`, `list_dialects`                                                                                                                                  |
+| **Design-only** | only when no model loaded   | `get_obml_reference`, `get_function_catalog`, `list_dialects`                                                                                                          |
 | **Run-only**    | only when a model is loaded | `describe_model`, `get_model_diagram`, `find_artefacts`, `explain_artefact`, `execute_query`, `list_examples`, `get_example`, `get_model_graph`, `get_join_graph`, `find_composables`, `query_model_graph_by_sparql`, `list_models`, `export_model_to_osi` |
 
 ```

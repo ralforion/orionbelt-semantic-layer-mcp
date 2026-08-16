@@ -250,6 +250,7 @@ _ALWAYS_TOOLS: frozenset[str] = frozenset(
 _DESIGN_TOOLS: frozenset[str] = frozenset(
     {
         "get_obml_reference",
+        "get_function_catalog",
         "list_dialects",
     }
 )
@@ -706,6 +707,7 @@ def _shortcut_request(
 _obml_reference_cache: str | None = None
 _obsql_reference_cache: str | None = None
 _dialect_names_cache: list[str] | None = None
+_function_catalog_cache: dict[str, Any] | None = None
 
 
 def _fetch_obml_reference() -> str:
@@ -744,6 +746,46 @@ def _fetch_dialect_names() -> list[str]:
     return _dialect_names_cache
 
 
+def _fetch_function_catalog() -> dict[str, Any]:
+    """Fetch and cache the portable scalar-function catalog from the API.
+
+    The catalog is static for a given API version, so a single fetch per process
+    is enough. ``GET /v1/reference/functions`` only exists on API builds carrying
+    the function catalog, so a 404 is translated into a legible message instead
+    of a bare HTTP error — an older deployment simply predates the endpoint.
+    """
+    global _function_catalog_cache
+    if _function_catalog_cache is None:
+        with _state_lock:
+            if _function_catalog_cache is None:  # double-check under lock
+                resp = _do_request(_get_client(), "GET", f"{_API_V1}/reference/functions", None)
+                if resp.status_code == 404:
+                    raise ToolError(
+                        "The connected OrionBelt Semantic Layer API predates the portable "
+                        "function catalog — GET /v1/reference/functions is not available on "
+                        "this deployment. Upgrade the API to a build that publishes the "
+                        "catalog, or consult get_obml_reference() for expression syntax."
+                    )
+                if resp.status_code >= 400:
+                    _raise_api_error(resp)
+                _function_catalog_cache = _parse_json(resp)
+    return _function_catalog_cache
+
+
+def _format_arity(fn: dict[str, Any]) -> str:
+    """Render an entry's arity. ``max_args`` is null for variadic entries."""
+    min_args = fn.get("min_args")
+    max_args = fn.get("max_args")
+    if min_args is None:
+        return ""
+    unit = "arg" if min_args == 1 else "args"
+    if max_args is None:
+        return f"[{min_args}+ args]"
+    if max_args == min_args:
+        return f"[{min_args} {unit}]"
+    return f"[{min_args}-{max_args} args]"
+
+
 @mcp.resource("obml://reference")
 def obml_reference() -> str:
     """Full OBML format reference — data objects, dimensions, measures, metrics, joins."""
@@ -771,6 +813,59 @@ def get_obml_reference() -> str:
     before composing models.
     """
     return _fetch_obml_reference()
+
+
+@mcp.tool
+def get_function_catalog() -> str:
+    """Get the portable scalar-function catalog for OBML expressions.
+
+    A call whose name is **in** the catalog is rendered per dialect with pinned
+    semantics, so it means the same thing on every warehouse: ``concat``
+    propagates NULL (any NULL argument makes the whole result NULL), ``length``
+    counts characters rather than bytes, ``round`` breaks ties away from zero,
+    and ``greatest``/``least`` propagate NULL. Do not assume your own
+    warehouse's rule — read the ``semantics`` line, which is the part that
+    differs between engines.
+
+    A call **outside** the catalog is emitted verbatim into the generated SQL.
+    That still works, but it pins the model to the engines that happen to have
+    that function, so prefer a catalog entry when one covers the need.
+
+    Calling a catalog function with the wrong number of arguments is a model
+    validation error (``WRONG_FUNCTION_ARITY``), caught at load time rather
+    than at the warehouse.
+    """
+    data = _fetch_function_catalog()
+    lines = ["Portable scalar functions:", ""]
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for fn in data.get("functions", []):
+        groups.setdefault(fn.get("group") or "other", []).append(fn)
+    for group, fns in groups.items():
+        lines.append(f"{group}:")
+        for fn in fns:
+            signature = fn.get("signature") or fn.get("name", "?")
+            head = f"  {signature}"
+            result_type = fn.get("result_type")
+            if result_type:
+                head += f" -> {result_type}"
+            arity = _format_arity(fn)
+            if arity:
+                head += f"  {arity}"
+            summary = fn.get("summary")
+            if summary:
+                head += f" — {summary}"
+            lines.append(head)
+            semantics = fn.get("semantics")
+            if semantics:
+                lines.append(f"      semantics: {semantics}")
+            examples = fn.get("examples") or []
+            for ex in examples:
+                lines.append(f"      e.g. {ex.get('call')} = {json.dumps(ex.get('expect'))}")
+        lines.append("")
+    escape_hatch = data.get("escape_hatch")
+    if escape_hatch:
+        lines.append(f"Escape hatch: {escape_hatch}")
+    return "\n".join(lines).rstrip()
 
 
 @mcp.tool

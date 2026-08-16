@@ -6,6 +6,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+**Added: `get_function_catalog`.** Wraps `GET /v1/reference/functions`, the
+API's portable scalar-function catalog. An LLM composing an OBML expression
+previously had to guess which function names survive compilation, and found out
+at the warehouse. The tool answers that up front: entries grouped by `group`
+(string / numeric / conditional), one line each carrying the signature, result
+type, arity and summary, then the `semantics` sentence and the worked examples.
+The semantics line is the point — it pins the rule that actually differs
+between engines (`concat` propagates NULL, `length` counts characters,
+`round` breaks ties away from zero, `greatest`/`least` propagate NULL), so the
+model does not assume its own warehouse's behaviour. The response closes with
+the catalog's `escape_hatch` sentence: a call outside the catalog is still
+emitted verbatim, it just pins the model to the engines that have it. Wrong
+arity is a model validation error (`WRONG_FUNCTION_ARITY`), caught at load time.
+
+The catalog is static for a given API version, so it is fetched once and cached
+for the process, like the OBML reference. It is a **design-only** tool
+(bucket 2) — authoring reference, hidden once a model is loaded. Tool counts
+become 16 single-model / 20 multi-model / 21 distinct.
+
+The endpoint only exists on API builds carrying the function catalog. A 404 is
+translated into a message saying the connected API predates it, rather than
+surfacing a raw HTTP error — so a MCP service rolled ahead of the API fails
+legibly instead of cryptically.
+
 ## [2.24.0] — 2026-08-04
 
 Tracks OrionBelt Semantic Layer API **v2.24.0**. One tool loses a parameter;
