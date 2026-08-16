@@ -894,9 +894,14 @@ def list_dialects() -> str:
         enabled = [k for k, v in caps.items() if v]
         cap_str = ", ".join(enabled) if enabled else "(none)"
         unsupported = d.get("unsupported_aggregations", [])
+        unsupported_fns = d.get("unsupported_functions", [])
         line = f"  {d['name']}: {cap_str}"
         if unsupported:
             line += f"  (unsupported aggregations: {', '.join(unsupported)})"
+        if unsupported_fns:
+            # Portable-catalog scalar functions this dialect cannot render —
+            # the companion to get_function_catalog(), which lists the entries.
+            line += f"  (unsupported functions: {', '.join(unsupported_fns)})"
         lines.append(line)
     return "\n".join(lines)
 
@@ -2634,6 +2639,12 @@ _DEBUG_VALIDATION_TEXT = """\
   Fix: Each static filter needs `dataObject`, `column`, and `operator`.
   Use `value` for single-value operators, `values` for list operators (inlist, between).
   Dates must be ISO 8601 strings (e.g. '2026-01-01').
+- `WRONG_FUNCTION_ARITY`: An expression calls a portable-catalog scalar function
+  with the wrong number of arguments (e.g. `substring({Zip}, 1, 5, 9)`). Only
+  catalog names are arity-checked — a vendor function's arity is not OBSL's to
+  know, so it is passed through unchecked.
+  Fix: Match the canonical signature named in the error. See
+  `get_function_catalog()` for every entry's arity and semantics.
 
 ## Reference Errors
 
@@ -2767,6 +2778,15 @@ references unknown column.
   execute path returns HTTP 422.
   Fix: Change `dialect`, drop the modifier, or rewrite the query
   (e.g. UNION of explicit grain combinations).
+- `UNSUPPORTED_FUNCTION`: The selected dialect cannot render a portable-catalog
+  scalar function an expression calls (HTTP 422, with `function=…, dialect=…`).
+  The catalog's counterpart to `UNSUPPORTED_AGGREGATION`.
+  Fix: Change `dialect`, or rewrite the expression. See `list_dialects()` for
+  each dialect's `unsupported_functions`.
+- `AMBIGUOUS_TABLE_REFERENCE`: The selected dialect cannot disambiguate a table
+  reference in the compiled SQL (HTTP 422, with `database=…, dialect=…`).
+  Fix: Qualify the data object's `database`/`schema` in the model, or compile
+  against a dialect that resolves the reference.
 
 ## Debugging Steps
 

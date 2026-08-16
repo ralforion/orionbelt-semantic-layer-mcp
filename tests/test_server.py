@@ -616,6 +616,7 @@ def test_list_dialects(mock_api: respx.MockRouter):
                             "window_functions": True,
                         },
                         "unsupported_aggregations": ["median"],
+                        "unsupported_functions": ["split_part"],
                     },
                 ]
             },
@@ -628,6 +629,9 @@ def test_list_dialects(mock_api: respx.MockRouter):
     assert "mysql" in result
     assert "union_all_by_name" in result
     assert "unsupported aggregations: median" in result
+    # Catalog functions the dialect cannot render — the companion to
+    # get_function_catalog(), which lists what the entries mean.
+    assert "unsupported functions: split_part" in result
 
 
 def test_get_json_schema(mock_api: respx.MockRouter):

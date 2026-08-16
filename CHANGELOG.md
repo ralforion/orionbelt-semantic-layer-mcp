@@ -25,6 +25,20 @@ for the process, like the OBML reference. It is a **design-only** tool
 (bucket 2) — authoring reference, hidden once a model is loaded. Tool counts
 become 16 single-model / 20 multi-model / 21 distinct.
 
+**`list_dialects` surfaces `unsupported_functions`.** `GET /v1/dialects` gained
+the field alongside `unsupported_aggregations` — the catalog entries a given
+dialect cannot render. The MCP enumerates dialect fields explicitly rather than
+dumping the payload, so it would have silently dropped it. It is the catalog's
+companion: `get_function_catalog` says what an entry means, `list_dialects` says
+where it does not run. No dialect declares an entry yet, so today it renders
+nothing.
+
+**Three new error codes in the `debug_validation` prompt.**
+`WRONG_FUNCTION_ARITY` (model validation — a catalog function called with the
+wrong argument count; only catalog names are checked), `UNSUPPORTED_FUNCTION`
+and `AMBIGUOUS_TABLE_REFERENCE` (both dialect-capability 422s at query time,
+raised by the compile and execute paths and returned per-query by `run_batch`).
+
 The endpoint only exists on API builds carrying the function catalog. A 404 is
 translated into a message saying the connected API predates it, rather than
 surfacing a raw HTTP error — so a MCP service rolled ahead of the API fails
