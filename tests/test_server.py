@@ -300,7 +300,7 @@ _DESCRIBE_RESPONSE = {
 def test_describe_model(mock_api: respx.MockRouter):
     """describe_model formats the model description (multi-model mode)."""
     _mock_create_session(mock_api)
-    mock_api.get("/v1/sessions/test-session-1/models/m001").mock(
+    mock_api.get("/v1/sessions/test-session-1/models/m001/schema").mock(
         return_value=httpx.Response(200, json=_DESCRIBE_RESPONSE)
     )
 
@@ -333,7 +333,7 @@ def test_describe_model_shows_measure_default_value(mock_api: respx.MockRouter):
             {"name": "Total Revenue", "result_type": "float", "aggregation": "sum"},
         ],
     }
-    mock_api.get("/v1/sessions/test-session-1/models/m001").mock(
+    mock_api.get("/v1/sessions/test-session-1/models/m001/schema").mock(
         return_value=httpx.Response(200, json=payload)
     )
 
@@ -366,14 +366,22 @@ def test_render_measure_lines_default_value():
 
 
 def test_describe_model_with_data_types_and_settings(mock_api: respx.MockRouter):
-    """describe_model shows data_type on measures/metrics and model settings."""
+    """describe_model shows dataType on measures/metrics and the model settings.
+
+    Both halves are spelled the way the API actually sends them. FastAPI
+    serialises a response model by alias, so ``MeasureDetail.data_type`` arrives
+    as ``dataType`` while its unaliased sibling ``result_type`` stays
+    snake_case; and no schema response carries a ``settings`` block at all, so
+    the model's settings come from ``/v1/settings`` keyed by alias.
+    """
     _mock_create_session(mock_api)
     response = {
+        "model_id": "m001",
         "data_objects": [
             {
-                "label": "Orders",
+                "name": "Orders",
                 "code": "ORDERS",
-                "columns": ["Amount"],
+                "columns": [{"name": "Amount"}],
                 "join_targets": [],
                 "synonyms": [],
             }
@@ -385,7 +393,7 @@ def test_describe_model_with_data_types_and_settings(mock_api: respx.MockRouter)
                 "result_type": "float",
                 "aggregation": "sum",
                 "expression": None,
-                "data_type": "decimal(18, 4)",
+                "dataType": "decimal(18, 4)",
                 "synonyms": [],
             }
         ],
@@ -394,22 +402,30 @@ def test_describe_model_with_data_types_and_settings(mock_api: respx.MockRouter)
                 "name": "Profit Margin",
                 "type": "derived",
                 "expression": "{[Profit]} / {[Revenue]}",
-                "data_type": "decimal(18, 6)",
+                "dataType": "decimal(18, 6)",
                 "synonyms": [],
             }
         ],
-        "settings": {
-            "default_numeric_data_type": "decimal(18, 2)",
-            "default_timezone": "Europe/Zagreb",
-            "default_locale": "de-DE",
-            "query_timezone": "UTC",
-            "week_start": "sunday",
-            "expression_mode": "portable",
-            "override_database_timezone": True,
-        },
     }
-    mock_api.get("/v1/sessions/test-session-1/models/m001").mock(
+    mock_api.get("/v1/sessions/test-session-1/models/m001/schema").mock(
         return_value=httpx.Response(200, json=response)
+    )
+    settings_route = mock_api.get("/v1/settings").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "model_settings": {
+                    "defaultNumericDataType": "decimal(18, 2)",
+                    "defaultTimezone": "Europe/Zagreb",
+                    "defaultLocale": "de-DE",
+                    "queryTimezone": "UTC",
+                    "weekStart": "sunday",
+                    "expressionMode": "portable",
+                    "overrideDatabaseTimezone": True,
+                },
+                "dialect": {"effective": "duckdb"},
+            },
+        )
     )
 
     result = server._impl_describe_model("m001")
@@ -425,6 +441,24 @@ def test_describe_model_with_data_types_and_settings(mock_api: respx.MockRouter)
     assert "weekStart: sunday" in result
     assert "expressionMode: portable" in result
     assert "overrideDatabaseTimezone: true" in result
+    # The settings block is per-model: a session holding several models omits
+    # it unless the request pins one, so describe_model has to scope its fetch.
+    params = settings_route.calls[0].request.url.params
+    assert params["session_id"] == "test-session-1"
+    assert params["model_id"] == "m001"
+
+
+def test_describe_model_settings_absent_without_error(mock_api: respx.MockRouter):
+    """A /v1/settings failure drops the SETTINGS block rather than the model."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/schema").mock(
+        return_value=httpx.Response(200, json=_DESCRIBE_RESPONSE)
+    )
+    mock_api.get("/v1/settings").mock(return_value=httpx.Response(500, text="boom"))
+
+    result = server._impl_describe_model("m001")
+    assert "MEASURES:" in result
+    assert "SETTINGS:" not in result
 
 
 # ---------------------------------------------------------------------------
@@ -1753,7 +1787,7 @@ def test_session_not_invalidated_on_model_404(mock_api: respx.MockRouter):
     from fastmcp.exceptions import ToolError
 
     server._api_session_id = "session-old"
-    mock_api.get("/v1/sessions/session-old/models/no-such-model").mock(
+    mock_api.get("/v1/sessions/session-old/models/no-such-model/schema").mock(
         return_value=httpx.Response(404, json={"detail": "Model not found"})
     )
 
@@ -1770,7 +1804,7 @@ def test_session_not_invalidated_on_plain_text_404(mock_api: respx.MockRouter):
     from fastmcp.exceptions import ToolError
 
     server._api_session_id = "session-old"
-    mock_api.get("/v1/sessions/session-old/models/missing").mock(
+    mock_api.get("/v1/sessions/session-old/models/missing/schema").mock(
         return_value=httpx.Response(404, text="Not Found")
     )
 

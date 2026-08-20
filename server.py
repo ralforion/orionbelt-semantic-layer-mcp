@@ -918,6 +918,22 @@ def list_dialects() -> str:
 # ---------------------------------------------------------------------------
 
 
+def _aliased(rec: dict[str, Any], alias: str, snake: str) -> Any:
+    """Read one field, tolerating either spelling.
+
+    FastAPI serialises a response model **by alias**, so a Pydantic field
+    declared ``data_type: ... = Field(alias="dataType")`` reaches us as
+    ``dataType``, while an unaliased sibling like ``result_type`` stays
+    snake_case. Only some fields are aliased, so the mixed casing is per-field
+    rather than per-payload and cannot be normalised wholesale. Reading the
+    alias first with a snake_case fallback also keeps the renderers working
+    against a payload dumped by field name (``model_dump()`` without
+    ``by_alias``), which is how several tests and the OBML round-trip spell it.
+    """
+    val = rec.get(alias)
+    return rec.get(snake) if val is None else val
+
+
 def _default_value_tag(rec: dict) -> str:
     """Render a measure's ``defaultValue`` when set, else an empty string.
 
@@ -928,9 +944,7 @@ def _default_value_tag(rec: dict) -> str:
     falsiness, and the value is JSON-rendered so ``0`` and ``"0"`` stay
     distinguishable.
     """
-    val = rec.get("default_value")
-    if val is None:
-        val = rec.get("defaultValue")
+    val = _aliased(rec, "defaultValue", "default_value")
     if val is None:
         return ""
     return f"  defaultValue: {json.dumps(val)}"
@@ -986,8 +1000,9 @@ def _format_metric_summary(met: dict) -> str:
     partition_by = met.get("partition_by") or met.get("partitionBy") or []
     if met_type == "cumulative":
         parts = [f"type: cumulative, measure: {met.get('measure', '?')}"]
-        if met.get("time_dimension"):
-            parts.append(f"timeDimension: {met['time_dimension']}")
+        time_dim = _aliased(met, "timeDimension", "time_dimension")
+        if time_dim:
+            parts.append(f"timeDimension: {time_dim}")
         if met.get("cumulative_type") and met["cumulative_type"] != "sum":
             parts.append(f"cumulativeType: {met['cumulative_type']}")
         if met.get("window"):
@@ -1014,8 +1029,9 @@ def _format_metric_summary(met: dict) -> str:
         parts = [f"type: window, windowFunction: {fn}"]
         if met.get("measure"):
             parts.append(f"measure: {met['measure']}")
-        if met.get("time_dimension"):
-            parts.append(f"timeDimension: {met['time_dimension']}")
+        time_dim = _aliased(met, "timeDimension", "time_dimension")
+        if time_dim:
+            parts.append(f"timeDimension: {time_dim}")
         if partition_by:
             parts.append(f"partitionBy: [{', '.join(partition_by)}]")
         order_dir = met.get("order_direction") or met.get("orderDirection")
@@ -1034,14 +1050,21 @@ def _format_metric_summary(met: dict) -> str:
     return f"expr: {met.get('expression', '?')}"
 
 
-def _fetch_effective_settings() -> dict[str, str]:
-    """Best-effort fetch of the server-resolved dialect/timezone.
+def _fetch_effective_settings(model_id: str | None = None) -> dict[str, Any]:
+    """Best-effort fetch of the server-resolved dialect/timezone and the
+    model's ``settings:`` block.
 
-    These are the three agent-relevant fields the removed ``get_settings`` tool
-    used to surface (``dialect.effective``, ``timezone.effective``; the model's
-    ``defaultNumericDataType`` is already shown in the model SETTINGS block).
-    Folding them into ``describe_model`` / ``load_model`` keeps the information
-    available as *data* without a standalone settings verb.
+    ``dialect.effective`` / ``timezone.effective`` are the agent-relevant fields
+    the removed ``get_settings`` tool used to surface; folding them into
+    ``describe_model`` / ``load_model`` keeps them available as *data* without a
+    standalone settings verb.
+
+    ``model_settings`` comes along because **no schema response carries it**.
+    Neither ``ModelDescription`` (the session ``/models/{id}`` summary) nor
+    ``SchemaResponse`` (``/schema``, both modes) has a ``settings`` field, so
+    ``/v1/settings`` is the only route that reports it — scoped by
+    ``session_id`` + ``model_id``, which is what pins it to one model when a
+    session holds several.
 
     Returns a small dict (possibly empty). Enrichment only — any error is
     swallowed so it can never break the calling tool.
@@ -1050,6 +1073,11 @@ def _fetch_effective_settings() -> dict[str, str]:
         params: dict[str, str] = {}
         if not _single_model_mode and _api_session_id is not None:
             params["session_id"] = _api_session_id
+            # model_id is rejected without a session_id, and the block is
+            # omitted rather than guessed when a session holds more than one
+            # model — so scoping it is what makes the settings block appear.
+            if model_id:
+                params["model_id"] = model_id
         resp = _api_request(
             "GET",
             f"{_API_V1}/settings",
@@ -1059,13 +1087,16 @@ def _fetch_effective_settings() -> dict[str, str]:
         data = _parse_json(resp)
     except Exception:  # noqa: BLE001 — enrichment must never break the caller
         return {}
-    out: dict[str, str] = {}
+    out: dict[str, Any] = {}
     dialect = data.get("dialect") or {}
     if dialect.get("effective"):
         out["dialect"] = dialect["effective"]
     tz = data.get("timezone") or {}
     if tz.get("effective"):
         out["timezone"] = tz["effective"]
+    model_settings = data.get("model_settings")
+    if isinstance(model_settings, dict):
+        out["model_settings"] = model_settings
     return out
 
 
@@ -1077,9 +1108,16 @@ def _impl_describe_model(model_id: str | None = None) -> str:
         desc = _parse_json(resp)
         mid = desc.get("model_id", "default")
     else:
-        resp = _session_request("GET", f"/models/{model_id}")
+        # /schema, not the bare /models/{id}. The latter returns the
+        # ``ModelDescription`` *summary* dataclass, whose MeasureInfo carries
+        # only name/type/aggregation/expression/synonyms — no dataType, no
+        # defaultValue, no columns, no total — and which has no filters,
+        # extends or inherits either. /schema returns the same SchemaResponse
+        # the single-model shortcut does, so both modes describe a model from
+        # one shape and the renderers below need no per-mode branch.
+        resp = _session_request("GET", f"/models/{model_id}/schema")
         desc = _parse_json(resp)
-        mid = model_id
+        mid = desc.get("model_id", model_id)
 
     lines: list[str] = [f"Model {mid}:", ""]
 
@@ -1134,7 +1172,8 @@ def _impl_describe_model(model_id: str | None = None) -> str:
         m_name = m.get("name", "?")
         m_type = m.get("result_type", "?")
         m_agg = m.get("aggregation", "?")
-        dtype = f"  dataType: {m['data_type']}" if m.get("data_type") else ""
+        m_dtype = _aliased(m, "dataType", "data_type")
+        dtype = f"  dataType: {m_dtype}" if m_dtype else ""
         default_val = _default_value_tag(m)
         lines.append(f"  {m_name}  ({m_type}, {m_agg}{expr}{dtype}{default_val})")
         # Two-column statistical aggregates (corr, covar_*, regr_*) — column
@@ -1180,47 +1219,48 @@ def _impl_describe_model(model_id: str | None = None) -> str:
         lines.append("METRICS:")
         for met in metrics:
             lines.append(f"  {met.get('name', '?')}  {_format_metric_summary(met)}")
-            if met.get("data_type"):
-                lines.append(f"    dataType: {met['data_type']}")
+            met_dtype = _aliased(met, "dataType", "data_type")
+            if met_dtype:
+                lines.append(f"    dataType: {met_dtype}")
             if met.get("description"):
                 lines.append(f"    description: {met['description']}")
             if met.get("synonyms"):
                 lines.append(f"    synonyms: {', '.join(met['synonyms'])}")
         lines.append("")
 
-    # Model settings
-    model_settings = desc.get("settings")
+    # Model settings + server-resolved dialect/timezone, both from
+    # /v1/settings — no schema response carries a `settings` block, in either
+    # mode. Enrichment: omitted entirely on error, never fatal.
+    effective = _fetch_effective_settings(model_id)
+    model_settings = effective.get("model_settings") or {}
     if model_settings:
         lines.append("SETTINGS:")
-        if model_settings.get("default_dialect"):
-            lines.append(f"  defaultDialect: {model_settings['default_dialect']}")
-        if model_settings.get("default_numeric_data_type"):
-            lines.append(f"  defaultNumericDataType: {model_settings['default_numeric_data_type']}")
-        if model_settings.get("default_timezone"):
-            lines.append(f"  defaultTimezone: {model_settings['default_timezone']}")
-        if model_settings.get("default_locale"):
-            lines.append(f"  defaultLocale: {model_settings['default_locale']}")
-        if model_settings.get("query_timezone"):
-            lines.append(f"  queryTimezone: {model_settings['query_timezone']}")
-        # weekStart and expressionMode carry server-side defaults ('monday',
-        # 'permissive'), so the API reports them whether or not the model wrote
-        # them — the answer is what applies, not what was stated. Both change
-        # results: weekStart moves every weekly bucket, and expressionMode
-        # decides whether a function outside the portable catalog is a warning
-        # or a hard error (see get_function_catalog()).
-        if model_settings.get("week_start"):
-            lines.append(f"  weekStart: {model_settings['week_start']}")
-        if model_settings.get("expression_mode"):
-            lines.append(f"  expressionMode: {model_settings['expression_mode']}")
-        if model_settings.get("override_database_timezone"):
+        for label, alias, snake in (
+            ("defaultDialect", "defaultDialect", "default_dialect"),
+            ("defaultNumericDataType", "defaultNumericDataType", "default_numeric_data_type"),
+            ("defaultTimezone", "defaultTimezone", "default_timezone"),
+            ("defaultLocale", "defaultLocale", "default_locale"),
+            ("queryTimezone", "queryTimezone", "query_timezone"),
+            # weekStart and expressionMode carry server-side defaults
+            # ('monday', 'permissive'), so the API reports them whether or not
+            # the model wrote them — the answer is what applies, not what was
+            # stated. Both change results: weekStart moves every weekly bucket,
+            # and expressionMode decides whether a function outside the
+            # portable catalog is a warning or a hard error (see
+            # get_function_catalog()).
+            ("weekStart", "weekStart", "week_start"),
+            ("expressionMode", "expressionMode", "expression_mode"),
+        ):
+            val = _aliased(model_settings, alias, snake)
+            if val:
+                lines.append(f"  {label}: {val}")
+        if _aliased(model_settings, "overrideDatabaseTimezone", "override_database_timezone"):
             lines.append("  overrideDatabaseTimezone: true")
         lines.append("")
 
-    # Server-resolved effective dialect/timezone (the model SETTINGS block above
-    # shows what the model *requested*; this shows what the server *resolved*
-    # after factoring in env / host / database). Enrichment — omitted on error.
-    effective = _fetch_effective_settings()
-    if effective:
+    # What the server *resolved* after factoring in env / host / database — the
+    # SETTINGS block above is what the model *requested*.
+    if effective.get("dialect") or effective.get("timezone"):
         lines.append("EFFECTIVE (server-resolved):")
         if effective.get("dialect"):
             lines.append(f"  dialect:  {effective['dialect']}")
@@ -1355,7 +1395,8 @@ def _render_measure_lines(measures: list[dict]) -> list[str]:
         m_name = m.get("name", "?")
         m_type = m.get("result_type", "?")
         m_agg = m.get("aggregation", "?")
-        dtype = f"  dataType: {m['data_type']}" if m.get("data_type") else ""
+        m_dtype = _aliased(m, "dataType", "data_type")
+        dtype = f"  dataType: {m_dtype}" if m_dtype else ""
         total = "  total" if m.get("total") else ""
         grain_tag = "  grain" if m.get("grain") else ""
         fc_tag = "  filterContext" if m.get("filter_context") or m.get("filterContext") else ""
@@ -1385,8 +1426,9 @@ def _render_metric_lines(metrics: list[dict]) -> list[str]:
     for met in metrics:
         components = ", ".join(met.get("component_measures", []))
         lines.append(f"  {met['name']}  {_format_metric_summary(met)}")
-        if met.get("data_type"):
-            lines.append(f"    dataType: {met['data_type']}")
+        met_dtype = _aliased(met, "dataType", "data_type")
+        if met_dtype:
+            lines.append(f"    dataType: {met_dtype}")
         if met.get("description"):
             lines.append(f"    description: {met['description']}")
         if components:
@@ -1718,8 +1760,11 @@ def _render_load_result(data: dict, extra_lines: list[str] | None = None) -> str
             parts.append(f"    fan-trap risk on [{tables}]: {risk.get('reason', '')}")
     parts.extend(_format_warnings(data.get("warnings")))
 
-    # Surface server-resolved dialect/timezone as data (see _fetch_effective_settings).
-    effective = _fetch_effective_settings()
+    # Surface server-resolved dialect/timezone as data (see
+    # _fetch_effective_settings). Scoped to the model just loaded: the dialect
+    # and timezone resolution chains start at that model's own settings, and a
+    # session holding more than one model resolves neither without the scope.
+    effective = _fetch_effective_settings(data.get("model_id"))
     if effective.get("dialect"):
         parts.append(f"  effective dialect:  {effective['dialect']}")
     if effective.get("timezone"):
@@ -3009,12 +3054,12 @@ def main() -> None:
             # list time by capability, so this counts everything registered. The
             # *visible* surface is smaller when query_execute is off (−1) or in
             # the design phase (run-only verbs hidden); single-model mode is
-            # always run-time. 14 shared tools + get_model.
-            tool_count = 15
+            # always run-time. 15 shared tools + get_model.
+            tool_count = 16
         else:
-            # 14 shared tools + 5 multi-model lifecycle tools (load_model,
+            # 15 shared tools + 5 multi-model lifecycle tools (load_model,
             # remove_model, list_models, run_batch, export_model_to_osi).
-            tool_count = 19
+            tool_count = 20
         mode_label = "single-model" if _single_model_mode else "multi-model"
         stateless = False
     else:

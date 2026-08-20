@@ -9,7 +9,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [2.25.0] — 2026-08-20
 
 Tracks OrionBelt Semantic Layer API **v2.25.0**. One new design-time tool, one
-corrected dialect payload, and three settings that were silently dropped.
+corrected dialect payload, and a class of rendering bugs where the MCP read a
+response by field name that the API sends by alias.
+
+**Fixed: `describe_model` rendered fields from the wrong payload.** In
+multi-model mode it called `GET /v1/sessions/{sid}/models/{mid}`, which returns
+the `ModelDescription` *summary* dataclass — its `MeasureInfo` carries only
+name, type, aggregation, expression and synonyms, with no `dataType`, no
+`defaultValue`, no `columns` and no `total`, and the description itself has no
+`filters`, `extends` or `inherits`. It now calls that model's `/schema`, which
+returns the same `SchemaResponse` the single-model shortcut already used, so
+both modes describe a model from one shape and the renderers need no per-mode
+branch.
+
+**Fixed: the SETTINGS block never rendered, in either mode.** It was read from
+the describe payload, but no schema response carries a `settings` field —
+neither `ModelDescription` nor `SchemaResponse`. `/v1/settings` is the only
+route that reports it, so `_fetch_effective_settings` now fetches it there and
+`describe_model` merges it. The fetch is scoped with `session_id` + `model_id`,
+which is what pins the block to one model: a session holding several omits it
+rather than guessing. `load_model` scopes its fetch the same way, since the
+dialect and timezone resolution chains also start at the model's own settings.
+
+**Fixed: `dataType` and `timeDimension` never rendered.** Same root cause, and
+it predates this cycle: FastAPI serialises a response model **by alias**, so
+`MeasureDetail.data_type` arrives as `dataType` while its unaliased sibling
+`result_type` stays snake_case. The mixed casing is per-field rather than
+per-payload, so it cannot be normalised wholesale — the new `_aliased()` helper
+reads the alias with a snake_case fallback, the idiom already used ad-hoc for
+`windowFunction`, `orderDirection` and `filterContext`. `defaultValue` was
+already dual-spelled and now routes through the same helper.
+
+**Fixed: stdio startup logged 15/19 registered tools.** `get_function_catalog`
+registers mode-independently, so the real counts are 16 single-model and 20
+multi-model, matching the README.
 
 **Added: `get_function_catalog`.** Wraps `GET /v1/reference/functions`, the
 API's portable scalar-function catalog. An LLM composing an OBML expression
