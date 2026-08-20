@@ -47,9 +47,11 @@ multi-model, matching the README.
 **Added: `get_function_catalog`.** Wraps `GET /v1/reference/functions`, the
 API's portable scalar-function catalog. An LLM composing an OBML expression
 previously had to guess which function names survive compilation, and found out
-at the warehouse. The tool answers that up front: entries grouped by `group`
-(string / numeric / conditional), one line each carrying the signature, result
-type, arity and summary, then the `semantics` sentence and the worked examples.
+at the warehouse. The tool answers that up front: 39 entries grouped by `group`
+(numeric, conditional, string, datetime, json — emitted in the API's own order,
+so a group added later needs no MCP change), one line each carrying the
+signature, result type, arity and summary, then the `semantics` sentence and the
+worked examples.
 The semantics line is the point — it pins the rule that actually differs
 between engines (`concat` propagates NULL, `length` counts characters,
 `round` breaks ties away from zero, `greatest`/`least` propagate NULL), so the
