@@ -44,6 +44,10 @@ already dual-spelled and now routes through the same helper.
 registers mode-independently, so the real counts are 16 single-model and 20
 multi-model, matching the README.
 
+**Dependencies.** Pinned resolutions moved fastmcp 3.4.6 → 3.4.7 (a CIMD
+`private_key_jwt` audience fix), pydantic-settings 2.14.2 → 2.15.0, and the ruff
+dev pin 0.16.1 → 0.16.3. All declared ranges are unchanged.
+
 **Added: `get_function_catalog`.** Wraps `GET /v1/reference/functions`, the
 API's portable scalar-function catalog. An LLM composing an OBML expression
 previously had to guess which function names survive compilation, and found out
