@@ -402,6 +402,9 @@ def test_describe_model_with_data_types_and_settings(mock_api: respx.MockRouter)
             "default_numeric_data_type": "decimal(18, 2)",
             "default_timezone": "Europe/Zagreb",
             "default_locale": "de-DE",
+            "query_timezone": "UTC",
+            "week_start": "sunday",
+            "expression_mode": "portable",
             "override_database_timezone": True,
         },
     }
@@ -416,6 +419,11 @@ def test_describe_model_with_data_types_and_settings(mock_api: respx.MockRouter)
     assert "defaultNumericDataType: decimal(18, 2)" in result
     assert "defaultTimezone: Europe/Zagreb" in result
     assert "defaultLocale: de-DE" in result
+    assert "queryTimezone: UTC" in result
+    # Both carry server-side defaults, so the API reports them whether or not
+    # the model wrote them, and both change results — see the SETTINGS block.
+    assert "weekStart: sunday" in result
+    assert "expressionMode: portable" in result
     assert "overrideDatabaseTimezone: true" in result
 
 
@@ -649,7 +657,8 @@ def test_list_dialects(mock_api: respx.MockRouter):
                             "union_all_by_name": False,
                             "window_functions": True,
                         },
-                        "unsupported_aggregations": [],
+                        "supported_aggregations": ["median", "sum"],
+                        "supported_functions": ["concat", "split_part"],
                     },
                     {
                         "name": "snowflake",
@@ -657,7 +666,8 @@ def test_list_dialects(mock_api: respx.MockRouter):
                             "union_all_by_name": True,
                             "window_functions": True,
                         },
-                        "unsupported_aggregations": [],
+                        "supported_aggregations": ["median", "sum"],
+                        "supported_functions": ["concat", "split_part"],
                     },
                     {
                         "name": "mysql",
@@ -665,8 +675,8 @@ def test_list_dialects(mock_api: respx.MockRouter):
                             "union_all_by_name": False,
                             "window_functions": True,
                         },
-                        "unsupported_aggregations": ["median"],
-                        "unsupported_functions": ["split_part"],
+                        "supported_aggregations": ["sum"],
+                        "supported_functions": ["concat"],
                     },
                 ]
             },
@@ -678,10 +688,17 @@ def test_list_dialects(mock_api: respx.MockRouter):
     assert "snowflake" in result
     assert "mysql" in result
     assert "union_all_by_name" in result
-    assert "unsupported aggregations: median" in result
-    # Catalog functions the dialect cannot render — the companion to
+    # The API states both vocabularies positively (it inverts each dialect's
+    # internal "unsupported" declaration before responding), so what a dialect
+    # cannot do shows up as an absence from its line.
+    assert "supported aggregations: median, sum" in result
+    # Catalog functions the dialect can render — the companion to
     # get_function_catalog(), which lists what the entries mean.
-    assert "unsupported functions: split_part" in result
+    assert "supported functions: concat, split_part" in result
+    mysql_line = next(ln for ln in result.splitlines() if ln.strip().startswith("mysql:"))
+    mysql_block = result.split(mysql_line, 1)[1]
+    assert "supported aggregations: sum" in mysql_block
+    assert "median" not in mysql_block
 
 
 def test_get_json_schema(mock_api: respx.MockRouter):

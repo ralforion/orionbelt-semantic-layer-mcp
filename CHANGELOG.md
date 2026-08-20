@@ -25,13 +25,24 @@ for the process, like the OBML reference. It is a **design-only** tool
 (bucket 2) — authoring reference, hidden once a model is loaded. Tool counts
 become 16 single-model / 20 multi-model / 21 distinct.
 
-**`list_dialects` surfaces `unsupported_functions`.** `GET /v1/dialects` gained
-the field alongside `unsupported_aggregations` — the catalog entries a given
-dialect cannot render. The MCP enumerates dialect fields explicitly rather than
-dumping the payload, so it would have silently dropped it. It is the catalog's
-companion: `get_function_catalog` says what an entry means, `list_dialects` says
-where it does not run. No dialect declares an entry yet, so today it renders
-nothing.
+**Fixed: `list_dialects` read two fields the API does not send.** The same API
+change that added the function catalog inverted `GET /v1/dialects`. A dialect
+still declares internally what it *cannot* do — so an aggregation or catalog
+entry added later needs no edit in the seven dialects that handle it — but the
+response now publishes the complement: `supported_aggregations` and
+`supported_functions`, each sorted, replacing `unsupported_aggregations`. That
+is the question a client is actually asking, and answering it positively saves
+every caller a second call to fetch the full vocabulary and subtract.
+
+The MCP enumerates dialect fields explicitly rather than dumping the payload, so
+it did not error on the rename — it silently printed capability flags and
+nothing else. Both vocabularies are now rendered, one per indented line rather
+than appended inline, because the positive form lists most of each vocabulary
+and is far too long to read at the end of the capability line. A name absent
+from a dialect's line is a name that dialect cannot compute. This is the
+catalog's companion: `get_function_catalog` says what an entry means,
+`list_dialects` says where it runs. The `debug_validation` prompt's two
+references to the old field names were corrected with it.
 
 **A measure's `defaultValue` is described.** `MeasureDetail` gained the field:
 the value reported when the aggregate has nothing to add up, which a filtered
@@ -49,11 +60,29 @@ annotated `[secondary]` and `path=`, but not the flag that decides whether an
 unmatched row survives — now rendered as `[required: INNER]`. The default
 LEFT join stays unannotated.
 
-**Three new error codes in the `debug_validation` prompt.**
+**A model's query timezone, week start and expression mode are described.**
+`ModelSettingsInfo` gained `queryTimezone`, `weekStart` and `expressionMode`,
+and `describe_model` enumerates settings explicitly, so all three were dropped.
+The last two carry server-side defaults (`monday`, `permissive`) and the API
+reports them whether or not the model wrote them — a client asking which
+calendar or expression mode applies wants the answer, and an absent key cannot
+distinguish "unset" from "unsupported by this server". Both change results:
+`weekStart` moves every weekly bucket, and `expressionMode` decides whether a
+function outside the portable catalog is a `NON_PORTABLE_FUNCTION` warning or a
+hard error — which is exactly the escape hatch `get_function_catalog` describes,
+so a model set to `portable` is something the agent has to know before composing
+an expression.
+
+**Four new error codes in the `debug_validation` prompt.**
 `WRONG_FUNCTION_ARITY` (model validation — a catalog function called with the
-wrong argument count; only catalog names are checked), `UNSUPPORTED_FUNCTION`
-and `AMBIGUOUS_TABLE_REFERENCE` (both dialect-capability 422s at query time,
-raised by the compile and execute paths and returned per-query by `run_batch`).
+wrong argument count; only catalog names are checked), plus
+`UNSUPPORTED_FUNCTION`, `AMBIGUOUS_TABLE_REFERENCE` and
+`UNSUPPORTED_NESTED_ACCESS` (dialect-capability 422s at query time, raised by
+the compile and execute paths and returned per-query by `run_batch`). The last
+covers a nested data object — one declared with `nestedIn`, whose rows are a
+parent's array column — read on a dialect with no FROM-clause unnest; the `code`
+table fallback is not equivalent, and says so with a `NESTED_SOURCE_FALLBACK`
+warning.
 
 The endpoint only exists on API builds carrying the function catalog. A 404 is
 translated into a message saying the connected API predates it, rather than

@@ -885,7 +885,14 @@ def get_json_schema(name: Literal["obml", "query"]) -> str:
 
 @mcp.tool
 def list_dialects() -> str:
-    """List available SQL dialects and their capabilities."""
+    """List available SQL dialects, their capabilities, and what each can compute.
+
+    ``supported_aggregations`` is every OBML ``aggregation:`` value the dialect
+    can render; ``supported_functions`` is every portable-catalog scalar
+    function it can render (see ``get_function_catalog()`` for what each entry
+    means). Both are stated positively by the API, so a name absent from a
+    dialect's list is a name that dialect cannot compute.
+    """
     resp = _api_request("GET", f"{_API_V1}/dialects", retry_on_expired=False)
     data = _parse_json(resp)
     lines = ["Available dialects:", ""]
@@ -893,16 +900,16 @@ def list_dialects() -> str:
         caps = d.get("capabilities", {})
         enabled = [k for k, v in caps.items() if v]
         cap_str = ", ".join(enabled) if enabled else "(none)"
-        unsupported = d.get("unsupported_aggregations", [])
-        unsupported_fns = d.get("unsupported_functions", [])
-        line = f"  {d['name']}: {cap_str}"
-        if unsupported:
-            line += f"  (unsupported aggregations: {', '.join(unsupported)})"
-        if unsupported_fns:
-            # Portable-catalog scalar functions this dialect cannot render —
-            # the companion to get_function_catalog(), which lists the entries.
-            line += f"  (unsupported functions: {', '.join(unsupported_fns)})"
-        lines.append(line)
+        lines.append(f"  {d['name']}: {cap_str}")
+        # Rendered on their own indented lines rather than appended inline: the
+        # positive form lists most of each vocabulary, which is far too long to
+        # read at the end of the capability line.
+        aggs = d.get("supported_aggregations") or []
+        if aggs:
+            lines.append(f"      supported aggregations: {', '.join(aggs)}")
+        fns = d.get("supported_functions") or []
+        if fns:
+            lines.append(f"      supported functions: {', '.join(fns)}")
     return "\n".join(lines)
 
 
@@ -1193,6 +1200,18 @@ def _impl_describe_model(model_id: str | None = None) -> str:
             lines.append(f"  defaultTimezone: {model_settings['default_timezone']}")
         if model_settings.get("default_locale"):
             lines.append(f"  defaultLocale: {model_settings['default_locale']}")
+        if model_settings.get("query_timezone"):
+            lines.append(f"  queryTimezone: {model_settings['query_timezone']}")
+        # weekStart and expressionMode carry server-side defaults ('monday',
+        # 'permissive'), so the API reports them whether or not the model wrote
+        # them — the answer is what applies, not what was stated. Both change
+        # results: weekStart moves every weekly bucket, and expressionMode
+        # decides whether a function outside the portable catalog is a warning
+        # or a hard error (see get_function_catalog()).
+        if model_settings.get("week_start"):
+            lines.append(f"  weekStart: {model_settings['week_start']}")
+        if model_settings.get("expression_mode"):
+            lines.append(f"  expressionMode: {model_settings['expression_mode']}")
         if model_settings.get("override_database_timezone"):
             lines.append("  overrideDatabaseTimezone: true")
         lines.append("")
@@ -2798,7 +2817,7 @@ references unknown column.
   ToolError with `aggregation=…, dialect=…` context).
   Fix: Change `dialect`, or rewrite the measure to use a supported
   aggregation. See `list_dialects()` for each dialect's
-  `unsupported_aggregations`.
+  `supported_aggregations`.
 - `UNSUPPORTED_GROUPING`: The selected dialect does not support the
   requested `WITH ROLLUP` / `WITH CUBE` (e.g. MySQL has no CUBE). The
   execute path returns HTTP 422.
@@ -2808,11 +2827,18 @@ references unknown column.
   scalar function an expression calls (HTTP 422, with `function=…, dialect=…`).
   The catalog's counterpart to `UNSUPPORTED_AGGREGATION`.
   Fix: Change `dialect`, or rewrite the expression. See `list_dialects()` for
-  each dialect's `unsupported_functions`.
+  each dialect's `supported_functions`.
 - `AMBIGUOUS_TABLE_REFERENCE`: The selected dialect cannot disambiguate a table
   reference in the compiled SQL (HTTP 422, with `database=…, dialect=…`).
   Fix: Qualify the data object's `database`/`schema` in the model, or compile
   against a dialect that resolves the reference.
+- `UNSUPPORTED_NESTED_ACCESS`: The query reads a nested data object (one
+  declared with `nestedIn`, whose rows are a parent's array column) and the
+  selected dialect has no FROM-clause unnest to expand it (HTTP 422, with
+  `dataObject=…, dialect=…`).
+  Fix: Change `dialect`, or give the nested object a `code` table to be read
+  from instead — note that the fallback emits a `NESTED_SOURCE_FALLBACK`
+  warning, because the table and the array are not guaranteed to agree.
 
 ## Debugging Steps
 
