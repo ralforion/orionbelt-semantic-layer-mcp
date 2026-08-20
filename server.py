@@ -250,6 +250,7 @@ _ALWAYS_TOOLS: frozenset[str] = frozenset(
 _DESIGN_TOOLS: frozenset[str] = frozenset(
     {
         "get_obml_reference",
+        "get_function_catalog",
         "list_dialects",
     }
 )
@@ -706,6 +707,7 @@ def _shortcut_request(
 _obml_reference_cache: str | None = None
 _obsql_reference_cache: str | None = None
 _dialect_names_cache: list[str] | None = None
+_function_catalog_cache: dict[str, Any] | None = None
 
 
 def _fetch_obml_reference() -> str:
@@ -744,6 +746,46 @@ def _fetch_dialect_names() -> list[str]:
     return _dialect_names_cache
 
 
+def _fetch_function_catalog() -> dict[str, Any]:
+    """Fetch and cache the portable scalar-function catalog from the API.
+
+    The catalog is static for a given API version, so a single fetch per process
+    is enough. ``GET /v1/reference/functions`` only exists on API builds carrying
+    the function catalog, so a 404 is translated into a legible message instead
+    of a bare HTTP error — an older deployment simply predates the endpoint.
+    """
+    global _function_catalog_cache
+    if _function_catalog_cache is None:
+        with _state_lock:
+            if _function_catalog_cache is None:  # double-check under lock
+                resp = _do_request(_get_client(), "GET", f"{_API_V1}/reference/functions", None)
+                if resp.status_code == 404:
+                    raise ToolError(
+                        "The connected OrionBelt Semantic Layer API predates the portable "
+                        "function catalog — GET /v1/reference/functions is not available on "
+                        "this deployment. Upgrade the API to a build that publishes the "
+                        "catalog, or consult get_obml_reference() for expression syntax."
+                    )
+                if resp.status_code >= 400:
+                    _raise_api_error(resp)
+                _function_catalog_cache = _parse_json(resp)
+    return _function_catalog_cache
+
+
+def _format_arity(fn: dict[str, Any]) -> str:
+    """Render an entry's arity. ``max_args`` is null for variadic entries."""
+    min_args = fn.get("min_args")
+    max_args = fn.get("max_args")
+    if min_args is None:
+        return ""
+    unit = "arg" if min_args == 1 else "args"
+    if max_args is None:
+        return f"[{min_args}+ args]"
+    if max_args == min_args:
+        return f"[{min_args} {unit}]"
+    return f"[{min_args}-{max_args} args]"
+
+
 @mcp.resource("obml://reference")
 def obml_reference() -> str:
     """Full OBML format reference — data objects, dimensions, measures, metrics, joins."""
@@ -774,6 +816,59 @@ def get_obml_reference() -> str:
 
 
 @mcp.tool
+def get_function_catalog() -> str:
+    """Get the portable scalar-function catalog for OBML expressions.
+
+    A call whose name is **in** the catalog is rendered per dialect with pinned
+    semantics, so it means the same thing on every warehouse: ``concat``
+    propagates NULL (any NULL argument makes the whole result NULL), ``length``
+    counts characters rather than bytes, ``round`` breaks ties away from zero,
+    and ``greatest``/``least`` propagate NULL. Do not assume your own
+    warehouse's rule — read the ``semantics`` line, which is the part that
+    differs between engines.
+
+    A call **outside** the catalog is emitted verbatim into the generated SQL.
+    That still works, but it pins the model to the engines that happen to have
+    that function, so prefer a catalog entry when one covers the need.
+
+    Calling a catalog function with the wrong number of arguments is a model
+    validation error (``WRONG_FUNCTION_ARITY``), caught at load time rather
+    than at the warehouse.
+    """
+    data = _fetch_function_catalog()
+    lines = ["Portable scalar functions:", ""]
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for fn in data.get("functions", []):
+        groups.setdefault(fn.get("group") or "other", []).append(fn)
+    for group, fns in groups.items():
+        lines.append(f"{group}:")
+        for fn in fns:
+            signature = fn.get("signature") or fn.get("name", "?")
+            head = f"  {signature}"
+            result_type = fn.get("result_type")
+            if result_type:
+                head += f" -> {result_type}"
+            arity = _format_arity(fn)
+            if arity:
+                head += f"  {arity}"
+            summary = fn.get("summary")
+            if summary:
+                head += f" — {summary}"
+            lines.append(head)
+            semantics = fn.get("semantics")
+            if semantics:
+                lines.append(f"      semantics: {semantics}")
+            examples = fn.get("examples") or []
+            for ex in examples:
+                lines.append(f"      e.g. {ex.get('call')} = {json.dumps(ex.get('expect'))}")
+        lines.append("")
+    escape_hatch = data.get("escape_hatch")
+    if escape_hatch:
+        lines.append(f"Escape hatch: {escape_hatch}")
+    return "\n".join(lines).rstrip()
+
+
+@mcp.tool
 def get_json_schema(name: Literal["obml", "query"]) -> str:
     """Get a published JSON Schema by name.
 
@@ -790,7 +885,14 @@ def get_json_schema(name: Literal["obml", "query"]) -> str:
 
 @mcp.tool
 def list_dialects() -> str:
-    """List available SQL dialects and their capabilities."""
+    """List available SQL dialects, their capabilities, and what each can compute.
+
+    ``supported_aggregations`` is every OBML ``aggregation:`` value the dialect
+    can render; ``supported_functions`` is every portable-catalog scalar
+    function it can render (see ``get_function_catalog()`` for what each entry
+    means). Both are stated positively by the API, so a name absent from a
+    dialect's list is a name that dialect cannot compute.
+    """
     resp = _api_request("GET", f"{_API_V1}/dialects", retry_on_expired=False)
     data = _parse_json(resp)
     lines = ["Available dialects:", ""]
@@ -798,17 +900,54 @@ def list_dialects() -> str:
         caps = d.get("capabilities", {})
         enabled = [k for k, v in caps.items() if v]
         cap_str = ", ".join(enabled) if enabled else "(none)"
-        unsupported = d.get("unsupported_aggregations", [])
-        line = f"  {d['name']}: {cap_str}"
-        if unsupported:
-            line += f"  (unsupported aggregations: {', '.join(unsupported)})"
-        lines.append(line)
+        lines.append(f"  {d['name']}: {cap_str}")
+        # Rendered on their own indented lines rather than appended inline: the
+        # positive form lists most of each vocabulary, which is far too long to
+        # read at the end of the capability line.
+        aggs = d.get("supported_aggregations") or []
+        if aggs:
+            lines.append(f"      supported aggregations: {', '.join(aggs)}")
+        fns = d.get("supported_functions") or []
+        if fns:
+            lines.append(f"      supported functions: {', '.join(fns)}")
     return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
 # Implementation functions (shared logic for both modes)
 # ---------------------------------------------------------------------------
+
+
+def _aliased(rec: dict[str, Any], alias: str, snake: str) -> Any:
+    """Read one field, tolerating either spelling.
+
+    FastAPI serialises a response model **by alias**, so a Pydantic field
+    declared ``data_type: ... = Field(alias="dataType")`` reaches us as
+    ``dataType``, while an unaliased sibling like ``result_type`` stays
+    snake_case. Only some fields are aliased, so the mixed casing is per-field
+    rather than per-payload and cannot be normalised wholesale. Reading the
+    alias first with a snake_case fallback also keeps the renderers working
+    against a payload dumped by field name (``model_dump()`` without
+    ``by_alias``), which is how several tests and the OBML round-trip spell it.
+    """
+    val = rec.get(alias)
+    return rec.get(snake) if val is None else val
+
+
+def _default_value_tag(rec: dict) -> str:
+    """Render a measure's ``defaultValue`` when set, else an empty string.
+
+    The value reported when the aggregate has nothing to add up; unset means the
+    SQL-standard NULL. It changes the answer a filtered measure gives, so it
+    belongs in any description of the measure. ``0`` and ``False`` are
+    meaningful values here, hence the check against ``None`` rather than
+    falsiness, and the value is JSON-rendered so ``0`` and ``"0"`` stay
+    distinguishable.
+    """
+    val = _aliased(rec, "defaultValue", "default_value")
+    if val is None:
+        return ""
+    return f"  defaultValue: {json.dumps(val)}"
 
 
 def _format_warning(w: Any) -> str:
@@ -861,8 +1000,9 @@ def _format_metric_summary(met: dict) -> str:
     partition_by = met.get("partition_by") or met.get("partitionBy") or []
     if met_type == "cumulative":
         parts = [f"type: cumulative, measure: {met.get('measure', '?')}"]
-        if met.get("time_dimension"):
-            parts.append(f"timeDimension: {met['time_dimension']}")
+        time_dim = _aliased(met, "timeDimension", "time_dimension")
+        if time_dim:
+            parts.append(f"timeDimension: {time_dim}")
         if met.get("cumulative_type") and met["cumulative_type"] != "sum":
             parts.append(f"cumulativeType: {met['cumulative_type']}")
         if met.get("window"):
@@ -889,8 +1029,9 @@ def _format_metric_summary(met: dict) -> str:
         parts = [f"type: window, windowFunction: {fn}"]
         if met.get("measure"):
             parts.append(f"measure: {met['measure']}")
-        if met.get("time_dimension"):
-            parts.append(f"timeDimension: {met['time_dimension']}")
+        time_dim = _aliased(met, "timeDimension", "time_dimension")
+        if time_dim:
+            parts.append(f"timeDimension: {time_dim}")
         if partition_by:
             parts.append(f"partitionBy: [{', '.join(partition_by)}]")
         order_dir = met.get("order_direction") or met.get("orderDirection")
@@ -909,14 +1050,21 @@ def _format_metric_summary(met: dict) -> str:
     return f"expr: {met.get('expression', '?')}"
 
 
-def _fetch_effective_settings() -> dict[str, str]:
-    """Best-effort fetch of the server-resolved dialect/timezone.
+def _fetch_effective_settings(model_id: str | None = None) -> dict[str, Any]:
+    """Best-effort fetch of the server-resolved dialect/timezone and the
+    model's ``settings:`` block.
 
-    These are the three agent-relevant fields the removed ``get_settings`` tool
-    used to surface (``dialect.effective``, ``timezone.effective``; the model's
-    ``defaultNumericDataType`` is already shown in the model SETTINGS block).
-    Folding them into ``describe_model`` / ``load_model`` keeps the information
-    available as *data* without a standalone settings verb.
+    ``dialect.effective`` / ``timezone.effective`` are the agent-relevant fields
+    the removed ``get_settings`` tool used to surface; folding them into
+    ``describe_model`` / ``load_model`` keeps them available as *data* without a
+    standalone settings verb.
+
+    ``model_settings`` comes along because **no schema response carries it**.
+    Neither ``ModelDescription`` (the session ``/models/{id}`` summary) nor
+    ``SchemaResponse`` (``/schema``, both modes) has a ``settings`` field, so
+    ``/v1/settings`` is the only route that reports it — scoped by
+    ``session_id`` + ``model_id``, which is what pins it to one model when a
+    session holds several.
 
     Returns a small dict (possibly empty). Enrichment only — any error is
     swallowed so it can never break the calling tool.
@@ -925,6 +1073,11 @@ def _fetch_effective_settings() -> dict[str, str]:
         params: dict[str, str] = {}
         if not _single_model_mode and _api_session_id is not None:
             params["session_id"] = _api_session_id
+            # model_id is rejected without a session_id, and the block is
+            # omitted rather than guessed when a session holds more than one
+            # model — so scoping it is what makes the settings block appear.
+            if model_id:
+                params["model_id"] = model_id
         resp = _api_request(
             "GET",
             f"{_API_V1}/settings",
@@ -934,13 +1087,16 @@ def _fetch_effective_settings() -> dict[str, str]:
         data = _parse_json(resp)
     except Exception:  # noqa: BLE001 — enrichment must never break the caller
         return {}
-    out: dict[str, str] = {}
+    out: dict[str, Any] = {}
     dialect = data.get("dialect") or {}
     if dialect.get("effective"):
         out["dialect"] = dialect["effective"]
     tz = data.get("timezone") or {}
     if tz.get("effective"):
         out["timezone"] = tz["effective"]
+    model_settings = data.get("model_settings")
+    if isinstance(model_settings, dict):
+        out["model_settings"] = model_settings
     return out
 
 
@@ -952,9 +1108,16 @@ def _impl_describe_model(model_id: str | None = None) -> str:
         desc = _parse_json(resp)
         mid = desc.get("model_id", "default")
     else:
-        resp = _session_request("GET", f"/models/{model_id}")
+        # /schema, not the bare /models/{id}. The latter returns the
+        # ``ModelDescription`` *summary* dataclass, whose MeasureInfo carries
+        # only name/type/aggregation/expression/synonyms — no dataType, no
+        # defaultValue, no columns, no total — and which has no filters,
+        # extends or inherits either. /schema returns the same SchemaResponse
+        # the single-model shortcut does, so both modes describe a model from
+        # one shape and the renderers below need no per-mode branch.
+        resp = _session_request("GET", f"/models/{model_id}/schema")
         desc = _parse_json(resp)
-        mid = model_id
+        mid = desc.get("model_id", model_id)
 
     lines: list[str] = [f"Model {mid}:", ""]
 
@@ -1009,8 +1172,10 @@ def _impl_describe_model(model_id: str | None = None) -> str:
         m_name = m.get("name", "?")
         m_type = m.get("result_type", "?")
         m_agg = m.get("aggregation", "?")
-        dtype = f"  dataType: {m['data_type']}" if m.get("data_type") else ""
-        lines.append(f"  {m_name}  ({m_type}, {m_agg}{expr}{dtype})")
+        m_dtype = _aliased(m, "dataType", "data_type")
+        dtype = f"  dataType: {m_dtype}" if m_dtype else ""
+        default_val = _default_value_tag(m)
+        lines.append(f"  {m_name}  ({m_type}, {m_agg}{expr}{dtype}{default_val})")
         # Two-column statistical aggregates (corr, covar_*, regr_*) — column
         # order is significant in the compiled SQL, so surface it explicitly.
         cols = m.get("columns") or []
@@ -1054,35 +1219,48 @@ def _impl_describe_model(model_id: str | None = None) -> str:
         lines.append("METRICS:")
         for met in metrics:
             lines.append(f"  {met.get('name', '?')}  {_format_metric_summary(met)}")
-            if met.get("data_type"):
-                lines.append(f"    dataType: {met['data_type']}")
+            met_dtype = _aliased(met, "dataType", "data_type")
+            if met_dtype:
+                lines.append(f"    dataType: {met_dtype}")
             if met.get("description"):
                 lines.append(f"    description: {met['description']}")
             if met.get("synonyms"):
                 lines.append(f"    synonyms: {', '.join(met['synonyms'])}")
         lines.append("")
 
-    # Model settings
-    model_settings = desc.get("settings")
+    # Model settings + server-resolved dialect/timezone, both from
+    # /v1/settings — no schema response carries a `settings` block, in either
+    # mode. Enrichment: omitted entirely on error, never fatal.
+    effective = _fetch_effective_settings(model_id)
+    model_settings = effective.get("model_settings") or {}
     if model_settings:
         lines.append("SETTINGS:")
-        if model_settings.get("default_dialect"):
-            lines.append(f"  defaultDialect: {model_settings['default_dialect']}")
-        if model_settings.get("default_numeric_data_type"):
-            lines.append(f"  defaultNumericDataType: {model_settings['default_numeric_data_type']}")
-        if model_settings.get("default_timezone"):
-            lines.append(f"  defaultTimezone: {model_settings['default_timezone']}")
-        if model_settings.get("default_locale"):
-            lines.append(f"  defaultLocale: {model_settings['default_locale']}")
-        if model_settings.get("override_database_timezone"):
+        for label, alias, snake in (
+            ("defaultDialect", "defaultDialect", "default_dialect"),
+            ("defaultNumericDataType", "defaultNumericDataType", "default_numeric_data_type"),
+            ("defaultTimezone", "defaultTimezone", "default_timezone"),
+            ("defaultLocale", "defaultLocale", "default_locale"),
+            ("queryTimezone", "queryTimezone", "query_timezone"),
+            # weekStart and expressionMode carry server-side defaults
+            # ('monday', 'permissive'), so the API reports them whether or not
+            # the model wrote them — the answer is what applies, not what was
+            # stated. Both change results: weekStart moves every weekly bucket,
+            # and expressionMode decides whether a function outside the
+            # portable catalog is a warning or a hard error (see
+            # get_function_catalog()).
+            ("weekStart", "weekStart", "week_start"),
+            ("expressionMode", "expressionMode", "expression_mode"),
+        ):
+            val = _aliased(model_settings, alias, snake)
+            if val:
+                lines.append(f"  {label}: {val}")
+        if _aliased(model_settings, "overrideDatabaseTimezone", "override_database_timezone"):
             lines.append("  overrideDatabaseTimezone: true")
         lines.append("")
 
-    # Server-resolved effective dialect/timezone (the model SETTINGS block above
-    # shows what the model *requested*; this shows what the server *resolved*
-    # after factoring in env / host / database). Enrichment — omitted on error.
-    effective = _fetch_effective_settings()
-    if effective:
+    # What the server *resolved* after factoring in env / host / database — the
+    # SETTINGS block above is what the model *requested*.
+    if effective.get("dialect") or effective.get("timezone"):
         lines.append("EFFECTIVE (server-resolved):")
         if effective.get("dialect"):
             lines.append(f"  dialect:  {effective['dialect']}")
@@ -1217,11 +1395,15 @@ def _render_measure_lines(measures: list[dict]) -> list[str]:
         m_name = m.get("name", "?")
         m_type = m.get("result_type", "?")
         m_agg = m.get("aggregation", "?")
-        dtype = f"  dataType: {m['data_type']}" if m.get("data_type") else ""
+        m_dtype = _aliased(m, "dataType", "data_type")
+        dtype = f"  dataType: {m_dtype}" if m_dtype else ""
         total = "  total" if m.get("total") else ""
         grain_tag = "  grain" if m.get("grain") else ""
         fc_tag = "  filterContext" if m.get("filter_context") or m.get("filterContext") else ""
-        lines.append(f"  {m_name}  ({m_type}, {m_agg}{expr}{dtype}{total}{grain_tag}{fc_tag})")
+        default_val = _default_value_tag(m)
+        lines.append(
+            f"  {m_name}  ({m_type}, {m_agg}{expr}{dtype}{default_val}{total}{grain_tag}{fc_tag})"
+        )
         cols = m.get("columns") or []
         if len(cols) > 1 and not m.get("expression"):
             col_refs = [
@@ -1244,8 +1426,9 @@ def _render_metric_lines(metrics: list[dict]) -> list[str]:
     for met in metrics:
         components = ", ".join(met.get("component_measures", []))
         lines.append(f"  {met['name']}  {_format_metric_summary(met)}")
-        if met.get("data_type"):
-            lines.append(f"    dataType: {met['data_type']}")
+        met_dtype = _aliased(met, "dataType", "data_type")
+        if met_dtype:
+            lines.append(f"    dataType: {met_dtype}")
         if met.get("description"):
             lines.append(f"    description: {met['description']}")
         if components:
@@ -1406,10 +1589,14 @@ def _impl_get_join_graph(model_id: str | None) -> str:
                 else ""
             )
             secondary = " [secondary]" if e.get("secondary") else ""
+            # A required join compiles to INNER rather than the default LEFT, so
+            # an unmatched row disappears from every query crossing this edge —
+            # not something to leave implicit in a join graph.
+            required = " [required: INNER]" if e.get("required") else ""
             path = f" path={e['path_name']}" if e.get("path_name") else ""
             lines.append(
                 f"  {e['from_object']} --[{e['cardinality']}]--> "
-                f"{e['to_object']}{cols}{secondary}{path}"
+                f"{e['to_object']}{cols}{secondary}{required}{path}"
             )
     else:
         lines.append("No joins defined.")
@@ -1573,8 +1760,11 @@ def _render_load_result(data: dict, extra_lines: list[str] | None = None) -> str
             parts.append(f"    fan-trap risk on [{tables}]: {risk.get('reason', '')}")
     parts.extend(_format_warnings(data.get("warnings")))
 
-    # Surface server-resolved dialect/timezone as data (see _fetch_effective_settings).
-    effective = _fetch_effective_settings()
+    # Surface server-resolved dialect/timezone as data (see
+    # _fetch_effective_settings). Scoped to the model just loaded: the dialect
+    # and timezone resolution chains start at that model's own settings, and a
+    # session holding more than one model resolves neither without the scope.
+    effective = _fetch_effective_settings(data.get("model_id"))
     if effective.get("dialect"):
         parts.append(f"  effective dialect:  {effective['dialect']}")
     if effective.get("timezone"):
@@ -2539,6 +2729,12 @@ _DEBUG_VALIDATION_TEXT = """\
   Fix: Each static filter needs `dataObject`, `column`, and `operator`.
   Use `value` for single-value operators, `values` for list operators (inlist, between).
   Dates must be ISO 8601 strings (e.g. '2026-01-01').
+- `WRONG_FUNCTION_ARITY`: An expression calls a portable-catalog scalar function
+  with the wrong number of arguments (e.g. `substring({Zip}, 1, 5, 9)`). Only
+  catalog names are arity-checked — a vendor function's arity is not OBSL's to
+  know, so it is passed through unchecked.
+  Fix: Match the canonical signature named in the error. See
+  `get_function_catalog()` for every entry's arity and semantics.
 
 ## Reference Errors
 
@@ -2666,12 +2862,28 @@ references unknown column.
   ToolError with `aggregation=…, dialect=…` context).
   Fix: Change `dialect`, or rewrite the measure to use a supported
   aggregation. See `list_dialects()` for each dialect's
-  `unsupported_aggregations`.
+  `supported_aggregations`.
 - `UNSUPPORTED_GROUPING`: The selected dialect does not support the
   requested `WITH ROLLUP` / `WITH CUBE` (e.g. MySQL has no CUBE). The
   execute path returns HTTP 422.
   Fix: Change `dialect`, drop the modifier, or rewrite the query
   (e.g. UNION of explicit grain combinations).
+- `UNSUPPORTED_FUNCTION`: The selected dialect cannot render a portable-catalog
+  scalar function an expression calls (HTTP 422, with `function=…, dialect=…`).
+  The catalog's counterpart to `UNSUPPORTED_AGGREGATION`.
+  Fix: Change `dialect`, or rewrite the expression. See `list_dialects()` for
+  each dialect's `supported_functions`.
+- `AMBIGUOUS_TABLE_REFERENCE`: The selected dialect cannot disambiguate a table
+  reference in the compiled SQL (HTTP 422, with `database=…, dialect=…`).
+  Fix: Qualify the data object's `database`/`schema` in the model, or compile
+  against a dialect that resolves the reference.
+- `UNSUPPORTED_NESTED_ACCESS`: The query reads a nested data object (one
+  declared with `nestedIn`, whose rows are a parent's array column) and the
+  selected dialect has no FROM-clause unnest to expand it (HTTP 422, with
+  `dataObject=…, dialect=…`).
+  Fix: Change `dialect`, or give the nested object a `code` table to be read
+  from instead — note that the fallback emits a `NESTED_SOURCE_FALLBACK`
+  warning, because the table and the array are not guaranteed to agree.
 
 ## Debugging Steps
 
@@ -2842,12 +3054,12 @@ def main() -> None:
             # list time by capability, so this counts everything registered. The
             # *visible* surface is smaller when query_execute is off (−1) or in
             # the design phase (run-only verbs hidden); single-model mode is
-            # always run-time. 14 shared tools + get_model.
-            tool_count = 15
+            # always run-time. 15 shared tools + get_model.
+            tool_count = 16
         else:
-            # 14 shared tools + 5 multi-model lifecycle tools (load_model,
+            # 15 shared tools + 5 multi-model lifecycle tools (load_model,
             # remove_model, list_models, run_batch, export_model_to_osi).
-            tool_count = 19
+            tool_count = 20
         mode_label = "single-model" if _single_model_mode else "multi-model"
         stateless = False
     else:

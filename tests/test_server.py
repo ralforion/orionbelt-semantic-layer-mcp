@@ -27,6 +27,7 @@ def _reset_state():
     server._http_client = None
     server._obml_reference_cache = None
     server._dialect_names_cache = None
+    server._function_catalog_cache = None
     server._single_model_mode = False
     server._query_execute_enabled = False
     server._loaded_model_ids.clear()
@@ -37,6 +38,7 @@ def _reset_state():
     server._api_session_id = None
     server._obml_reference_cache = None
     server._dialect_names_cache = None
+    server._function_catalog_cache = None
     server._single_model_mode = False
     server._query_execute_enabled = False
     server._loaded_model_ids.clear()
@@ -298,7 +300,7 @@ _DESCRIBE_RESPONSE = {
 def test_describe_model(mock_api: respx.MockRouter):
     """describe_model formats the model description (multi-model mode)."""
     _mock_create_session(mock_api)
-    mock_api.get("/v1/sessions/test-session-1/models/m001").mock(
+    mock_api.get("/v1/sessions/test-session-1/models/m001/schema").mock(
         return_value=httpx.Response(200, json=_DESCRIBE_RESPONSE)
     )
 
@@ -313,15 +315,73 @@ def test_describe_model(mock_api: respx.MockRouter):
     assert "synonyms: sales, income" in result
 
 
+def test_describe_model_shows_measure_default_value(mock_api: respx.MockRouter):
+    """A measure's defaultValue changes its answer over no rows, so describe it."""
+    _mock_create_session(mock_api)
+    payload = {
+        **_DESCRIBE_RESPONSE,
+        "measures": [
+            # 0 is falsy but meaningful — it pins the empty aggregate to 0
+            # instead of the SQL-standard NULL.
+            {
+                "name": "Electronics Sales",
+                "result_type": "float",
+                "aggregation": "sum",
+                "expression": None,
+                "defaultValue": 0,
+            },
+            {"name": "Total Revenue", "result_type": "float", "aggregation": "sum"},
+        ],
+    }
+    mock_api.get("/v1/sessions/test-session-1/models/m001/schema").mock(
+        return_value=httpx.Response(200, json=payload)
+    )
+
+    result = server._impl_describe_model("m001")
+    electronics, revenue = (
+        line
+        for line in result.splitlines()
+        if "Electronics Sales" in line or "Total Revenue" in line
+    )
+    assert "defaultValue: 0" in electronics
+    # Unset means the SQL-standard NULL — nothing to render.
+    assert "defaultValue" not in revenue
+
+
+def test_render_measure_lines_default_value():
+    """_render_measure_lines (find_artefacts) renders defaultValue in both spellings."""
+    lines = server._render_measure_lines(
+        [
+            {"name": "Snake", "result_type": "int", "aggregation": "sum", "default_value": 0},
+            {"name": "Camel", "result_type": "string", "aggregation": "max", "defaultValue": "n/a"},
+            {"name": "Falsy", "result_type": "bool", "aggregation": "max", "defaultValue": False},
+            {"name": "Unset", "result_type": "int", "aggregation": "sum"},
+        ]
+    )
+    assert "defaultValue: 0" in lines[0]
+    # JSON-rendered, so a string default stays distinguishable from a number.
+    assert 'defaultValue: "n/a"' in lines[1]
+    assert "defaultValue: false" in lines[2]
+    assert "defaultValue" not in lines[3]
+
+
 def test_describe_model_with_data_types_and_settings(mock_api: respx.MockRouter):
-    """describe_model shows data_type on measures/metrics and model settings."""
+    """describe_model shows dataType on measures/metrics and the model settings.
+
+    Both halves are spelled the way the API actually sends them. FastAPI
+    serialises a response model by alias, so ``MeasureDetail.data_type`` arrives
+    as ``dataType`` while its unaliased sibling ``result_type`` stays
+    snake_case; and no schema response carries a ``settings`` block at all, so
+    the model's settings come from ``/v1/settings`` keyed by alias.
+    """
     _mock_create_session(mock_api)
     response = {
+        "model_id": "m001",
         "data_objects": [
             {
-                "label": "Orders",
+                "name": "Orders",
                 "code": "ORDERS",
-                "columns": ["Amount"],
+                "columns": [{"name": "Amount"}],
                 "join_targets": [],
                 "synonyms": [],
             }
@@ -333,7 +393,7 @@ def test_describe_model_with_data_types_and_settings(mock_api: respx.MockRouter)
                 "result_type": "float",
                 "aggregation": "sum",
                 "expression": None,
-                "data_type": "decimal(18, 4)",
+                "dataType": "decimal(18, 4)",
                 "synonyms": [],
             }
         ],
@@ -342,19 +402,30 @@ def test_describe_model_with_data_types_and_settings(mock_api: respx.MockRouter)
                 "name": "Profit Margin",
                 "type": "derived",
                 "expression": "{[Profit]} / {[Revenue]}",
-                "data_type": "decimal(18, 6)",
+                "dataType": "decimal(18, 6)",
                 "synonyms": [],
             }
         ],
-        "settings": {
-            "default_numeric_data_type": "decimal(18, 2)",
-            "default_timezone": "Europe/Zagreb",
-            "default_locale": "de-DE",
-            "override_database_timezone": True,
-        },
     }
-    mock_api.get("/v1/sessions/test-session-1/models/m001").mock(
+    mock_api.get("/v1/sessions/test-session-1/models/m001/schema").mock(
         return_value=httpx.Response(200, json=response)
+    )
+    settings_route = mock_api.get("/v1/settings").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "model_settings": {
+                    "defaultNumericDataType": "decimal(18, 2)",
+                    "defaultTimezone": "Europe/Zagreb",
+                    "defaultLocale": "de-DE",
+                    "queryTimezone": "UTC",
+                    "weekStart": "sunday",
+                    "expressionMode": "portable",
+                    "overrideDatabaseTimezone": True,
+                },
+                "dialect": {"effective": "duckdb"},
+            },
+        )
     )
 
     result = server._impl_describe_model("m001")
@@ -364,7 +435,30 @@ def test_describe_model_with_data_types_and_settings(mock_api: respx.MockRouter)
     assert "defaultNumericDataType: decimal(18, 2)" in result
     assert "defaultTimezone: Europe/Zagreb" in result
     assert "defaultLocale: de-DE" in result
+    assert "queryTimezone: UTC" in result
+    # Both carry server-side defaults, so the API reports them whether or not
+    # the model wrote them, and both change results — see the SETTINGS block.
+    assert "weekStart: sunday" in result
+    assert "expressionMode: portable" in result
     assert "overrideDatabaseTimezone: true" in result
+    # The settings block is per-model: a session holding several models omits
+    # it unless the request pins one, so describe_model has to scope its fetch.
+    params = settings_route.calls[0].request.url.params
+    assert params["session_id"] == "test-session-1"
+    assert params["model_id"] == "m001"
+
+
+def test_describe_model_settings_absent_without_error(mock_api: respx.MockRouter):
+    """A /v1/settings failure drops the SETTINGS block rather than the model."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/schema").mock(
+        return_value=httpx.Response(200, json=_DESCRIBE_RESPONSE)
+    )
+    mock_api.get("/v1/settings").mock(return_value=httpx.Response(500, text="boom"))
+
+    result = server._impl_describe_model("m001")
+    assert "MEASURES:" in result
+    assert "SETTINGS:" not in result
 
 
 # ---------------------------------------------------------------------------
@@ -597,7 +691,8 @@ def test_list_dialects(mock_api: respx.MockRouter):
                             "union_all_by_name": False,
                             "window_functions": True,
                         },
-                        "unsupported_aggregations": [],
+                        "supported_aggregations": ["median", "sum"],
+                        "supported_functions": ["concat", "split_part"],
                     },
                     {
                         "name": "snowflake",
@@ -605,7 +700,8 @@ def test_list_dialects(mock_api: respx.MockRouter):
                             "union_all_by_name": True,
                             "window_functions": True,
                         },
-                        "unsupported_aggregations": [],
+                        "supported_aggregations": ["median", "sum"],
+                        "supported_functions": ["concat", "split_part"],
                     },
                     {
                         "name": "mysql",
@@ -613,7 +709,8 @@ def test_list_dialects(mock_api: respx.MockRouter):
                             "union_all_by_name": False,
                             "window_functions": True,
                         },
-                        "unsupported_aggregations": ["median"],
+                        "supported_aggregations": ["sum"],
+                        "supported_functions": ["concat"],
                     },
                 ]
             },
@@ -625,7 +722,17 @@ def test_list_dialects(mock_api: respx.MockRouter):
     assert "snowflake" in result
     assert "mysql" in result
     assert "union_all_by_name" in result
-    assert "unsupported aggregations: median" in result
+    # The API states both vocabularies positively (it inverts each dialect's
+    # internal "unsupported" declaration before responding), so what a dialect
+    # cannot do shows up as an absence from its line.
+    assert "supported aggregations: median, sum" in result
+    # Catalog functions the dialect can render — the companion to
+    # get_function_catalog(), which lists what the entries mean.
+    assert "supported functions: concat, split_part" in result
+    mysql_line = next(ln for ln in result.splitlines() if ln.strip().startswith("mysql:"))
+    mysql_block = result.split(mysql_line, 1)[1]
+    assert "supported aggregations: sum" in mysql_block
+    assert "median" not in mysql_block
 
 
 def test_get_json_schema(mock_api: respx.MockRouter):
@@ -643,6 +750,101 @@ def test_get_json_schema(mock_api: respx.MockRouter):
     result = server.get_json_schema("query")
     assert '"QueryObject"' in result
     assert "json-schema.org" in result
+
+
+# ---------------------------------------------------------------------------
+# get_function_catalog
+# ---------------------------------------------------------------------------
+
+
+_MOCK_FUNCTION_CATALOG = {
+    "functions": [
+        {
+            "name": "concat",
+            "signature": "concat(a, b, ...)",
+            "group": "string",
+            "min_args": 2,
+            "max_args": None,
+            "result_type": "string",
+            "summary": "Concatenate values into one string.",
+            "semantics": "Propagates NULL: any NULL argument makes the whole result NULL.",
+            "examples": [
+                {"call": "concat('a', 'b')", "expect": "ab"},
+                {"call": "concat('a', NULL)", "expect": None},
+            ],
+        },
+        {
+            "name": "div",
+            "signature": "div(a, b)",
+            "group": "numeric",
+            "min_args": 2,
+            "max_args": 2,
+            "result_type": "int",
+            "summary": "Integer division.",
+            "semantics": "Truncates toward zero, so div(-7, 2) is -3.",
+            "examples": [{"call": "div(7, 2)", "expect": 3}],
+        },
+    ],
+    "escape_hatch": "A function outside the catalog is emitted verbatim into the SQL.",
+}
+
+
+def _mock_function_catalog(rsps: respx.MockRouter):
+    """Add a mock for GET /v1/reference/functions."""
+    return rsps.get("/v1/reference/functions").mock(
+        return_value=httpx.Response(200, json=_MOCK_FUNCTION_CATALOG)
+    )
+
+
+def test_get_function_catalog(mock_api: respx.MockRouter):
+    """get_function_catalog renders entries grouped, with semantics and examples."""
+    _mock_function_catalog(mock_api)
+
+    result = server.get_function_catalog()
+
+    # Grouped by `group`, in API order.
+    assert result.index("string:") < result.index("numeric:")
+    # Fixed-arity entry: signature, result type, arity, summary, semantics, example.
+    assert "div(a, b) -> int  [2 args] — Integer division." in result
+    assert "semantics: Truncates toward zero, so div(-7, 2) is -3." in result
+    assert "e.g. div(7, 2) = 3" in result
+    # The escape hatch closes the text.
+    assert result.endswith("A function outside the catalog is emitted verbatim into the SQL.")
+
+
+def test_get_function_catalog_variadic_entry(mock_api: respx.MockRouter):
+    """A null max_args renders as an open-ended arity; a null expect stays legible."""
+    _mock_function_catalog(mock_api)
+
+    result = server.get_function_catalog()
+
+    assert "concat(a, b, ...) -> string  [2+ args]" in result
+    # `null` is a documented expected value, not a missing one.
+    assert "e.g. concat('a', NULL) = null" in result
+
+
+def test_get_function_catalog_is_cached(mock_api: respx.MockRouter):
+    """The catalog is static per API version — a second call makes no second request."""
+    route = _mock_function_catalog(mock_api)
+
+    first = server.get_function_catalog()
+    second = server.get_function_catalog()
+
+    assert first == second
+    assert route.call_count == 1
+
+
+def test_get_function_catalog_on_older_api(mock_api: respx.MockRouter):
+    """A 404 means the API predates the catalog — say so, don't leak the raw error."""
+    mock_api.get("/v1/reference/functions").mock(
+        return_value=httpx.Response(404, json={"detail": "Not Found"})
+    )
+
+    with pytest.raises(_ToolError, match="predates the portable function catalog"):
+        server.get_function_catalog()
+
+    # A failed fetch must not poison the cache.
+    assert server._function_catalog_cache is None
 
 
 # ---------------------------------------------------------------------------
@@ -1245,6 +1447,49 @@ def test_get_join_graph(mock_api: respx.MockRouter):
     assert "Customer ID" in result
 
 
+def test_get_join_graph_shows_required_edges(mock_api: respx.MockRouter):
+    """A required join compiles to INNER, so the graph has to say so."""
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/join-graph").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "nodes": ["Orders", "Customers", "Regions"],
+                "edges": [
+                    {
+                        "from_object": "Orders",
+                        "to_object": "Customers",
+                        "cardinality": "many-to-one",
+                        "columns_from": ["Customer ID"],
+                        "columns_to": ["Cust ID"],
+                        "secondary": False,
+                        "path_name": None,
+                        "required": True,
+                    },
+                    {
+                        "from_object": "Customers",
+                        "to_object": "Regions",
+                        "cardinality": "many-to-one",
+                        "columns_from": ["Region ID"],
+                        "columns_to": ["ID"],
+                        "secondary": False,
+                        "path_name": None,
+                        "required": False,
+                    },
+                ],
+            },
+        )
+    )
+
+    result = server._impl_get_join_graph("m001")
+    orders_line, customers_line = (
+        line for line in result.splitlines() if "--[many-to-one]-->" in line
+    )
+    assert "[required: INNER]" in orders_line
+    # The default LEFT join stays unannotated.
+    assert "required" not in customers_line
+
+
 def test_get_join_graph_no_edges(mock_api: respx.MockRouter):
     """get_join_graph handles models with no joins."""
     _mock_create_session(mock_api)
@@ -1542,7 +1787,7 @@ def test_session_not_invalidated_on_model_404(mock_api: respx.MockRouter):
     from fastmcp.exceptions import ToolError
 
     server._api_session_id = "session-old"
-    mock_api.get("/v1/sessions/session-old/models/no-such-model").mock(
+    mock_api.get("/v1/sessions/session-old/models/no-such-model/schema").mock(
         return_value=httpx.Response(404, json={"detail": "Model not found"})
     )
 
@@ -1559,7 +1804,7 @@ def test_session_not_invalidated_on_plain_text_404(mock_api: respx.MockRouter):
     from fastmcp.exceptions import ToolError
 
     server._api_session_id = "session-old"
-    mock_api.get("/v1/sessions/session-old/models/missing").mock(
+    mock_api.get("/v1/sessions/session-old/models/missing/schema").mock(
         return_value=httpx.Response(404, text="Not Found")
     )
 
@@ -2474,7 +2719,7 @@ def test_tool_phase_buckets_are_disjoint():
     # Spot-check canonical assignments from the spec.
     # run_batch and get_json_schema are always-on (both phases).
     assert {"load_model", "remove_model", "run_batch", "get_json_schema"} <= b1
-    assert {"get_obml_reference", "list_dialects"} <= b2
+    assert {"get_obml_reference", "get_function_catalog", "list_dialects"} <= b2
     assert {"describe_model", "execute_query", "find_artefacts"} <= b3
 
 

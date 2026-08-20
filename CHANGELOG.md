@@ -6,6 +6,133 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.25.0] — 2026-08-20
+
+Tracks OrionBelt Semantic Layer API **v2.25.0**. One new design-time tool, one
+corrected dialect payload, and a class of rendering bugs where the MCP read a
+response by field name that the API sends by alias.
+
+**Fixed: `describe_model` rendered fields from the wrong payload.** In
+multi-model mode it called `GET /v1/sessions/{sid}/models/{mid}`, which returns
+the `ModelDescription` *summary* dataclass — its `MeasureInfo` carries only
+name, type, aggregation, expression and synonyms, with no `dataType`, no
+`defaultValue`, no `columns` and no `total`, and the description itself has no
+`filters`, `extends` or `inherits`. It now calls that model's `/schema`, which
+returns the same `SchemaResponse` the single-model shortcut already used, so
+both modes describe a model from one shape and the renderers need no per-mode
+branch.
+
+**Fixed: the SETTINGS block never rendered, in either mode.** It was read from
+the describe payload, but no schema response carries a `settings` field —
+neither `ModelDescription` nor `SchemaResponse`. `/v1/settings` is the only
+route that reports it, so `_fetch_effective_settings` now fetches it there and
+`describe_model` merges it. The fetch is scoped with `session_id` + `model_id`,
+which is what pins the block to one model: a session holding several omits it
+rather than guessing. `load_model` scopes its fetch the same way, since the
+dialect and timezone resolution chains also start at the model's own settings.
+
+**Fixed: `dataType` and `timeDimension` never rendered.** Same root cause, and
+it predates this cycle: FastAPI serialises a response model **by alias**, so
+`MeasureDetail.data_type` arrives as `dataType` while its unaliased sibling
+`result_type` stays snake_case. The mixed casing is per-field rather than
+per-payload, so it cannot be normalised wholesale — the new `_aliased()` helper
+reads the alias with a snake_case fallback, the idiom already used ad-hoc for
+`windowFunction`, `orderDirection` and `filterContext`. `defaultValue` was
+already dual-spelled and now routes through the same helper.
+
+**Fixed: stdio startup logged 15/19 registered tools.** `get_function_catalog`
+registers mode-independently, so the real counts are 16 single-model and 20
+multi-model, matching the README.
+
+**Dependencies.** Pinned resolutions moved fastmcp 3.4.6 → 3.4.7 (a CIMD
+`private_key_jwt` audience fix), pydantic-settings 2.14.2 → 2.15.0, and the ruff
+dev pin 0.16.1 → 0.16.3. All declared ranges are unchanged.
+
+**Added: `get_function_catalog`.** Wraps `GET /v1/reference/functions`, the
+API's portable scalar-function catalog. An LLM composing an OBML expression
+previously had to guess which function names survive compilation, and found out
+at the warehouse. The tool answers that up front: 39 entries grouped by `group`
+(numeric, conditional, string, datetime, json — emitted in the API's own order,
+so a group added later needs no MCP change), one line each carrying the
+signature, result type, arity and summary, then the `semantics` sentence and the
+worked examples.
+The semantics line is the point — it pins the rule that actually differs
+between engines (`concat` propagates NULL, `length` counts characters,
+`round` breaks ties away from zero, `greatest`/`least` propagate NULL), so the
+model does not assume its own warehouse's behaviour. The response closes with
+the catalog's `escape_hatch` sentence: a call outside the catalog is still
+emitted verbatim, it just pins the model to the engines that have it. Wrong
+arity is a model validation error (`WRONG_FUNCTION_ARITY`), caught at load time.
+
+The catalog is static for a given API version, so it is fetched once and cached
+for the process, like the OBML reference. It is a **design-only** tool
+(bucket 2) — authoring reference, hidden once a model is loaded. Tool counts
+become 16 single-model / 20 multi-model / 21 distinct.
+
+**Fixed: `list_dialects` read two fields the API does not send.** The same API
+change that added the function catalog inverted `GET /v1/dialects`. A dialect
+still declares internally what it *cannot* do — so an aggregation or catalog
+entry added later needs no edit in the seven dialects that handle it — but the
+response now publishes the complement: `supported_aggregations` and
+`supported_functions`, each sorted, replacing `unsupported_aggregations`. That
+is the question a client is actually asking, and answering it positively saves
+every caller a second call to fetch the full vocabulary and subtract.
+
+The MCP enumerates dialect fields explicitly rather than dumping the payload, so
+it did not error on the rename — it silently printed capability flags and
+nothing else. Both vocabularies are now rendered, one per indented line rather
+than appended inline, because the positive form lists most of each vocabulary
+and is far too long to read at the end of the capability line. A name absent
+from a dialect's line is a name that dialect cannot compute. This is the
+catalog's companion: `get_function_catalog` says what an entry means,
+`list_dialects` says where it runs. The `debug_validation` prompt's two
+references to the old field names were corrected with it.
+
+**A measure's `defaultValue` is described.** `MeasureDetail` gained the field:
+the value reported when the aggregate has nothing to add up, which a filtered
+measure reaches routinely and which engines disagree about (ClickHouse returns
+0 over an empty row set where Postgres and DuckDB return NULL). It changes the
+answer, and both measure renderers — `describe_model` and the one behind
+`find_artefacts` — dropped it, so a model could report 0 where the description
+implied NULL. `0` and `false` are meaningful values here, so the check is
+against `None` rather than falsiness, and the value is JSON-rendered to keep
+`0` and `"0"` apart.
+
+**A join graph says which edges are required.** `JoinEdge` gained `required`:
+false compiles to `LEFT JOIN`, true to `INNER JOIN`. `get_join_graph` already
+annotated `[secondary]` and `path=`, but not the flag that decides whether an
+unmatched row survives — now rendered as `[required: INNER]`. The default
+LEFT join stays unannotated.
+
+**A model's query timezone, week start and expression mode are described.**
+`ModelSettingsInfo` gained `queryTimezone`, `weekStart` and `expressionMode`,
+and `describe_model` enumerates settings explicitly, so all three were dropped.
+The last two carry server-side defaults (`monday`, `permissive`) and the API
+reports them whether or not the model wrote them — a client asking which
+calendar or expression mode applies wants the answer, and an absent key cannot
+distinguish "unset" from "unsupported by this server". Both change results:
+`weekStart` moves every weekly bucket, and `expressionMode` decides whether a
+function outside the portable catalog is a `NON_PORTABLE_FUNCTION` warning or a
+hard error — which is exactly the escape hatch `get_function_catalog` describes,
+so a model set to `portable` is something the agent has to know before composing
+an expression.
+
+**Four new error codes in the `debug_validation` prompt.**
+`WRONG_FUNCTION_ARITY` (model validation — a catalog function called with the
+wrong argument count; only catalog names are checked), plus
+`UNSUPPORTED_FUNCTION`, `AMBIGUOUS_TABLE_REFERENCE` and
+`UNSUPPORTED_NESTED_ACCESS` (dialect-capability 422s at query time, raised by
+the compile and execute paths and returned per-query by `run_batch`). The last
+covers a nested data object — one declared with `nestedIn`, whose rows are a
+parent's array column — read on a dialect with no FROM-clause unnest; the `code`
+table fallback is not equivalent, and says so with a `NESTED_SOURCE_FALLBACK`
+warning.
+
+The endpoint only exists on API builds carrying the function catalog. A 404 is
+translated into a message saying the connected API predates it, rather than
+surfacing a raw HTTP error — so a MCP service rolled ahead of the API fails
+legibly instead of cryptically.
+
 ## [2.24.0] — 2026-08-04
 
 Tracks OrionBelt Semantic Layer API **v2.24.0**. One tool loses a parameter;
