@@ -6,6 +6,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.25.0] — 2026-08-20
+
+Tracks OrionBelt Semantic Layer API **v2.25.0**. One new design-time tool, one
+corrected dialect payload, and three settings that were silently dropped.
+
 **Added: `get_function_catalog`.** Wraps `GET /v1/reference/functions`, the
 API's portable scalar-function catalog. An LLM composing an OBML expression
 previously had to guess which function names survive compilation, and found out
