@@ -2735,6 +2735,16 @@ _DEBUG_VALIDATION_TEXT = """\
   know, so it is passed through unchecked.
   Fix: Match the canonical signature named in the error. See
   `get_function_catalog()` for every entry's arity and semantics.
+- `INVALID_COLUMN_EXPRESSION`: A computed column's `expression` could not be
+  parsed. Reported at model load, and again at query time if the column is
+  reached — the same answer `INVALID_METRIC_EXPRESSION` has always given for a
+  metric formula. The expression parser reads a *subset* of SQL: `||`,
+  `INTERVAL` and `EXTRACT(... FROM ...)` are outside it, and a call missing its
+  closing `)` is refused rather than closed for you (an invented parenthesis
+  moves what the call wraps, so `ROUND({Amount}, 2 * 100` and
+  `ROUND({Amount}, 2) * 100` are different numbers).
+  Fix: Rewrite it with portable catalog functions (`get_function_catalog()`),
+  or move the construct into the source view.
 
 ## Reference Errors
 
@@ -2839,6 +2849,13 @@ references unknown column.
   Fix: Measure expressions use `{[DataObject].[Column]}` syntax;
   metric expressions use `{[Measure Name]}` syntax.  Check for missing
   `[`, `]`, `{`, `}`, or `.` separators.
+- `INVALID_METRIC`: A metric cannot be computed in the shape this query asks
+  for. Most often a period-over-period metric combined with measures from
+  independent facts: the comparison is built around a date spine over one join
+  tree, and those measures are stacked into a UNION ALL that has no such tree.
+  Also raised for two PoP metrics at different grains in one query.
+  Fix: Split the query — the PoP metric against its own fact, the other
+  measures separately — or drop the cross-fact measures.
 - `INVALID_METRIC_EXPRESSION`: Metric expression could not be parsed.
   Fix: Use `{[Measure Name]}` syntax in metric expressions.
 - `INVALID_FILTER_OPERATOR`: Unrecognised filter operator in query.
@@ -2884,6 +2901,27 @@ references unknown column.
   Fix: Change `dialect`, or give the nested object a `code` table to be read
   from instead — note that the fallback emits a `NESTED_SOURCE_FALLBACK`
   warning, because the table and the array are not guaranteed to agree.
+
+## Warnings (non-blocking)
+
+A warning never fails the load or the query — it is returned alongside the
+result, and `load_model` reports the count.
+
+- `NON_PORTABLE_FUNCTION`: An expression calls a function the portable catalog
+  does not carry. The call is emitted verbatim, which pins the model to the
+  engines that spell it that way. Becomes a hard error when the model sets
+  `settings.expressionMode: portable`.
+  Fix: Use a catalog entry when one covers the need (`get_function_catalog()`).
+- `NARROWING_DATA_TYPE`: A measure declares a `dataType` too narrow for the
+  values its own source column is allowed to hold (e.g. `int` declared over a
+  `bigint` column). A value that outgrows the declared type raises on most
+  engines, saturates on MySQL and wraps on ClickHouse.
+  Fix: Widen `dataType` (`bigint`, or a decimal with more integer digits) if
+  the column can really reach those values.
+- `OUT_OF_SCOPE_TABLE`: The compiled SQL's outermost query names a table its
+  own `FROM` does not provide, so the statement parses but the database will
+  reject it. This is a compiler defect rather than a model one.
+  Fix: Nothing to change in the model — report the query upstream.
 
 ## Debugging Steps
 
