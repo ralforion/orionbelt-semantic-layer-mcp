@@ -6,6 +6,55 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.26.0] — 2026-08-25
+
+Tracks OrionBelt Semantic Layer API **v2.26.0**. The API's REST surface is
+unchanged in this release — no endpoint, request shape or response shape moved,
+so no tool was added, removed or re-signatured. What changed is what the API
+*accepts* and what it *reports*, and this release carries that into the error
+reference and picks up the version gate.
+
+**The function catalog grows without a code change.** `cast(x, 'type')` and
+`to_number(x)` join the portable catalog upstream. `get_function_catalog()`
+fetches `GET /v1/reference/functions` and renders whatever it returns, and the
+response model is unchanged, so both entries — with their semantics and
+examples — appear on their own. `to_number` is the one worth knowing about: text
+that does not name a number is NULL on all eight dialects, where a bare cast is
+NULL on ClickHouse, **0** on MySQL and an error on the other six. The simple
+`CASE x WHEN a THEN r END` form now parses too, alongside the searched form.
+
+**Added `INVALID_COLUMN_EXPRESSION` to the `debug_validation` reference.** New
+upstream, and the one a host is most likely to meet: a computed column whose
+`expression` does not parse is now refused at model **load** rather than
+compiled into SQL naming a column no table has. A `load_model` call that
+succeeded against API 2.25.x can fail against 2.26.0 for this reason, and the
+entry says why and what the parser accepts. It also covers the unclosed-call
+check — `ROUND({Amount}, 2 * 100` used to have its paren invented for it, which
+silently moved what the call wrapped and returned a different number from
+`ROUND({Amount}, 2) * 100`.
+
+**Added `INVALID_METRIC`.** Pre-existing upstream but never documented here, and
+2.26.0 makes it reachable a new way: a period-over-period metric combined with
+measures from independent facts is now refused rather than compiled into SQL
+that names a table its own `FROM` does not have.
+
+**Added a `Warnings (non-blocking)` section** to the same reference, covering
+the two new warning codes — `NARROWING_DATA_TYPE` (a measure's `dataType` too
+narrow for its source column: raises on most engines, saturates on MySQL, wraps
+on ClickHouse) and `OUT_OF_SCOPE_TABLE` (compiled SQL naming a table its own
+`FROM` does not provide) — plus `NON_PORTABLE_FUNCTION`, which the catalog tool
+already referenced but which had no entry of its own.
+
+**Two upstream result changes to be aware of**, neither of which the MCP can see
+or announce: a time-grained dimension now carries the type its model declares,
+so a `resultType: date` dimension arrives as `DATE` rather than a timestamp on
+DuckDB or a `timestamptz` on PostgreSQL; and a **filtered** period-over-period
+query returns different numbers, because the filter now reaches the measures —
+they were previously computed over rows the filter excluded.
+
+Version bump only otherwise: the `major.minor` compatibility gate means an MCP
+built for 2.25.x refuses to start against an API on 2.26.0.
+
 ## [2.25.0] — 2026-08-20
 
 Tracks OrionBelt Semantic Layer API **v2.25.0**. One new design-time tool, one
