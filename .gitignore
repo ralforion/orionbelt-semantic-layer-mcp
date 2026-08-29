@@ -9,3 +9,6 @@ dist/
 build/
 review*
 .claude/settings.local.json
+
+# Generated license report (produced at Docker build time / by scripts/gen-third-party-licenses.sh)
+LICENSES-THIRD-PARTY.txt

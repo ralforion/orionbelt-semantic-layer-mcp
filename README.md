@@ -406,6 +406,25 @@ Copyright 2026 [RALFORION d.o.o.](https://ralforion.com)
 
 Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
 
+### Third-party licenses
+
+The PyPI package ships only `server.py` — its dependencies are declared, not
+bundled, so it redistributes no third-party code. The Docker image does bundle
+them (the whole runtime virtualenv), and carries their licenses two ways: each
+package keeps its own license file under `/app/.venv/lib/*/site-packages`, and
+`/app/LICENSES-THIRD-PARTY.txt` aggregates every text into one file, generated
+at build time from `uv.lock` so it cannot drift.
+
+```bash
+docker run --rm --entrypoint cat ralforion/orionbelt-semantic-layer-mcp:latest \
+    /app/LICENSES-THIRD-PARTY.txt
+```
+
+To produce the same report locally — for an audit, or to review the set before a
+release — run `./scripts/gen-third-party-licenses.sh`. Every runtime dependency
+is permissively licensed (MIT, BSD, Apache-2.0, ISC, MPL-2.0 for `certifi`);
+nothing in the tree is under a copyleft license that reaches the server's code.
+
 ---
 
 <p align="center">

@@ -6,6 +6,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **Third-party license reporting for the Docker image.** The PyPI package ships
+  only `server.py` and bundles nothing, but the image carries the whole runtime
+  virtualenv — 71 packages plus the Debian base — and that is redistribution.
+  Each wheel already installs its own license file into site-packages; the image
+  now also carries `/app/LICENSES-THIRD-PARTY.txt`, a single aggregate of every
+  license text, plus `/app/LICENSE` for the server's own Apache-2.0 terms. The
+  aggregate is generated during the build from the synced venv rather than
+  committed, so it cannot drift from `uv.lock`.
+- `scripts/gen_third_party_licenses.py` (stdlib-only, runs in the builder stage)
+  and the `scripts/gen-third-party-licenses.sh` wrapper, which materializes a
+  throwaway runtime-only environment from `uv export --no-dev` so development
+  dependencies stay out of the report. Packages that declare no machine-readable
+  license fall back to identification from their license text — `caio` was the
+  only one — and any that ship no text at all are listed explicitly at the end
+  (`fastmcp-slim` and `py-key-value-aio`, both Apache-2.0 by metadata).
+
+  Every runtime dependency is permissively licensed: MIT, BSD, Apache-2.0, ISC,
+  Unlicense, PSF-2.0, and MPL-2.0 for `certifi`. Nothing in the tree is under a
+  copyleft license that reaches the server's own code, and no dependency ships a
+  `NOTICE` file, so Apache-2.0 §4(d) does not apply.
+
 ## [2.26.0] — 2026-08-25
 
 Tracks OrionBelt Semantic Layer API **v2.26.0**. The API's REST surface is
