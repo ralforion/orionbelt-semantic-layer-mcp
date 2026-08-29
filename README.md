@@ -409,21 +409,42 @@ Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for detai
 ### Third-party licenses
 
 The PyPI package ships only `server.py` — its dependencies are declared, not
-bundled, so it redistributes no third-party code. The Docker image does bundle
-them (the whole runtime virtualenv), and carries their licenses two ways: each
-package keeps its own license file under `/app/.venv/lib/*/site-packages`, and
-`/app/LICENSES-THIRD-PARTY.txt` aggregates every text into one file, generated
-at build time from `uv.lock` so it cannot drift.
+bundled, so it redistributes no third-party code.
+
+The Docker image does bundle them, and carries their licenses in three places:
+
+| In the image | Covers |
+|---|---|
+| `/app/.venv/lib/*/site-packages/*.dist-info/licenses/` | each Python package, as its author shipped it |
+| `/app/LICENSES-THIRD-PARTY.txt` | the same texts aggregated into one file |
+| `/usr/share/doc/*/copyright` | the Debian base packages inherited from `python:3.14-slim` |
+
+The aggregate is generated at build time from the synced virtualenv, so it is
+derived from `uv.lock` and cannot drift. To read the one an image actually
+carries — the ground truth for any given tag:
 
 ```bash
 docker run --rm --entrypoint cat ralforion/orionbelt-semantic-layer-mcp:latest \
     /app/LICENSES-THIRD-PARTY.txt
 ```
 
-To produce the same report locally — for an audit, or to review the set before a
-release — run `./scripts/gen-third-party-licenses.sh`. Every runtime dependency
-is permissively licensed (MIT, BSD, Apache-2.0, ISC, MPL-2.0 for `certifi`);
-nothing in the tree is under a copyleft license that reaches the server's code.
+To review the set before a release without building the image, run
+`./scripts/gen-third-party-licenses.sh`. It resolves for the image's target
+(Linux / CPython 3.14) rather than for your host, so the package set matches
+what ships — a host-resolved run on macOS would silently omit `jeepney` and
+`SecretStorage`.
+
+**The Python dependencies are all permissive** — MIT, BSD, Apache-2.0, ISC,
+Unlicense, PSF-2.0, and MPL-2.0 for `certifi`. None is copyleft, and none
+reaches the server's own code.
+
+**The Debian base is a separate matter.** `python:3.14-slim` brings ~87 system
+packages, many of them GPL/LGPL (`coreutils`, `libc6`, `bash`, …), exactly as
+every Debian-based image does. They are unmodified upstream packages invoked as
+ordinary OS components, not linked into or derived from this server, and their
+licenses and written-offer text ship in the image under `/usr/share/doc/` and
+`/usr/share/common-licenses/`. If your distribution policy needs to avoid them
+entirely, rebuild `FROM` a distroless or Alpine base.
 
 ---
 

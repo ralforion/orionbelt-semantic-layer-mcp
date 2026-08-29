@@ -69,6 +69,37 @@ def test_detect_license_from_text(head, expected):
     assert gen._detect_license([("LICENSE", head)]) == expected
 
 
+def test_render_records_the_resolution_target_when_given_one():
+    dists = gen.collect()
+    note = "x86_64-unknown-linux-gnu / CPython 3.14 (the Docker image target)"
+    assert f"Resolved for {note}" in gen.render(dists, "1.2.3", note)
+    # Omitted when not supplied, rather than printed empty.
+    assert "Resolved for" not in gen.render(dists, "1.2.3")
+
+
+def test_render_scopes_itself_to_python_packages():
+    """The report must not read as if it covered the base image's OS packages."""
+    report = gen.render(gen.collect(), "1.2.3")
+    assert "SCOPE: Python packages only." in report
+    assert "/usr/share/doc/<package>/copyright" in report
+
+
+def test_collect_can_scan_an_arbitrary_install_tree(tmp_path):
+    """`--path` drives the cross-target report the shell wrapper generates."""
+    assert gen.collect([str(tmp_path)]) == []
+
+    dist_info = tmp_path / "widget-1.0.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: widget\nVersion: 1.0\nLicense-Expression: MIT\n"
+    )
+    (dist_info / "RECORD").write_text("widget-1.0.dist-info/METADATA,,\n")
+
+    found = gen.collect([str(tmp_path)])
+    assert [d.metadata.get("Name") for d in found] == ["widget"]
+    assert "widget 1.0" in gen.render(found, "1.2.3")
+
+
 def test_license_text_is_carried_for_a_known_package():
     """httpx ships a BSD license file; it must reach the report verbatim."""
     dist = metadata.distribution("httpx")

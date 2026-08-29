@@ -131,16 +131,29 @@ def collect(env_path: list[str] | None = None) -> list[metadata.Distribution]:
     return [seen[key] for key in sorted(seen)]
 
 
-def render(dists: list[metadata.Distribution], project_version: str) -> str:
+def render(
+    dists: list[metadata.Distribution],
+    project_version: str,
+    platform_note: str = "",
+) -> str:
     stamp = datetime.now(UTC).strftime("%Y-%m-%d")
     out: list[str] = [
         "OrionBelt Semantic Layer MCP — Third-Party Licenses",
         f"Generated {stamp} for orionbelt-semantic-layer-mcp {project_version}",
+    ]
+    if platform_note:
+        out.append(f"Resolved for {platform_note}")
+    out += [
         "",
         "This distribution bundles the Python packages listed below. Each entry gives",
         "the package, its version, its declared license and the license text exactly as",
         "shipped by its author. The individual texts also remain in place alongside each",
         "package in site-packages; this file is an aggregate for convenience.",
+        "",
+        "SCOPE: Python packages only. The Docker image also inherits its base operating",
+        "system from python:3.14-slim, whose packages carry their own licenses — some of",
+        "them GPL/LGPL system components such as coreutils and libc6. Those licenses ship",
+        "in the image under /usr/share/doc/<package>/copyright and are not repeated here.",
         "",
         "The MCP server's own code is Apache-2.0 — see LICENSE.",
         "",
@@ -215,6 +228,23 @@ def main() -> int:
         default="",
         help="version to stamp in the header (default: read from installed metadata)",
     )
+    parser.add_argument(
+        "--path",
+        type=Path,
+        action="append",
+        default=None,
+        help=(
+            "directory of installed distributions to scan instead of this "
+            "interpreter's environment; repeatable. Lets the report describe a "
+            "cross-target `uv pip install --target` tree (see "
+            "scripts/gen-third-party-licenses.sh)."
+        ),
+    )
+    parser.add_argument(
+        "--platform-note",
+        default="",
+        help="one line describing the target the report was resolved for",
+    )
     args = parser.parse_args()
 
     version = args.project_version
@@ -224,12 +254,14 @@ def main() -> int:
         except metadata.PackageNotFoundError:
             version = "unknown"
 
-    dists = collect()
+    env_path = [str(p) for p in args.path] if args.path else None
+    dists = collect(env_path)
     if not dists:
-        print("error: no distributions found in this environment", file=sys.stderr)
+        where = ", ".join(env_path) if env_path else "this environment"
+        print(f"error: no distributions found in {where}", file=sys.stderr)
         return 1
 
-    args.output.write_text(render(dists, version), encoding="utf-8")
+    args.output.write_text(render(dists, version, args.platform_note), encoding="utf-8")
     print(f"wrote {args.output} — {len(dists)} packages")
     return 0
 
