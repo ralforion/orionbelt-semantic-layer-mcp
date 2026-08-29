@@ -6,6 +6,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **Third-party license reporting for the Docker image.** The PyPI package ships
+  only `server.py` and bundles nothing, but the image carries the whole runtime
+  virtualenv — 71 packages plus the Debian base — and that is redistribution.
+  Each wheel already installs its own license file into site-packages; the image
+  now also carries `/app/LICENSES-THIRD-PARTY.txt`, a single aggregate of every
+  license text, plus `/app/LICENSE` for the server's own Apache-2.0 terms. The
+  aggregate is generated during the build from the synced venv rather than
+  committed, so it cannot drift from `uv.lock`.
+- `scripts/gen_third_party_licenses.py` (stdlib-only, runs in the builder stage)
+  and the `scripts/gen-third-party-licenses.sh` wrapper, which materializes a
+  throwaway runtime-only environment so development dependencies stay out of the
+  report. The wrapper resolves for the *image's* target (Linux / CPython 3.14)
+  rather than the host, so an audit run from macOS reports the same 71 packages
+  the image ships instead of silently dropping `jeepney` and `SecretStorage`.
+  Packages that declare no machine-readable license fall back to identification
+  from their license text — `caio` was the only one — and any that ship no text
+  at all are listed explicitly at the end (`fastmcp-slim` and `py-key-value-aio`,
+  both Apache-2.0 by metadata).
+
+  Every **Python** runtime dependency is permissively licensed: MIT, BSD,
+  Apache-2.0, ISC, Unlicense, PSF-2.0, and MPL-2.0 for `certifi`. None is
+  copyleft, and no dependency ships a `NOTICE` file, so Apache-2.0 §4(d) does
+  not apply. The Debian base inherited from `python:3.14-slim` is separate and
+  does include GPL/LGPL system packages (`coreutils`, `libc6`, `bash`, …), as
+  every Debian-based image does; their licenses ship in the image under
+  `/usr/share/doc/<package>/copyright` and `/usr/share/common-licenses/`, and
+  the aggregate file says so rather than implying it covers them.
+
 ## [2.26.0] — 2026-08-25
 
 Tracks OrionBelt Semantic Layer API **v2.26.0**. The API's REST surface is
