@@ -65,4 +65,10 @@ Cloud Run deployment is **not** in this repo — the MCP service is rolled by th
 
 - Ruff: line-length 100, py312, rule set `E,F,I,N,UP,B,A,SIM`. Resolve all findings before considering work done.
 - The `mcp-name:` HTML comment on README line 1 is the canonical MCP-registry namespace (`io.github.ralforion/...`) — changing it is a registry rename, not cosmetic.
+- Every `uses:` in `.github/workflows` is pinned to a commit SHA with a `# vX.Y.Z`
+  comment naming an exact patch release, and `scripts/check-action-pins.sh`
+  (the `pins` CI job) fails if the two disagree. Bumping an action means editing
+  the SHA and the comment together; resolve the SHA with
+  `git ls-remote https://github.com/<owner>/<repo> refs/tags/<tag>'^{}'`. A new
+  action's owner must be added to `ALLOWED_OWNERS` in that script deliberately.
 - Code is reviewed externally with OpenAI Codex.
