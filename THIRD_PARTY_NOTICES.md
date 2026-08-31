@@ -125,25 +125,21 @@ uv run --no-sync python scripts/third_party_notices.py
 | websockets | 16.0 | BSD-3-Clause | yes |
 | zipp | 3.23.0 | MIT | yes |
 
-## ⚠️ Unresolved licence questions
-
-**This notice is incomplete.** The packages below are redistributed but their
-terms have not been reviewed and accepted, so nothing here should be treated as
-a licence clearance for them. The generator exits non-zero while this section
-exists; it is present so the open questions are visible rather than implied by
-a build failure nobody reads.
-
-| Package | Version | Declared license | What is open |
-| --- | --- | --- | --- |
-| caio | 0.9.25 | Apache-2.0 | declares no license at all in its wheel metadata, so there is nothing to classify. Its repository states MIT; confirm that against the released version and record it here, or drop the dependency |
-| docutils | 0.22.4 | Public Domain OR BSD License OR GNU General Public License (GPL) | offers Public Domain OR BSD OR GPL, and distributing it means choosing one in writing the way PYPHEN_ELECTION does elsewhere. The GPL option is never available to us — it would reach this project's own code — so the decision is between the public-domain and BSD branches |
-
-
 ## Conditions worth knowing (⚠️ above)
 
 ### certifi — Mozilla Public License 2.0 (MPL 2.0)
 
 MPL-2.0 is file-level copyleft: it reaches the files themselves, not the program that imports them. We ship certifi unmodified as a separate installed package, so the obligation is satisfied by shipping this notice and its license text. Do not patch certifi in place — patch it and the modified files must be published under MPL-2.0.
+
+### docutils — Public Domain OR BSD License OR GNU General Public License (GPL)
+
+That expression is an artifact of this script joining docutils' three `License ::` classifiers with OR. It is not an offer of three licences, and no election is required.
+
+docutils' own COPYING.rst places most of the project in the public domain. The exceptions shipped in the wheel — smartquotes.py, latex2mathml.py, math2html.py and html5_polyglot/math.css — are BSD-2-Clause; the last two came from eLyXer under GPL-3 and were relicensed to BSD-2-Clause by their author for Docutils.
+
+The files that genuinely are copyleft are not distributed. rst.el (GPL-3, an Emacs mode) and iepngfix.htc (LGPL) are absent from the installed package — verified against docutils 0.22.4, where pep.css and math.css are present and neither of those two is. licenses/gpl-3-0.txt ships only as the historical reference for the relicensed eLyXer files.
+
+So the image redistributes public-domain and BSD-2-Clause code and nothing under the GPL. Re-check this if docutils ever begins shipping rst.el in the wheel.
 
 ## Platform layer (Docker image)
 
