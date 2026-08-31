@@ -451,27 +451,35 @@ The Docker image does bundle them, and carries their licenses in three places:
 | In the image | Covers |
 |---|---|
 | `/app/.venv/lib/*/site-packages/*.dist-info/licenses/` | each Python package, as its author shipped it |
-| `/app/LICENSES-THIRD-PARTY.txt` | the same texts aggregated into one file |
+| `/app/THIRD_PARTY_NOTICES.md` | the same texts aggregated into one file |
 | `/usr/share/doc/*/copyright` | the Debian base packages inherited from `python:3.14-slim` |
 
-The aggregate is generated at build time from the synced virtualenv, so it is
-derived from `uv.lock` and cannot drift. To read the one an image actually
-carries — the ground truth for any given tag:
+The aggregate is committed as
+[`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md) and copied into the image,
+so it is readable without pulling anything and is reviewed in the same diff as
+the dependency change that altered it. CI regenerates it from the locked set on
+every PR and fails if the committed copy differs, which is what keeps it from
+drifting. To read the one an image actually carries — the ground truth for any
+given tag:
 
 ```bash
 docker run --rm --entrypoint cat ralforion/orionbelt-semantic-layer-mcp:latest \
-    /app/LICENSES-THIRD-PARTY.txt
+    /app/THIRD_PARTY_NOTICES.md
 ```
 
-To review the set before a release without building the image, run
-`./scripts/gen-third-party-licenses.sh`. It resolves for the image's target
-(Linux / CPython 3.14) rather than for your host, so the package set matches
-what ships — a host-resolved run on macOS would silently omit `jeepney` and
-`SecretStorage`.
+Regenerate it with `scripts/third_party_notices.py`, on Linux. It resolves for
+the image's target rather than for your host, and a host-resolved run on macOS
+would silently omit `jeepney` and `SecretStorage`.
 
-**The Python dependencies are all permissive** — MIT, BSD, Apache-2.0, ISC,
-Unlicense, PSF-2.0, and MPL-2.0 for `certifi`. None is copyleft, and none
-reaches the server's own code.
+**The Python dependencies are permissive with two exceptions**, both recorded
+in `ACKNOWLEDGED` in `scripts/third_party_notices.py` rather than left to a
+reader's inference: `certifi` is MPL-2.0, and `docutils` offers a choice that
+includes the GPL. MPL-2.0 is file-level copyleft and reaches the files
+themselves, not the program importing them, so shipping it unmodified alongside
+this notice satisfies it. The `docutils` choice has to be made in writing before
+a release, and the generator fails until it is. Everything else is MIT, BSD,
+Apache-2.0, ISC, Unlicense or PSF-2.0, and none of it reaches the server's own
+code.
 
 **The Debian base is a separate matter.** `python:3.14-slim` brings ~87 system
 packages, many of them GPL/LGPL (`coreutils`, `libc6`, `bash`, …), exactly as
