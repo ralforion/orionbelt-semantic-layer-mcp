@@ -4,7 +4,18 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [2.26.1] — 2026-08-31
+
+A patch release that ships no server change: `server.py` is byte-identical to
+2.26.0 and no tool was added, removed or re-signatured. It exists because the
+Docker image is the only artifact that embeds `uv.lock`, and the image is only
+built on a version tag — so the dependency fixes below, and the license report
+added earlier, reach nobody until a tag exists. The PyPI wheel ships `server.py`
+alone and declares its dependencies as ranges, so it is unaffected either way.
+
+Tracks OrionBelt Semantic Layer API **v2.26.x** unchanged; the compatibility
+gate compares `major.minor`, so this runs against the same API releases 2.26.0
+does.
 
 ### Added
 
@@ -38,6 +49,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Security
 
+- **Every runtime dependency carrying a published advisory is bumped**, closing
+  all 21 open Dependabot alerts (9 high, 6 moderate, 6 low). Every one is
+  transitive — none is declared in `pyproject.toml`, so no constraint moved and
+  the wheel's dependency set is unchanged:
+
+  | package | from | to |
+  | --- | --- | --- |
+  | `mcp` | 1.26.0 | 1.29.1 |
+  | `cryptography` | 46.0.5 | 50.0.1 |
+  | `pyjwt` | 2.11.0 | 2.13.0 |
+  | `python-multipart` | 0.0.29 | 0.0.32 |
+  | `idna` | 3.11 | 3.19 |
+  | `pygments` | 2.19.2 | 2.21.0 |
+
+  `mcp` and `cryptography` arrive through `fastmcp` (the latter via `authlib`
+  and `pyjwt[crypto]`), `idna` through `anyio` and `email-validator`, `pygments`
+  through `rich` and `pytest`. Because these live only in `uv.lock`, the Docker
+  image is the sole artifact that changes; `LICENSES-THIRD-PARTY.txt` is
+  generated from the lock during the build and picks the new versions up on its
+  own.
 - **Every GitHub Action is pinned to a commit SHA.** A tag like `v7` is a
   movable label, so `uses: actions/checkout@v7` ran whichever commit the action's
   owner had it pointing at when the job started. All 22 references across the
