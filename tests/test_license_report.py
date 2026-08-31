@@ -59,7 +59,12 @@ def test_no_package_falls_through_to_unknown():
     a package can never reach the notice with its terms unaccounted for.
     """
     package = notices.Package(
-        name="mystery", version="1.0", license_expression="", verdict="unknown", texts=(), in_image=True
+        name="mystery",
+        version="1.0",
+        license_expression="",
+        verdict="unknown",
+        texts=(),
+        in_image=True,
     )
     assert notices.enforce_policy([package])
 
