@@ -1,108 +1,119 @@
-"""Guards for the third-party license report generator.
+"""Guards for the third-party notice.
 
-The Docker image runs `scripts/gen_third_party_licenses.py` at build time, so a
-regression there surfaces only during the release build. These tests catch it in
-the normal suite instead.
+The image copies THIRD_PARTY_NOTICES.md rather than generating it, and CI
+regenerates it from the locked set to prove the committed copy is current. These
+tests cover what that check cannot: that the file says true things about its own
+scope, and that the classifier behind it puts licences in the right bucket.
+
+Deliberately no network and no resolved environment — they read the committed
+notice and call pure functions, so they run in the ordinary suite.
 """
 
 import importlib.util
 import sys
-from importlib import metadata
 from pathlib import Path
 
 import pytest
 
-_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "gen_third_party_licenses.py"
+ROOT = Path(__file__).resolve().parents[1]
+NOTICE = ROOT / "THIRD_PARTY_NOTICES.md"
 
 
-def _load_module():
-    spec = importlib.util.spec_from_file_location("gen_third_party_licenses", _SCRIPT)
+def _load():
+    spec = importlib.util.spec_from_file_location(
+        "third_party_notices", ROOT / "scripts" / "third_party_notices.py"
+    )
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
 
-gen = _load_module()
-
-
-def test_collect_excludes_the_project_itself():
-    names = {d.metadata.get("Name", "").lower().replace("_", "-") for d in gen.collect()}
-    assert "orionbelt-semantic-layer-mcp" not in names
-    # The declared runtime dependencies are always present in any test env.
-    assert {"httpx", "fastmcp", "pydantic-settings"} <= names
-
-
-def test_render_produces_a_summary_and_a_block_per_package():
-    dists = gen.collect()
-    report = gen.render(dists, "9.9.9")
-
-    assert report.startswith("OrionBelt Semantic Layer MCP — Third-Party Licenses")
-    assert "for orionbelt-semantic-layer-mcp 9.9.9" in report
-    assert f"SUMMARY ({len(dists)} packages)" in report
-
-    for dist in dists:
-        name = dist.metadata.get("Name")
-        assert f"{name} {dist.version}" in report, f"no block for {name}"
-
-
-def test_every_package_reports_a_license():
-    """No entry may fall through to a bare 'UNKNOWN'."""
-    report = gen.render(gen.collect(), "0.0.0")
-    summary = report.split("SUMMARY", 1)[1].split("\n\n", 2)[1]
-    unknown = [line.strip() for line in summary.splitlines() if line.endswith("UNKNOWN")]
-    assert not unknown, f"packages with no identifiable license: {unknown}"
+notices = _load()
 
 
 @pytest.mark.parametrize(
-    ("head", "expected"),
+    ("expression", "verdict"),
     [
-        ("                     Apache License\n              Version 2.0", "Apache-2.0"),
-        ("MIT License\n\nCopyright (c)", "MIT"),
-        ("Mozilla Public License Version 2.0", "MPL-2.0"),
-        ("Permission is hereby granted, free of charge, to any person", "MIT"),
-        ("GNU GENERAL PUBLIC LICENSE\nVersion 3", "GPL"),
-        ("some vendor's bespoke terms", ""),
+        ("MIT", "permissive"),
+        ("Apache-2.0", "permissive"),
+        ("BSD License", "permissive"),
+        ("Apache Software License", "permissive"),
+        ("Mozilla Public License 2.0 (MPL 2.0)", "weak-copyleft"),
+        ("GPL-3.0-only", "strong-copyleft"),
+        # A choice that includes the GPL reads as strong until somebody elects a
+        # branch in writing — the weaker option is not ours until then.
+        ("Public Domain OR BSD License OR GNU General Public License (GPL)", "strong-copyleft"),
+        ("", "unknown"),
+        ("Other/Proprietary License", "unknown"),
     ],
 )
-def test_detect_license_from_text(head, expected):
-    assert gen._detect_license([("LICENSE", head)]) == expected
+def test_classify_buckets_the_licences_it_is_given(expression, verdict):
+    assert notices.classify(expression) == verdict
 
 
-def test_render_records_the_resolution_target_when_given_one():
-    dists = gen.collect()
-    note = "x86_64-unknown-linux-gnu / CPython 3.14 (the Docker image target)"
-    assert f"Resolved for {note}" in gen.render(dists, "1.2.3", note)
-    # Omitted when not supplied, rather than printed empty.
-    assert "Resolved for" not in gen.render(dists, "1.2.3")
+def test_no_package_falls_through_to_unknown():
+    """The old suite asserted this of the report; here the gate enforces it.
 
-
-def test_render_scopes_itself_to_python_packages():
-    """The report must not read as if it covered the base image's OS packages."""
-    report = gen.render(gen.collect(), "1.2.3")
-    assert "SCOPE: Python packages only." in report
-    assert "/usr/share/doc/<package>/copyright" in report
-
-
-def test_collect_can_scan_an_arbitrary_install_tree(tmp_path):
-    """`--path` drives the cross-target report the shell wrapper generates."""
-    assert gen.collect([str(tmp_path)]) == []
-
-    dist_info = tmp_path / "widget-1.0.dist-info"
-    dist_info.mkdir()
-    (dist_info / "METADATA").write_text(
-        "Metadata-Version: 2.1\nName: widget\nVersion: 1.0\nLicense-Expression: MIT\n"
+    An unrecognised licence is not merely cosmetic — it fails enforce_policy, so
+    a package can never reach the notice with its terms unaccounted for.
+    """
+    package = notices.Package(
+        name="mystery",
+        version="1.0",
+        license_expression="",
+        verdict="unknown",
+        texts=(),
+        in_image=True,
     )
-    (dist_info / "RECORD").write_text("widget-1.0.dist-info/METADATA,,\n")
-
-    found = gen.collect([str(tmp_path)])
-    assert [d.metadata.get("Name") for d in found] == ["widget"]
-    assert "widget 1.0" in gen.render(found, "1.2.3")
+    assert notices.enforce_policy([package])
 
 
-def test_license_text_is_carried_for_a_known_package():
-    """httpx ships a BSD license file; it must reach the report verbatim."""
-    dist = metadata.distribution("httpx")
-    texts = gen._license_texts(dist)
-    assert texts, "httpx shipped no license text"
-    assert "Copyright" in "\n".join(text for _, text in texts)
+def test_acknowledgements_are_bound_to_the_licence_that_was_reviewed():
+    """Relicensing must re-enter the gate rather than inherit an old approval."""
+    entry = notices.ACKNOWLEDGED.get("certifi")
+    assert isinstance(entry, notices.Acknowledgement), "certifi must be reviewed, not Pending"
+    ok = notices.Package(
+        name="certifi",
+        version="1.0",
+        license_expression=entry.license_expression,
+        verdict="weak-copyleft",
+        texts=(),
+        in_image=True,
+    )
+    assert notices.enforce_policy([ok]) == []
+
+    relicensed = notices.Package(
+        name="certifi",
+        version="1.0",
+        license_expression="GPL-3.0-only",
+        verdict="strong-copyleft",
+        texts=(),
+        in_image=True,
+    )
+    failures = notices.enforce_policy([relicensed])
+    assert [kind for kind, _ in failures] == ["mismatch"]
+
+
+@pytest.mark.skipif(not NOTICE.exists(), reason="notice not generated in this tree")
+def test_the_notice_scopes_itself_to_python_packages():
+    """It must not read as though it covered the base image's OS packages."""
+    text = NOTICE.read_text(encoding="utf-8")
+    assert "uv.lock" in text
+    assert "Platform layer" in text, "the OS layer must be called out as separate"
+    assert "/usr/share/doc" in text, "Debian's own copyright files must be pointed at"
+
+
+@pytest.mark.skipif(not NOTICE.exists(), reason="notice not generated in this tree")
+def test_the_notice_excludes_the_project_itself():
+    """Our own package is covered by LICENSE, not by a third-party notice."""
+    text = NOTICE.read_text(encoding="utf-8")
+    assert f"### {notices.ROOT_PACKAGE} " not in text
+
+
+@pytest.mark.skipif(not NOTICE.exists(), reason="notice not generated in this tree")
+def test_a_known_licence_text_reaches_the_notice_verbatim():
+    """httpx ships a BSD licence file; it must arrive intact, not summarised."""
+    text = NOTICE.read_text(encoding="utf-8")
+    assert "### httpx " in text
+    assert "Redistributions of source code must retain the above copyright" in text
