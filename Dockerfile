@@ -15,12 +15,12 @@ RUN uv sync --no-dev --no-install-project --frozen
 COPY server.py ./
 RUN uv sync --no-dev --no-editable --frozen
 
-# Aggregate the third-party license texts the image redistributes. Generated
-# here rather than committed so it can never drift from uv.lock. Each package's
+# The third-party notice is committed and reviewed in the same diff as the
+# dependency change that altered it, and CI proves the committed copy matches the
+# locked set — so it is copied in rather than rebuilt here, which would only
+# produce a second answer able to disagree with the reviewed one. Each package's
 # own license file also stays in place under /app/.venv/lib/*/site-packages.
-COPY scripts/gen_third_party_licenses.py ./scripts/
-RUN /app/.venv/bin/python scripts/gen_third_party_licenses.py \
-        --output /app/LICENSES-THIRD-PARTY.txt
+COPY THIRD_PARTY_NOTICES.md /app/THIRD_PARTY_NOTICES.md
 
 # --- Runtime stage: minimal image ---
 FROM python:3.14-slim
@@ -36,7 +36,7 @@ RUN groupadd -r app && useradd -r -g app -d /app -s /sbin/nologin app
 # Copy installed virtualenv and source from builder
 COPY --from=builder --chown=app:app /app/.venv /app/.venv
 COPY --from=builder --chown=app:app /app/server.py ./
-COPY --from=builder --chown=app:app /app/LICENSES-THIRD-PARTY.txt ./
+COPY --from=builder --chown=app:app /app/THIRD_PARTY_NOTICES.md ./
 COPY --chown=app:app LICENSE ./
 ENV PATH="/app/.venv/bin:$PATH"
 

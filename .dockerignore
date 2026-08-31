@@ -33,6 +33,10 @@ docs/
 design/
 *.md
 !README.md
+# The notice is copied into the image, so it has to survive the *.md sweep
+# above. Excluding it does not fail the build loudly at the COPY -- it fails
+# with "not found", which reads like a missing file rather than an ignored one.
+!THIRD_PARTY_NOTICES.md
 
 # Source control
 .gitignore
