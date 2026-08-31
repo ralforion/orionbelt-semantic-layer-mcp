@@ -36,6 +36,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   `/usr/share/doc/<package>/copyright` and `/usr/share/common-licenses/`, and
   the aggregate file says so rather than implying it covers them.
 
+### Security
+
+- **Every GitHub Action is pinned to a commit SHA.** A tag like `v7` is a
+  movable label, so `uses: actions/checkout@v7` ran whichever commit the action's
+  owner had it pointing at when the job started. All 22 references across the
+  four workflows now name a 40-character SHA with a `# vX.Y.Z` comment giving the
+  exact patch release it was cut from.
+- **Workflows are read-only by default.** `docker-publish.yml` and
+  `pypi-publish.yml` gained `permissions: contents: read`; the only write scope
+  anywhere is `id-token: write`, on the single PyPI publish job that needs it for
+  OIDC. Docker Hub authenticates with `DOCKERHUB_TOKEN`, not the `GITHUB_TOKEN`,
+  so no job in the image pipeline needs write access to the repository.
+- `scripts/check-action-pins.sh`, which verifies that those pins actually match
+  the releases their comments claim. Pinning alone makes every reference an
+  unreadable hash, and nothing otherwise stops a pull request from swapping the
+  SHA for a commit taken from a fork while leaving `# v7.0.1` in place — forks
+  share object storage with their parent, so such a commit is reachable under the
+  real repository's URL and the diff looks like a routine bump. The script
+  requires a real SHA, an owner on its `ALLOWED_OWNERS` allowlist (`actions`,
+  `astral-sh`, `docker`, `peter-evans`, `pypa`), and a comment naming an exact
+  patch release, then resolves that tag upstream with `git ls-remote` — no token,
+  no rate limit — and fails when the commit it names is not the one pinned. It
+  fails closed: a lookup that could not be made at all is a failure, not a pass.
+  `--offline` skips the network and checks SHA and comment format only.
+- The check runs as the `pins` job in CI, and as the first step after checkout in
+  both tag-triggered publish workflows, so a release cannot ship artifacts built
+  by steps whose pins were never verified. It is placed before any other action
+  deliberately: an action that has already run could have rewritten the
+  workspace, this script included.
+
 ## [2.26.0] — 2026-08-25
 
 Tracks OrionBelt Semantic Layer API **v2.26.0**. The API's REST surface is

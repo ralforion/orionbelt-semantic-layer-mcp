@@ -303,6 +303,41 @@ uv run ruff format server.py tests/
 ./scripts/setup-hooks.sh
 ```
 
+### GitHub Actions pinning
+
+Every `uses:` in `.github/workflows` is pinned to a 40-character commit SHA with
+a comment naming the exact patch release it was cut from:
+
+```yaml
+- uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+```
+
+A tag such as `v7` is a movable label — the action's owner can repoint it at any
+time, so `@v7` runs whatever commit it happens to name when the job starts. A
+SHA cannot move. Every workflow also starts read-only (`permissions: contents:
+read`), with write scopes granted on the single job that needs them (only
+`id-token: write`, on the PyPI publish job).
+
+Pinning makes each reference unreadable, though, and nothing inherently keeps a
+SHA and the comment beside it in agreement: a pull request could swap the hash
+for one taken from a fork, leave `# v7.0.1` untouched, and the diff would look
+like a routine dependency bump. `scripts/check-action-pins.sh` closes that gap.
+It requires a real SHA, an owner on its `ALLOWED_OWNERS` allowlist, and a
+version comment naming an exact patch release, then resolves that tag upstream
+with `git ls-remote` and fails if the commit it names is not the one pinned.
+
+```bash
+./scripts/check-action-pins.sh            # every check, including upstream lookups
+./scripts/check-action-pins.sh --offline  # skip the network; SHA and comment format only
+```
+
+It runs as the `pins` job in CI, and again as the first step after checkout in
+both tag-triggered publish workflows, so no release ships artifacts built by
+steps whose pins were never verified. Bumping an action means updating the SHA
+and its comment together; add a new action's owner to `ALLOWED_OWNERS`
+deliberately, since a pin verifies against its own tag no matter who published
+it.
+
 ### Release Process
 
 The release script (`scripts/release.sh`) includes comprehensive pre-flight checks to prevent issues like the v2.8.2 formatting problem:
