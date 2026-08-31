@@ -37,6 +37,7 @@ jobs:
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
         with:
           enable-cache: true
+          prune-cache: true  # v9 defaults this to false; prune so the cache stays small
           cache-suffix: ${{ matrix.python-version }}  # distinct cache per matrix leg
 
       - name: Install Python ${{ matrix.python-version }}
@@ -57,6 +58,7 @@ jobs:
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
         with:
           enable-cache: true
+          prune-cache: true  # v9 defaults this to false; prune so the cache stays small
 
       - name: Install Python
         run: uv python install 3.12
@@ -84,6 +86,7 @@ jobs:
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
         with:
           enable-cache: true
+          prune-cache: true  # v9 defaults this to false; prune so the cache stays small
 
       - name: Resolve the shipping environment
         env:
