@@ -234,13 +234,15 @@ PHASE_DESIGN = "design"
 PHASE_RUN = "run"
 
 # Bucket 1 — always listed, in both phases: lifecycle/transition verbs plus the
-# self-contained one-shot batch (depends on no prior session state) and the
-# JSON-schema reference (needed to author execute_query payloads in either phase).
+# self-contained one-shot batch and validate_model (both take their model inline,
+# so they depend on no prior session state) and the JSON-schema reference (needed
+# to author execute_query payloads in either phase).
 _ALWAYS_TOOLS: frozenset[str] = frozenset(
     {
         "load_model",
         "remove_model",
         "run_batch",
+        "validate_model",
         "get_json_schema",
     }
 )
@@ -1818,6 +1820,96 @@ def _impl_load_model_from_osi(osi_yaml: str | None, dedup: bool) -> str:
     return _render_load_result(data, extra_lines=extra)
 
 
+def _impl_validate_model(
+    model: dict | str | None,
+    model_yaml: str | None,
+    extends: list[str] | str | None,
+    inherits: str | None,
+    online: bool,
+    dialect: str | None,
+) -> str:
+    """Validate a model without loading it, and render the report.
+
+    Routes to the session-scoped ``/validate`` in multi-model mode, because
+    ``inherits`` names a parent model that only exists inside a session, and to
+    the stateless shortcut in single-model mode, where there is no session to
+    scope to and ``inherits`` is meaningless.
+    """
+    if model is None and not model_yaml:
+        raise ToolError(
+            "Provide exactly one model source: 'model' (OBML JSON) or 'model_yaml' "
+            "(OBML YAML). The OBML reference is available as a separate tool."
+        )
+    if model is not None and model_yaml:
+        raise ToolError("Provide exactly one model source: 'model' or 'model_yaml', not both.")
+    if inherits and _single_model_mode:
+        raise ToolError(
+            "'inherits' names a parent model loaded in a session, which "
+            "single-model mode does not have. Omit it."
+        )
+
+    body: dict = {}
+    if model is not None:
+        if isinstance(model, str):
+            try:
+                model = json.loads(model)
+            except json.JSONDecodeError as exc:
+                raise ToolError(f"Invalid model JSON string: {exc}") from exc
+        body["model_json"] = model
+    else:
+        body["model_yaml"] = model_yaml
+    if extends:
+        if isinstance(extends, str):
+            try:
+                extends = json.loads(extends)
+            except json.JSONDecodeError as exc:
+                raise ToolError(f"Invalid extends JSON string: {exc}") from exc
+        body["extends"] = extends
+    if inherits:
+        body["inherits"] = inherits
+
+    # ``online`` and ``dialect`` are query parameters, not body fields. Send
+    # ``dialect`` only alongside ``online``: offline validation opens no
+    # connection, so naming one there would read as if it selected the SQL to
+    # generate, which this dialect does not do (it names a datasource to probe).
+    params: dict[str, Any] = {}
+    if online:
+        params["online"] = "true"
+        if dialect:
+            params["dialect"] = dialect
+
+    logger.info("validate_model called (online=%s)", online)
+    if _single_model_mode:
+        resp = _shortcut_request("POST", "/validate", json_body=body, params=params or None)
+    else:
+        resp = _session_request("POST", "/validate", json_body=body, params=params or None)
+    return _render_validate_result(_parse_json(resp), online=online)
+
+
+def _render_validate_result(data: dict, *, online: bool) -> str:
+    """Render a ``ValidateResponse`` as a report.
+
+    Errors and warnings share the ``StructuredWarning`` shape, so both go
+    through :func:`_format_warning` and a caller reading one reads the other.
+    """
+    errors = data.get("errors") or []
+    warnings = data.get("warnings") or []
+    scope = "offline + datasource" if online else "offline only"
+    if data.get("valid"):
+        header = f"Model is valid ({scope})."
+    else:
+        header = f"Model is INVALID ({scope}) — {len(errors)} error(s)."
+    lines = [header]
+    lines.extend(_format_warnings(errors, indent="  errors:   "))
+    lines.extend(_format_warnings(warnings, indent="  warnings: "))
+    if not online:
+        lines.append(
+            "\nStructure only — no table or column was checked against a "
+            "warehouse. Pass online=true to probe the datasource."
+        )
+    return "\n".join(lines)
+
+
 def _render_osi_validation(validation: dict, label: str) -> list[str]:
     """Render conversion validation errors/warnings into report lines."""
     parts: list[str] = []
@@ -2236,6 +2328,97 @@ def _register_model_tools() -> None:
             locale=locale,
             timezone=timezone,
         )
+
+    # ----- both modes: stateless validation of a model given inline -----
+
+    if _single_model_mode:
+
+        @mcp.tool
+        def validate_model(
+            model: dict | str | None = None,
+            model_yaml: str | None = None,
+            extends: list[str] | str | None = None,
+            online: bool = False,
+            dialect: str | None = None,
+        ) -> str:
+            """Validate an OBML model without loading it.
+
+            Reports every structural finding the loader would report — unknown
+            columns, unreachable joins, malformed expressions — but stores
+            nothing and returns no model_id. Use it to check a draft before
+            committing it with ``load_model``.
+
+            With ``online=true`` the model is additionally checked against the
+            live datasource: each data object is probed for its table and its
+            declared columns, and drift a purely structural check cannot see —
+            a dropped table, a renamed column, a column whose type no longer
+            matches its ``abstractType`` — is reported as an error
+            (``DATASOURCE_*`` codes). The probe costs one ``SELECT … LIMIT 0``
+            per data object: a plan, no scan.
+
+            Args:
+                model: OBML model as a JSON object (camelCase keys, joins inside
+                    each dataObject). Mutually exclusive with model_yaml.
+                model_yaml: OBML model as a YAML string. Mutually exclusive
+                    with model.
+                extends: Optional list of analytical-fragment YAML strings to
+                    merge into the model before validating.
+                online: When true, also probe the configured datasource for the
+                    tables and columns the model declares. Default false — offline
+                    validation opens no connection.
+                dialect: Datasource to probe when ``online`` is set; defaults to
+                    the server's ``DB_VENDOR``. This names a *connection to open*,
+                    not SQL to generate, so unlike the ``dialect`` on the query
+                    tools it does not fall back to the model's
+                    ``settings.defaultDialect``. Ignored when ``online`` is false.
+            """
+            return _impl_validate_model(model, model_yaml, extends, None, online, dialect)
+
+    else:
+
+        @mcp.tool
+        def validate_model(
+            model: dict | str | None = None,
+            model_yaml: str | None = None,
+            extends: list[str] | str | None = None,
+            inherits: str | None = None,
+            online: bool = False,
+            dialect: str | None = None,
+        ) -> str:
+            """Validate an OBML model without loading it.
+
+            Reports every structural finding the loader would report — unknown
+            columns, unreachable joins, malformed expressions — but stores
+            nothing and returns no model_id. Use it to check a draft before
+            committing it with ``load_model``.
+
+            With ``online=true`` the model is additionally checked against the
+            live datasource: each data object is probed for its table and its
+            declared columns, and drift a purely structural check cannot see —
+            a dropped table, a renamed column, a column whose type no longer
+            matches its ``abstractType`` — is reported as an error
+            (``DATASOURCE_*`` codes). The probe costs one ``SELECT … LIMIT 0``
+            per data object: a plan, no scan.
+
+            Args:
+                model: OBML model as a JSON object (camelCase keys, joins inside
+                    each dataObject). Mutually exclusive with model_yaml.
+                model_yaml: OBML model as a YAML string. Mutually exclusive
+                    with model.
+                extends: Optional list of analytical-fragment YAML strings to
+                    merge into the model before validating.
+                inherits: Optional model_id of an already-loaded parent model in
+                    the session whose data objects and joins the model inherits.
+                online: When true, also probe the configured datasource for the
+                    tables and columns the model declares. Default false — offline
+                    validation opens no connection.
+                dialect: Datasource to probe when ``online`` is set; defaults to
+                    the server's ``DB_VENDOR``. This names a *connection to open*,
+                    not SQL to generate, so unlike the ``dialect`` on the query
+                    tools it does not fall back to the model's
+                    ``settings.defaultDialect``. Ignored when ``online`` is false.
+            """
+            return _impl_validate_model(model, model_yaml, extends, inherits, online, dialect)
 
     # ----- single-model only: the pre-loaded model's source -----
 
@@ -2745,6 +2928,68 @@ _DEBUG_VALIDATION_TEXT = """\
   `ROUND({Amount}, 2) * 100` are different numbers).
   Fix: Rewrite it with portable catalog functions (`get_function_catalog()`),
   or move the construct into the source view.
+- `INVALID_MEASURE_EXPRESSION`: A measure's `expression` could not be parsed —
+  the same check `INVALID_COLUMN_EXPRESSION` makes on a computed column, applied
+  to a measure formula (added in OBSL 2.27; before that a measure expression was
+  only checked for the references inside it, so a body that could not parse was
+  carried to codegen and failed at the engine).  A malformed `{[...]}` reference
+  is reported separately by `MALFORMED_EXPRESSION_REF` and does not count against
+  the surrounding syntax.
+  Fix: Rewrite it with portable catalog functions (`get_function_catalog()`),
+  or move the construct into the source view.
+
+## Time Grain Errors
+
+- `TIME_GRAIN_ON_NON_TEMPORAL`: A dimension sets `timeGrain` over a column whose
+  `abstractType` is not `date`, `timestamp` or `timestamp_tz`. There is nothing
+  to truncate.
+  Fix: Point the dimension at a temporal column, or — for text encoding a date,
+  e.g. '2024-03' — define a computed column with `to_date()` and use that.
+- `RESULT_TYPE_LOSES_GRAIN`: A dimension declares a `resultType` too narrow to
+  hold the bucket its `timeGrain` makes (OBSL 2.27+). A temporal `resultType` is
+  emitted as a CAST that sits in the GROUP BY as well as the projection, so a
+  narrow one does not merely relabel the column — it *merges buckets and changes
+  the measures*, silently, because nothing about it is a SQL error. `hour` /
+  `minute` / `second` need `timestamp` (a `date` drops the time of day), and
+  neither `time` nor `time_tz` ever holds a grain, since a grain carries a date.
+  Raised at load, and again at query time for a `dimension:grain` override the
+  model never saw.  Declaring *wider* than the grain is allowed and harmless — a
+  month grain as `timestamp` is a date at midnight. A non-temporal `resultType`
+  is not cast at all and holds anything.
+  Fix: Widen `resultType` to `timestamp` (or drop it), or coarsen `timeGrain`.
+
+## Datasource Errors (online validation only)
+
+Raised only by `validate_model(online=true)`, which probes the configured
+warehouse for the tables and columns the model declares. Offline validation
+resolves a model against *itself* and never sees these — a model can be
+structurally perfect and still name a table that was dropped.
+
+- `DATASOURCE_TABLE_MISSING`: A data object's table is not there under the
+  `database` / `schema` / `code` the model declares.
+  Fix: Correct the physical binding, or restore/rename the table.
+- `DATASOURCE_COLUMN_MISSING`: The table exists but a declared column `code` is
+  not addressable on it.
+  Fix: Correct the column's `code`, or restore the column.
+- `DATASOURCE_COLUMN_CASE`: The column exists under a different identifier case
+  than the model spells it. The probe quotes identifiers exactly as codegen
+  does, so the engine — not a table of folding rules — settles this.
+  Fix: Spell the column's `code` as the engine stores it.
+- `DATASOURCE_TYPE_MISMATCH`: A column's physical type is not in the family its
+  `abstractType` declares. The comparison is deliberately coarse (number /
+  datetime / string / boolean / binary): `int32` widening to `int64`, or a
+  `timestamp` stored as `TIMESTAMP_NTZ`, is not drift.
+  Fix: Correct `abstractType`, or the column.
+- `DATASOURCE_UNAVAILABLE`: No datasource is configured or reachable, so nothing
+  could be probed.
+  Fix: Configure the connection, or validate offline (`online=false`).
+- `DATASOURCE_UNSUPPORTED_DIALECT`: The `dialect` named for the probe has no
+  driver. Note this names a *connection to open*, defaulting to the server's
+  `DB_VENDOR` — not the model's `settings.defaultDialect`.
+  Fix: Pass a dialect the deployment is configured for; see `list_dialects()`.
+- `DATASOURCE_PROBE_FAILED`: The probe query itself errored for a reason that is
+  neither a missing table nor a missing column (permissions, a timeout).
+  Fix: Read the message — it carries the engine's own error.
 
 ## Reference Errors
 
@@ -2922,6 +3167,14 @@ result, and `load_model` reports the count.
   own `FROM` does not provide, so the statement parses but the database will
   reject it. This is a compiler defect rather than a model one.
   Fix: Nothing to change in the model — report the query upstream.
+- `DECLARED_TYPE_NOT_APPLIED`: A result column could not be reconciled to the
+  type the model declares for it, so it is returned as whatever the engine sent
+  (OBSL 2.27+). Reconciliation is what makes a `boolean` measure over an
+  unsafe source report `type=boolean` instead of rows of 0/1/7 under a
+  numeric label; where it cannot be applied, the warning says so rather than
+  letting the label and the values disagree in silence.
+  Fix: Usually nothing — read the values as the engine's own type. If the
+  declared type matters downstream, cast in the measure expression.
 
 ## Debugging Steps
 

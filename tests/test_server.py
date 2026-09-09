@@ -3466,3 +3466,226 @@ def test_stateless_http_accepted_by_fastmcp_http_app():
     """The flag we pass through is a real FastMCP http_app/run parameter."""
     params = inspect.signature(server.mcp.run_http_async).parameters
     assert "stateless_http" in params
+
+
+# ---------------------------------------------------------------------------
+# validate_model — offline and online (API 2.27)
+# ---------------------------------------------------------------------------
+
+
+def _mock_validate(rsps: respx.MockRouter, path: str, body: dict):
+    """Mock a /validate route and hand back the respx route for assertions."""
+    return rsps.post(path).mock(return_value=httpx.Response(200, json=body))
+
+
+def test_validate_model_offline_multi_model(mock_api: respx.MockRouter):
+    """Offline validation goes to the session route and sends no query params."""
+    _mock_create_session(mock_api)
+    route = _mock_validate(
+        mock_api,
+        "/v1/sessions/test-session-1/validate",
+        {"valid": True, "errors": [], "warnings": []},
+    )
+
+    out = server._impl_validate_model(
+        {"version": "1.0"}, None, None, None, online=False, dialect=None
+    )
+
+    assert route.called
+    request = route.calls.last.request
+    assert request.url.params == httpx.QueryParams()
+    assert json.loads(request.content) == {"model_json": {"version": "1.0"}}
+    assert "Model is valid (offline only)." in out
+    assert "Pass online=true to probe the datasource." in out
+
+
+def test_validate_model_online_sends_params_and_reports_drift(mock_api: respx.MockRouter):
+    """online=true reaches the API as query params; DATASOURCE_* errors render."""
+    _mock_create_session(mock_api)
+    route = _mock_validate(
+        mock_api,
+        "/v1/sessions/test-session-1/validate",
+        {
+            "valid": False,
+            "errors": [
+                {
+                    "code": "DATASOURCE_TABLE_MISSING",
+                    "message": "Table 'WAREHOUSE.PUBLIC.sales' does not exist",
+                    "path": "dataObjects.Sales",
+                    "severity": "error",
+                    "hint": "Correct the physical binding, or restore the table.",
+                }
+            ],
+            "warnings": [],
+        },
+    )
+
+    out = server._impl_validate_model(
+        None, "version: 1.0\n", None, None, online=True, dialect="duckdb"
+    )
+
+    params = route.calls.last.request.url.params
+    assert params["online"] == "true"
+    assert params["dialect"] == "duckdb"
+    assert json.loads(route.calls.last.request.content) == {"model_yaml": "version: 1.0\n"}
+    assert "Model is INVALID (offline + datasource) — 1 error(s)." in out
+    assert "[error:DATASOURCE_TABLE_MISSING]" in out
+    assert "(at dataObjects.Sales)" in out
+    assert "hint: Correct the physical binding" in out
+    # The offline-only footer belongs to the offline path alone.
+    assert "Pass online=true" not in out
+
+
+def test_validate_model_dialect_ignored_when_offline(mock_api: respx.MockRouter):
+    """A dialect without online names a connection nothing will open — not sent."""
+    _mock_create_session(mock_api)
+    route = _mock_validate(
+        mock_api,
+        "/v1/sessions/test-session-1/validate",
+        {"valid": True, "errors": [], "warnings": []},
+    )
+
+    server._impl_validate_model(
+        {"version": "1.0"}, None, None, None, online=False, dialect="snowflake"
+    )
+
+    assert "dialect" not in route.calls.last.request.url.params
+
+
+def test_validate_model_single_model_uses_shortcut(mock_api: respx.MockRouter):
+    """Single-model mode has no session to scope to — the stateless route is used."""
+    server._single_model_mode = True
+    route = _mock_validate(mock_api, "/v1/validate", {"valid": True, "errors": [], "warnings": []})
+
+    out = server._impl_validate_model(
+        {"version": "1.0"}, None, None, None, online=True, dialect=None
+    )
+
+    assert route.called
+    assert route.calls.last.request.url.params["online"] == "true"
+    assert "Model is valid (offline + datasource)." in out
+
+
+def test_validate_model_single_model_refuses_inherits():
+    """inherits names a session-loaded parent, which single-model mode has none of."""
+    server._single_model_mode = True
+    with pytest.raises(_ToolError, match="single-model mode does not have"):
+        server._impl_validate_model(
+            {"version": "1.0"}, None, None, "m001", online=False, dialect=None
+        )
+
+
+def test_validate_model_passes_extends_and_inherits(mock_api: respx.MockRouter):
+    """extends/inherits reach the API as body fields, JSON strings decoded."""
+    _mock_create_session(mock_api)
+    route = _mock_validate(
+        mock_api,
+        "/v1/sessions/test-session-1/validate",
+        {"valid": True, "errors": [], "warnings": []},
+    )
+
+    server._impl_validate_model(
+        {"version": "1.0"},
+        None,
+        json.dumps(["dimensions: []"]),
+        "m001",
+        online=False,
+        dialect=None,
+    )
+
+    body = json.loads(route.calls.last.request.content)
+    assert body["extends"] == ["dimensions: []"]
+    assert body["inherits"] == "m001"
+
+
+def test_validate_model_requires_exactly_one_source():
+    """Neither source, or both, is refused before any request is made."""
+    with pytest.raises(_ToolError, match="Provide exactly one model source"):
+        server._impl_validate_model(None, None, None, None, online=False, dialect=None)
+    with pytest.raises(_ToolError, match="not both"):
+        server._impl_validate_model(
+            {"version": "1.0"}, "version: 1.0\n", None, None, online=False, dialect=None
+        )
+
+
+def test_validate_model_renders_warnings(mock_api: respx.MockRouter):
+    """A valid model still reports its warnings, in the shared structured shape."""
+    _mock_create_session(mock_api)
+    _mock_validate(
+        mock_api,
+        "/v1/sessions/test-session-1/validate",
+        {
+            "valid": True,
+            "errors": [],
+            "warnings": [
+                {
+                    "code": "NON_PORTABLE_FUNCTION",
+                    "message": "Function 'DATEDIFF' is not in the portable catalog",
+                    "severity": "warning",
+                }
+            ],
+        },
+    )
+
+    out = server._impl_validate_model(
+        {"version": "1.0"}, None, None, None, online=False, dialect=None
+    )
+
+    assert "Model is valid (offline only)." in out
+    assert "[warning:NON_PORTABLE_FUNCTION]" in out
+
+
+def test_validate_model_is_registered_in_both_modes():
+    """The tool exists in each mode, and only multi-model carries `inherits`."""
+    for single in (True, False):
+        server._single_model_mode = single
+        server._register_model_tools()
+        tools = {t.name for t in asyncio.run(server.mcp._list_tools())}
+        assert "validate_model" in tools
+
+    server._single_model_mode = True
+    server._register_model_tools()
+    single_tool = asyncio.run(server.mcp.get_tool("validate_model"))
+    assert "inherits" not in single_tool.parameters["properties"]
+
+    server._single_model_mode = False
+    server._register_model_tools()
+    multi_tool = asyncio.run(server.mcp.get_tool("validate_model"))
+    assert "inherits" in multi_tool.parameters["properties"]
+
+
+def test_validate_model_is_visible_in_both_phases():
+    """validate_model takes its model inline, so no phase hides it."""
+    assert "validate_model" in server._ALWAYS_TOOLS
+    mw = server.PhaseMiddleware()
+
+    async def call_next(_ctx):
+        return _all_bucket_sample() + [_fake_tool("validate_model")]
+
+    server._single_model_mode = False
+    server._loaded_model_ids.clear()
+    design = {t.name for t in _run(mw.on_list_tools(object(), call_next))}
+    server._mark_model_loaded("m001")
+    run = {t.name for t in _run(mw.on_list_tools(object(), call_next))}
+
+    assert "validate_model" in design
+    assert "validate_model" in run
+
+
+def test_debug_validation_documents_new_2_27_codes():
+    """The prompt carries every code the 2.27 API can now return."""
+    text = server._DEBUG_VALIDATION_TEXT
+    for code in (
+        "DATASOURCE_TABLE_MISSING",
+        "DATASOURCE_COLUMN_MISSING",
+        "DATASOURCE_COLUMN_CASE",
+        "DATASOURCE_TYPE_MISMATCH",
+        "DATASOURCE_UNAVAILABLE",
+        "DATASOURCE_UNSUPPORTED_DIALECT",
+        "DATASOURCE_PROBE_FAILED",
+        "RESULT_TYPE_LOSES_GRAIN",
+        "TIME_GRAIN_ON_NON_TEMPORAL",
+        "INVALID_MEASURE_EXPRESSION",
+        "DECLARED_TYPE_NOT_APPLIED",
+    ):
+        assert f"`{code}`" in text, f"{code} is missing from debug_validation"
