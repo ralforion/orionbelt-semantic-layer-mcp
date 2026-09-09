@@ -1,6 +1,9 @@
 name: MCP Server Quality Audit
 
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:  # manual re-run, e.g. after prod is deployed to a matching minor
 
 permissions:
   contents: read
