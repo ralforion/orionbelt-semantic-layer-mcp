@@ -4,6 +4,95 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.27.0] — 2026-09-09
+
+Tracks OrionBelt Semantic Layer API **v2.27.x**. The compatibility gate compares
+`major.minor`, so this release is required to run against a 2.27 API even though
+most of what 2.27 changed sits below the REST surface: the Flight executor taking
+the driver's Arrow schema, `ob-dremio` moving to ADBC Flight SQL, and the result
+cache storing one representation for every surface are all invisible here.
+
+Two things in 2.27 do reach the wrapper, and both are in this release.
+
+### Added
+
+- **`validate_model` — validate a model without loading it, offline or against
+  the live warehouse.** The API grew `online` / `dialect` query parameters on
+  `POST /v1/validate` and `POST /v1/sessions/{id}/validate`, and this server had
+  no validate tool at all: the only way to find out whether a draft was sound
+  was to `load_model` it and read the errors off a load that either stored a
+  model or failed. The new tool stores nothing and returns no `model_id`.
+
+  With `online=true` the API probes the configured datasource for every table
+  and column the model declares. That closes the one gap offline validation
+  cannot reach: the validator resolves a model against *itself*, so a data
+  object's `database` / `schema` / `code` and a column's `code` are opaque
+  strings all the way to codegen — a model can be structurally perfect and still
+  name a table that was dropped or a column that was renamed, and the first
+  thing to say so is the warehouse, at query time, to whoever ran the query
+  rather than to whoever wrote the model. The probe is one `SELECT … LIMIT 0`
+  per data object: a plan, no scan.
+
+  `dialect` here names a **connection to open**, not SQL to generate. Unlike the
+  `dialect` on the query tools it does not fall back to the model's
+  `settings.defaultDialect` — it defaults to the server's `DB_VENDOR`, because a
+  model declaring `defaultDialect: snowflake` on a DuckDB deployment would
+  otherwise be probed by opening a Snowflake connection that does not exist and
+  report every data object unavailable. It is sent only alongside `online`, so
+  an offline call cannot imply a connection nothing will open.
+
+  Registered in **bucket 1** (listed in both phases), on the same footing as
+  `run_batch`: it takes its model inline and depends on no prior session state.
+  Multi-model mode routes to the session-scoped `/validate`, which forwards
+  `extends` and `inherits` to the validator; single-model mode routes to the
+  stateless shortcut, which reads **neither** off the request body, so the
+  single-model signature offers neither and the shared implementation refuses
+  both. Sending them would have come back `valid: true` for the base model
+  while the caller believed the fragments were checked — a silent partial
+  validation, which is worse than no validation. (The asymmetry is the API's:
+  `shortcut_validate` calls `store.validate` without `extends_yaml` /
+  `inherits_model_id`. Worth fixing upstream; until it is, this wrapper does
+  not promise a merge the route cannot do.)
+
+### Changed
+
+- **Validation findings render their `suggestions` and `context`.** The
+  endpoints answer with `ErrorDetail`, which carries both, and the shared
+  formatter rendered neither — so `UNKNOWN_COLUMN` dropped the candidate names
+  the API had already matched against, and the `DATASOURCE_*` family dropped
+  the table and column it named. Both are emitted only when present, so a
+  `StructuredWarning` payload (which has no `suggestions` at all) renders
+  exactly as before.
+
+- **The startup banner counts the registry instead of a constant.** It logged a
+  hardcoded 16 / 20 that no longer matched the registrations — the kind of
+  number only a human keeps in step, which is to say the kind that goes stale.
+  It is now read off the registered tools, and returns `None` (logged as `?`)
+  rather than failing a startup over a banner line. A test asserts the derived
+  count against the live surface, and a second asserts the absolute 17 / 21 /
+  22 / 16 the README claims, each mode in a freshly imported module because the
+  registry accumulates across registrations within one process.
+
+- **The `debug_validation` prompt carries the codes 2.27 can now return.** Eleven
+  additions, in three groups:
+
+  - the `DATASOURCE_*` family (`TABLE_MISSING`, `COLUMN_MISSING`, `COLUMN_CASE`,
+    `TYPE_MISMATCH`, `UNAVAILABLE`, `UNSUPPORTED_DIALECT`, `PROBE_FAILED`),
+    which only `validate_model(online=true)` raises;
+  - `RESULT_TYPE_LOSES_GRAIN`, new in 2.27, and `TIME_GRAIN_ON_NON_TEMPORAL`,
+    which predates it and was never documented here. The first is the one worth
+    reading: a temporal `resultType` is emitted as a CAST that sits in the GROUP
+    BY as well as the projection, so declaring one narrower than the dimension's
+    `timeGrain` does not relabel the column — it merges buckets and changes the
+    measures, silently, because nothing about it is a SQL error;
+  - `INVALID_MEASURE_EXPRESSION`, which extends to a measure formula the parse
+    check a computed column already got, and the `DECLARED_TYPE_NOT_APPLIED`
+    warning, raised when a result column cannot be reconciled to the type the
+    model declares for it and is returned as the engine's own type instead.
+
+- Tool counts: **17** in single-model mode, **21** in multi-model, 22 distinct
+  across both (overlapping in 16).
+
 ## [2.26.1] — 2026-08-31
 
 A patch release that ships no server change: `server.py` is byte-identical to
