@@ -145,7 +145,7 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 | ------------------------------- | ---------------------------------------------------------------- |
 | `get_obml_reference()`          | Returns the full OBML format specification                       |
 | `load_model(model? \| osi_yaml?, dedup=True)` | Parse, validate, and store a model (returns health + model_load). Pass `model` (OBML JSON) **or** `osi_yaml` (OSI YAML, converted to OBML server-side) |
-| `validate_model(model? \| model_yaml?, online=False, dialect?)` | Validate a model **without loading it**. `online=True` additionally probes the configured datasource for every declared table and column, reporting drift a structural check cannot see (`DATASOURCE_*`) |
+| `validate_model(model? \| model_yaml?, extends?, inherits?, online=False, dialect?)` | Validate a model **without loading it**. `online=True` additionally probes the configured datasource for every declared table and column, reporting drift a structural check cannot see (`DATASOURCE_*`). `extends` / `inherits` are multi-model only — the stateless route single-model mode uses ignores both, so they are refused there rather than silently dropped |
 | `describe_model(model_id)`      | Inspect data objects, dimensions, measures, metrics              |
 | `remove_model(model_id)`        | Remove a model from the current session                          |
 | `list_models()`                 | List all models loaded in the current session                    |

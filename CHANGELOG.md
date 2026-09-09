@@ -43,11 +43,35 @@ Two things in 2.27 do reach the wrapper, and both are in this release.
 
   Registered in **bucket 1** (listed in both phases), on the same footing as
   `run_batch`: it takes its model inline and depends on no prior session state.
-  Multi-model mode routes to the session-scoped `/validate`, because `inherits`
-  names a parent model that only exists inside a session; single-model mode
-  routes to the stateless shortcut and does not accept `inherits` at all.
+  Multi-model mode routes to the session-scoped `/validate`, which forwards
+  `extends` and `inherits` to the validator; single-model mode routes to the
+  stateless shortcut, which reads **neither** off the request body, so the
+  single-model signature offers neither and the shared implementation refuses
+  both. Sending them would have come back `valid: true` for the base model
+  while the caller believed the fragments were checked — a silent partial
+  validation, which is worse than no validation. (The asymmetry is the API's:
+  `shortcut_validate` calls `store.validate` without `extends_yaml` /
+  `inherits_model_id`. Worth fixing upstream; until it is, this wrapper does
+  not promise a merge the route cannot do.)
 
 ### Changed
+
+- **Validation findings render their `suggestions` and `context`.** The
+  endpoints answer with `ErrorDetail`, which carries both, and the shared
+  formatter rendered neither — so `UNKNOWN_COLUMN` dropped the candidate names
+  the API had already matched against, and the `DATASOURCE_*` family dropped
+  the table and column it named. Both are emitted only when present, so a
+  `StructuredWarning` payload (which has no `suggestions` at all) renders
+  exactly as before.
+
+- **The startup banner counts the registry instead of a constant.** It logged a
+  hardcoded 16 / 20 that no longer matched the registrations — the kind of
+  number only a human keeps in step, which is to say the kind that goes stale.
+  It is now read off the registered tools, and returns `None` (logged as `?`)
+  rather than failing a startup over a banner line. A test asserts the derived
+  count against the live surface, and a second asserts the absolute 17 / 21 /
+  22 / 16 the README claims, each mode in a freshly imported module because the
+  registry accumulates across registrations within one process.
 
 - **The `debug_validation` prompt carries the codes 2.27 can now return.** Eleven
   additions, in three groups:

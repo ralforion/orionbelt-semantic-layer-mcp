@@ -21,6 +21,7 @@ Entrypoint for Prefect Horizon: ``server.py:mcp``
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import importlib.metadata
 import json
@@ -956,6 +957,15 @@ def _format_warning(w: Any) -> str:
     """Render a single warning. Accepts the structured ``StructuredWarning``
     shape introduced in API v2.2 (object with ``code``/``severity``/
     ``message``/``path``/``hint``) and the legacy plain-string shape.
+
+    Also renders ``suggestions`` and ``context``, which the validation
+    endpoints' ``ErrorDetail`` carries and ``StructuredWarning`` does not. They
+    are the actionable half of several codes — ``UNKNOWN_COLUMN`` puts the
+    candidate names it matched against in ``suggestions``, and the
+    ``DATASOURCE_*`` family names the offending table/column in ``context`` —
+    so dropping them left an agent to guess at what the API had already worked
+    out. Both are emitted only when present, so every existing call site is
+    unchanged for a payload that carries neither.
     """
     if isinstance(w, str):
         return w
@@ -973,8 +983,15 @@ def _format_warning(w: Any) -> str:
         parts.append(message)
     if w.get("path"):
         parts.append(f"(at {w['path']})")
+    context = w.get("context")
+    if isinstance(context, dict) and context:
+        rendered = ", ".join(f"{k}={v}" for k, v in context.items())
+        parts.append(f"[{rendered}]")
     if w.get("hint"):
         parts.append(f"— hint: {w['hint']}")
+    suggestions = w.get("suggestions")
+    if suggestions:
+        parts.append(f"— did you mean: {', '.join(str(x) for x in suggestions)}?")
     return " ".join(parts)
 
 
@@ -1842,10 +1859,20 @@ def _impl_validate_model(
         )
     if model is not None and model_yaml:
         raise ToolError("Provide exactly one model source: 'model' or 'model_yaml', not both.")
-    if inherits and _single_model_mode:
+    # The stateless shortcut single-model mode routes to reads neither
+    # ``extends`` nor ``inherits`` off the request body — it validates the
+    # document alone. Sending either would answer about the *unmerged* model
+    # while the caller believes the fragments were checked, so refuse both here
+    # rather than let a silent partial validation come back `valid: true`.
+    if _single_model_mode and (extends or inherits):
+        unsupported = " and ".join(
+            n for n, v in (("'extends'", extends), ("'inherits'", inherits)) if v
+        )
         raise ToolError(
-            "'inherits' names a parent model loaded in a session, which "
-            "single-model mode does not have. Omit it."
+            f"{unsupported} cannot be used in single-model mode: the stateless "
+            "/validate route ignores both, so the fragments would go unchecked "
+            "while the result reported on the base model alone. Validate the "
+            "already-merged document instead."
         )
 
     body: dict = {}
@@ -2337,7 +2364,6 @@ def _register_model_tools() -> None:
         def validate_model(
             model: dict | str | None = None,
             model_yaml: str | None = None,
-            extends: list[str] | str | None = None,
             online: bool = False,
             dialect: str | None = None,
         ) -> str:
@@ -2361,8 +2387,6 @@ def _register_model_tools() -> None:
                     each dataObject). Mutually exclusive with model_yaml.
                 model_yaml: OBML model as a YAML string. Mutually exclusive
                     with model.
-                extends: Optional list of analytical-fragment YAML strings to
-                    merge into the model before validating.
                 online: When true, also probe the configured datasource for the
                     tables and columns the model declares. Default false — offline
                     validation opens no connection.
@@ -2371,8 +2395,12 @@ def _register_model_tools() -> None:
                     not SQL to generate, so unlike the ``dialect`` on the query
                     tools it does not fall back to the model's
                     ``settings.defaultDialect``. Ignored when ``online`` is false.
+
+            ``extends`` / ``inherits`` are absent by design: the stateless
+            /validate route this mode uses ignores both, so offering them would
+            promise a merge that never happens. Validate the merged document.
             """
-            return _impl_validate_model(model, model_yaml, extends, None, online, dialect)
+            return _impl_validate_model(model, model_yaml, None, None, online, dialect)
 
     else:
 
@@ -3259,6 +3287,21 @@ def _check_api_health() -> None:
             raise SystemExit(1)
 
 
+def _registered_tool_count() -> int | None:
+    """How many tools are registered, for the startup banner.
+
+    Derived rather than declared: the count is cosmetic, and a constant that
+    only a human keeps in step with the registrations is a constant that goes
+    stale. ``None`` when it cannot be read — a banner line is not worth failing
+    a startup over.
+    """
+    try:
+        return len(asyncio.run(mcp._list_tools()))
+    except Exception:  # noqa: BLE001 - cosmetic; never blocks startup
+        logger.debug("Could not count registered tools for the startup banner", exc_info=True)
+        return None
+
+
 def _detect_api_mode() -> tuple[bool, bool]:
     """Query the API to detect single-model mode and query execution support.
 
@@ -3341,16 +3384,13 @@ def main() -> None:
             except httpx.HTTPError as exc:
                 logger.error("Cannot reach API to validate pre-loaded model: %s", exc)
                 raise SystemExit(1) from None
-            # Registered count — execute_query is always registered and gated at
-            # list time by capability, so this counts everything registered. The
-            # *visible* surface is smaller when query_execute is off (−1) or in
-            # the design phase (run-only verbs hidden); single-model mode is
-            # always run-time. 15 shared tools + get_model.
-            tool_count = 16
-        else:
-            # 15 shared tools + 5 multi-model lifecycle tools (load_model,
-            # remove_model, list_models, run_batch, export_model_to_osi).
-            tool_count = 20
+        # Counted, never constant: the two modes register different sets and
+        # both have drifted from a hand-maintained number before. execute_query
+        # is always registered and gated at list time by capability, so this
+        # counts everything registered — the *visible* surface is smaller when
+        # query_execute is off (−1) or in the design phase (run-only verbs
+        # hidden); single-model mode is always run-time.
+        tool_count = _registered_tool_count()
         mode_label = "single-model" if _single_model_mode else "multi-model"
         stateless = False
     else:
@@ -3379,7 +3419,8 @@ def main() -> None:
     logger.info("  Timeout:    %ss", settings.api_timeout)
     logger.info("")
     if settings.mcp_transport == "stdio":
-        logger.info("Registered %d MCP tools (%s mode)", tool_count, mode_label)
+        counted = "?" if tool_count is None else str(tool_count)
+        logger.info("Registered %s MCP tools (%s mode)", counted, mode_label)
     else:
         logger.info("Tool registration: %s", mode_label)
     logger.info("")
