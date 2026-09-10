@@ -28,8 +28,8 @@ single-model mode, 21 in multi-model, 22 distinct.
   reads as protected and is not is worse than one that is visibly neither.
 
   The HTTP/SSE transport terminates no TLS and authenticates no caller — it
-  expects an ingress to do both, which on Cloud Run is automatic. Exposed
-  directly, anything that reaches the port can call every registered tool,
+  expects an ingress to do both. Exposed directly, anything that reaches the
+  port can call every registered tool,
   including `execute_query` where the capability is enabled, spending this
   server's own `API_KEY` against the API over a channel readable in transit.
   The credential itself never crosses that hop; the access it buys does.
@@ -41,11 +41,21 @@ single-model mode, 21 in multi-model, 22 distinct.
   that would need resolving to classify counts as exposed: a warning that did
   not need saying costs a line, one that did and was not said costs the port.
 
+  Cloud Run gets an informational note rather than silence, because it does only
+  half the job. TLS is automatic there — the service URL is HTTPS and plain HTTP
+  is forwarded to the container, so the mandatory `0.0.0.0` bind says nothing
+  about exposure — but caller authentication is a deploy-time IAM choice this
+  process cannot read, and `--allow-unauthenticated` leaves the service reachable
+  by anyone who learns the URL. Suppressing the alarm and saying nothing else
+  would let silence read as proof of protection, which is the failure the warning
+  exists to prevent. The note names the half that is still the operator's.
+
   `stdio` is untouched and warns about nothing — it is pipes to a child process,
   with no socket to expose.
 
-- **`MCP_BEHIND_PROXY`** (default `false`), acknowledging a TLS-terminating,
-  access-controlling ingress the server has no way to detect. It silences the
+- **`MCP_BEHIND_PROXY`** (default `false`), acknowledging an ingress the server
+  has no way to detect that terminates TLS *and* authenticates callers — both,
+  not either. It silences the
   warning and does nothing else: it grants no capability and changes no
   behavior, so setting it wrongly misleads the reader of the log rather than the
   server.

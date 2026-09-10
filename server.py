@@ -3369,7 +3369,7 @@ def _is_loopback_bind(host: str) -> bool:
         return False
 
 
-def _warn_if_exposed_without_tls() -> None:
+def _warn_if_transport_exposed() -> None:
     """Warn when the HTTP transport is reachable off-box with nothing in front.
 
     Unlike stdio (pipes to a child process, no socket at all), the HTTP/SSE
@@ -3379,11 +3379,18 @@ def _warn_if_exposed_without_tls() -> None:
     reads the queries and results in transit. The credential itself never
     crosses this hop; the access it buys does.
 
-    Both jobs belong to an ingress, which is the intended HTTP deployment —
-    Cloud Run terminates TLS at its front end — so this is scoped to actual
-    evidence of exposure rather than firing on every HTTP start and teaching
-    operators to scroll past it. ``MCP_BEHIND_PROXY=true`` acknowledges a proxy
-    we have no way to detect.
+    Both jobs belong to an ingress, so this is scoped to actual evidence of
+    exposure rather than firing on every HTTP start and teaching operators to
+    scroll past it. ``MCP_BEHIND_PROXY=true`` acknowledges an ingress we have no
+    way to detect.
+
+    Cloud Run is the one deployment we *can* detect, and it splits the two jobs:
+    TLS is automatic (the service URL is HTTPS and plain HTTP is forwarded to
+    the container, so the mandatory 0.0.0.0 bind says nothing about exposure),
+    while caller authentication is a deploy-time IAM choice this process cannot
+    read. Suppressing the alarm there and saying nothing else would let silence
+    read as proof of protection, so it gets its own note about the half that is
+    still the operator's.
 
     The counterpart on the API's own listeners is its 2.28.0 warning for Flight
     SQL authenticating over plaintext gRPC. Those are raw protocol sockets that
@@ -3394,9 +3401,18 @@ def _warn_if_exposed_without_tls() -> None:
         return
     if settings.mcp_behind_proxy or _is_loopback_bind(settings.mcp_server_host):
         return
-    # Cloud Run always serves https on the service URL and forwards plain HTTP
-    # to the container, so the bind has to be 0.0.0.0 and says nothing.
     if os.environ.get("K_SERVICE"):
+        logger.info(
+            "Cloud Run terminates TLS at its front end, so the %s bind on port "
+            "%s is expected and traffic to the service URL is encrypted. Caller "
+            "authentication is a separate, deploy-time choice this server cannot "
+            "read: deployed with --allow-unauthenticated, anyone who learns the "
+            "URL can call every tool with this server's API credential. Confirm "
+            "the service requires an IAM invoker, or front it with something "
+            "that authenticates.",
+            settings.mcp_server_host,
+            settings.effective_port,
+        )
         return
     logger.warning(
         "The %s transport is bound to %s with no TLS and no caller "
@@ -3480,7 +3496,7 @@ def main() -> None:
     logger.info("  Log Format: %s", settings.log_format)
     logger.info("  Timeout:    %ss", settings.api_timeout)
     logger.info("")
-    _warn_if_exposed_without_tls()
+    _warn_if_transport_exposed()
     if settings.mcp_transport == "stdio":
         counted = "?" if tool_count is None else str(tool_count)
         logger.info("Registered %s MCP tools (%s mode)", counted, mode_label)

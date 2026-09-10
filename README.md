@@ -108,9 +108,14 @@ instance, unchanged by this flag.
 #### Transport security
 
 The HTTP/SSE transport terminates **no TLS** and authenticates **no caller** —
-it expects an ingress in front that does both. On Cloud Run, the intended
-deployment, that is automatic: the service URL is served over HTTPS and plain
-HTTP is forwarded to the container.
+it expects an ingress in front that does both. These are two separate jobs, and
+no platform does both for you by default.
+
+On Cloud Run, the intended deployment, **TLS is automatic**: the service URL is
+served over HTTPS and plain HTTP is forwarded to the container. **Caller
+authentication is not.** It is a deploy-time IAM choice — a service deployed
+with `--allow-unauthenticated` is reachable by anyone who learns its URL, over
+HTTPS, with no credential required. Encrypted is not the same as restricted.
 
 This matters because the two hops have different answers:
 
@@ -126,10 +131,16 @@ API, over a channel readable in transit. The credential never crosses that hop;
 the access it buys does.
 
 The server warns at startup when it detects this: an `http`/`sse` transport
-bound to a non-loopback address, not on Cloud Run, without
-`MCP_BEHIND_PROXY=true`. Bind `MCP_SERVER_HOST` to loopback, put an
-authenticating TLS ingress in front, or set `MCP_BEHIND_PROXY=true` to
-acknowledge a proxy the server has no way to see.
+bound to a non-loopback address, off Cloud Run, without `MCP_BEHIND_PROXY=true`.
+Bind `MCP_SERVER_HOST` to loopback, put an authenticating TLS ingress in front,
+or set `MCP_BEHIND_PROXY=true` to acknowledge a proxy the server has no way to
+see.
+
+On Cloud Run it logs an informational note instead of that warning, naming the
+half that is still yours: TLS is handled, access control is whatever you
+deployed with. **Silence there is not evidence the service is restricted** — the
+process cannot read its own IAM policy. Confirm the service requires an IAM
+invoker, or front it with something that authenticates.
 
 > The API's own `PGWIRE_TLS_*` and `FLIGHT_TLS_*` settings (2.28.0) do not apply
 > here. Those are raw protocol listeners that no ordinary reverse proxy can
@@ -164,7 +175,7 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 | `MCP_TRANSPORT`   | `stdio`      | `stdio`, `http`, or `sse`             |
 | `MCP_SERVER_HOST` | `localhost`  | Bind host for HTTP/SSE                |
 | `MCP_SERVER_PORT` | `9000`       | Bind port for HTTP/SSE                |
-| `MCP_BEHIND_PROXY` | `false`   | Acknowledges a TLS-terminating, access-controlling ingress in front of the HTTP transport. Silences the exposure warning only — it grants the server no capability and changes no behavior |
+| `MCP_BEHIND_PROXY` | `false`   | Acknowledges an ingress in front of the HTTP transport that terminates TLS **and** authenticates callers — both, not either. Silences the exposure warning only — it grants the server no capability and changes no behavior |
 | `MCP_STATELESS_HTTP` | `true`    | Run the HTTP transport without a per-connection MCP session (no `Mcp-Session-Id`, no stream resumability) so instances scale without session affinity. Ignored for stdio; forced off for `sse` |
 | `LOG_LEVEL`       | `INFO`       | Logging level                         |
 | `API_TIMEOUT`     | `30`         | HTTP timeout in seconds               |

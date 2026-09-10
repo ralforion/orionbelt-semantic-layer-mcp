@@ -3856,7 +3856,7 @@ def _warn_records(caplog, monkeypatch, **overrides):
         monkeypatch.setattr(server.settings, name, value)
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger=server.logger.name):
-        server._warn_if_exposed_without_tls()
+        server._warn_if_transport_exposed()
     return [r for r in caplog.records if r.levelno == logging.WARNING]
 
 
@@ -3883,13 +3883,31 @@ def test_acknowledged_proxy_does_not_warn(caplog, monkeypatch):
     assert _warn_records(caplog, monkeypatch, mcp_behind_proxy=True) == []
 
 
-def test_cloud_run_does_not_warn(caplog, monkeypatch):
-    """Cloud Run terminates TLS in front, so its mandatory 0.0.0.0 bind says nothing."""
+def test_cloud_run_notes_access_control_instead_of_warning(caplog, monkeypatch):
+    """Cloud Run gives TLS but not caller auth, so silence would read as protection."""
     monkeypatch.setenv("K_SERVICE", "orionbelt-mcp")
     monkeypatch.setattr(server.settings, "mcp_transport", "http")
     monkeypatch.setattr(server.settings, "mcp_server_host", "0.0.0.0")  # noqa: S104
     monkeypatch.setattr(server.settings, "mcp_behind_proxy", False)
     caplog.clear()
-    with caplog.at_level(logging.WARNING, logger=server.logger.name):
-        server._warn_if_exposed_without_tls()
-    assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+    with caplog.at_level(logging.INFO, logger=server.logger.name):
+        server._warn_if_transport_exposed()
+
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+    notes = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert len(notes) == 1
+    message = notes[0].getMessage()
+    assert "Cloud Run terminates TLS" in message
+    assert "--allow-unauthenticated" in message
+
+
+def test_cloud_run_note_suppressed_when_proxy_acknowledged(caplog, monkeypatch):
+    """An acknowledged ingress covers both jobs, so the note is redundant."""
+    monkeypatch.setenv("K_SERVICE", "orionbelt-mcp")
+    monkeypatch.setattr(server.settings, "mcp_transport", "http")
+    monkeypatch.setattr(server.settings, "mcp_server_host", "0.0.0.0")  # noqa: S104
+    monkeypatch.setattr(server.settings, "mcp_behind_proxy", True)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=server.logger.name):
+        server._warn_if_transport_exposed()
+    assert caplog.records == []
