@@ -4,6 +4,35 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.28.0] — 2026-09-10
+
+A compatibility release that ships no server change: `server.py` is
+byte-identical to 2.27.0, and no tool was added, removed or re-signatured. It
+exists because the startup gate compares `major.minor` against the API's
+`/health` version, so a wrapper on 2.27.0 refuses to start against an API on
+2.28.0.
+
+Tracks OrionBelt Semantic Layer API **v2.28.x**. Everything 2.28.0 added sits on
+the two SQL wire surfaces, neither of which this server touches:
+
+- **TLS on the Postgres wire and Arrow Flight SQL listeners.** `PGWIRE_TLS_CERT`
+  / `PGWIRE_TLS_KEY` make the pgwire listener answer `S` to an `SSLRequest`, and
+  `FLIGHT_TLS_CERT` / `FLIGHT_TLS_KEY` make the Flight listener serve
+  `grpc+tls`; `*_TLS_CLIENT_CA` on either additionally requires a client
+  certificate. These are server-side settings on listeners the MCP server never
+  opens — it reaches the API over HTTP through `API_BASE_URL` and nothing else,
+  so its transport security is whatever terminates that URL.
+
+- **DuckDB attaching a model as a Postgres catalog**, and the multi-statement
+  simple-query support underneath it. `ATTACH … (TYPE postgres)` mounts a model
+  as `obsl.<model>.model` in a plain DuckDB shell. That is an alternative client
+  path to the same governed model, parallel to this server rather than under it.
+
+The REST surface is unchanged between 2.27.0 and 2.28.0 — no router, request or
+response schema, and no query-model field moved — so there is nothing to wrap
+and no tool behavior differs. The tool counts are unchanged: 17 in
+single-model mode, 21 in multi-model, 22 distinct.
+
 ## [2.27.0] — 2026-09-09
 
 Tracks OrionBelt Semantic Layer API **v2.27.x**. The compatibility gate compares
