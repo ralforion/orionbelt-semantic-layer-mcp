@@ -105,6 +105,37 @@ Note this is the *transport* session only. The upstream API session and the set
 of loaded models remain process-global and shared by every client of an
 instance, unchanged by this flag.
 
+#### Transport security
+
+The HTTP/SSE transport terminates **no TLS** and authenticates **no caller** —
+it expects an ingress in front that does both. On Cloud Run, the intended
+deployment, that is automatic: the service URL is served over HTTPS and plain
+HTTP is forwarded to the container.
+
+This matters because the two hops have different answers:
+
+| Hop | Security |
+| --- | --- |
+| MCP client → this server | `stdio`: pipes to a child process, no socket at all. `http`/`sse`: whatever the ingress in front provides — nothing if there is none |
+| This server → the API | TLS whenever `API_BASE_URL` is `https://` (the default), with certificates verified against httpx's default CA bundle (certifi); there is no `verify=False` and no way to disable it short of an `http://` URL |
+
+Exposing the HTTP transport directly is the case to avoid. Anything that can
+reach the port can call every registered tool — including `execute_query` where
+the capability is enabled — spending this server's own `API_KEY` against the
+API, over a channel readable in transit. The credential never crosses that hop;
+the access it buys does.
+
+The server warns at startup when it detects this: an `http`/`sse` transport
+bound to a non-loopback address, not on Cloud Run, without
+`MCP_BEHIND_PROXY=true`. Bind `MCP_SERVER_HOST` to loopback, put an
+authenticating TLS ingress in front, or set `MCP_BEHIND_PROXY=true` to
+acknowledge a proxy the server has no way to see.
+
+> The API's own `PGWIRE_TLS_*` and `FLIGHT_TLS_*` settings (2.28.0) do not apply
+> here. Those are raw protocol listeners that no ordinary reverse proxy can
+> front, which is why they carry their own TLS configuration; an HTTP service
+> gets it from any ingress.
+
 ### MCP client configuration
 
 Add to your MCP client config (e.g. `claude_desktop_config.json`):
@@ -133,6 +164,7 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 | `MCP_TRANSPORT`   | `stdio`      | `stdio`, `http`, or `sse`             |
 | `MCP_SERVER_HOST` | `localhost`  | Bind host for HTTP/SSE                |
 | `MCP_SERVER_PORT` | `9000`       | Bind port for HTTP/SSE                |
+| `MCP_BEHIND_PROXY` | `false`   | Acknowledges a TLS-terminating, access-controlling ingress in front of the HTTP transport. Silences the exposure warning only — it grants the server no capability and changes no behavior |
 | `MCP_STATELESS_HTTP` | `true`    | Run the HTTP transport without a per-connection MCP session (no `Mcp-Session-Id`, no stream resumability) so instances scale without session affinity. Ignored for stdio; forced off for `sse` |
 | `LOG_LEVEL`       | `INFO`       | Logging level                         |
 | `API_TIMEOUT`     | `30`         | HTTP timeout in seconds               |

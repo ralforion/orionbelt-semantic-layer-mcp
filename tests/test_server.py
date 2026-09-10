@@ -3820,3 +3820,76 @@ def test_registered_tool_count_never_breaks_startup(monkeypatch):
 
     monkeypatch.setattr(server.mcp, "_list_tools", boom)
     assert server._registered_tool_count() is None
+
+
+# ---------------------------------------------------------------------------
+# HTTP transport exposure warning
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "host,loopback",
+    [
+        ("localhost", True),
+        ("127.0.0.1", True),
+        ("127.0.1.5", True),
+        ("::1", True),
+        ("[::1]", True),
+        ("0.0.0.0", False),  # noqa: S104 — the exposed case under test
+        ("10.0.0.7", False),
+        ("mcp.internal", False),  # unresolvable name counts as exposed
+    ],
+)
+def test_loopback_bind_classification(host, loopback):
+    assert server._is_loopback_bind(host) is loopback
+
+
+def _warn_records(caplog, monkeypatch, **overrides):
+    """Run the exposure check under a given config and return its warnings."""
+    monkeypatch.delenv("K_SERVICE", raising=False)
+    defaults = {
+        "mcp_transport": "http",
+        "mcp_server_host": "0.0.0.0",  # noqa: S104 — the exposed case under test
+        "mcp_behind_proxy": False,
+    }
+    for name, value in {**defaults, **overrides}.items():
+        monkeypatch.setattr(server.settings, name, value)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=server.logger.name):
+        server._warn_if_exposed_without_tls()
+    return [r for r in caplog.records if r.levelno == logging.WARNING]
+
+
+def test_exposed_http_transport_warns(caplog, monkeypatch):
+    records = _warn_records(caplog, monkeypatch)
+    assert len(records) == 1
+    assert "no TLS and no caller authentication" in records[0].getMessage()
+
+
+def test_exposed_sse_transport_warns(caplog, monkeypatch):
+    assert len(_warn_records(caplog, monkeypatch, mcp_transport="sse")) == 1
+
+
+def test_stdio_never_warns(caplog, monkeypatch):
+    """stdio is pipes to a child process — there is no socket to expose."""
+    assert _warn_records(caplog, monkeypatch, mcp_transport="stdio") == []
+
+
+def test_loopback_bind_does_not_warn(caplog, monkeypatch):
+    assert _warn_records(caplog, monkeypatch, mcp_server_host="localhost") == []
+
+
+def test_acknowledged_proxy_does_not_warn(caplog, monkeypatch):
+    assert _warn_records(caplog, monkeypatch, mcp_behind_proxy=True) == []
+
+
+def test_cloud_run_does_not_warn(caplog, monkeypatch):
+    """Cloud Run terminates TLS in front, so its mandatory 0.0.0.0 bind says nothing."""
+    monkeypatch.setenv("K_SERVICE", "orionbelt-mcp")
+    monkeypatch.setattr(server.settings, "mcp_transport", "http")
+    monkeypatch.setattr(server.settings, "mcp_server_host", "0.0.0.0")  # noqa: S104
+    monkeypatch.setattr(server.settings, "mcp_behind_proxy", False)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=server.logger.name):
+        server._warn_if_exposed_without_tls()
+    assert [r for r in caplog.records if r.levelno == logging.WARNING] == []

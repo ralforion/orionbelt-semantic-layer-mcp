@@ -24,8 +24,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib.metadata
+import ipaddress
 import json
 import logging
+import os
 import threading
 from collections.abc import Callable
 from contextlib import asynccontextmanager
@@ -69,6 +71,10 @@ class Settings(BaseSettings):
     # transport state — and lets instances scale without session affinity.
     # Ignored for stdio; forced off for sse, which requires a session.
     mcp_stateless_http: bool = True
+    # Acknowledges an ingress in front of the HTTP transport that terminates
+    # TLS and controls who reaches it. Silences the exposure warning only —
+    # nothing else reads it, and it grants the server no capability.
+    mcp_behind_proxy: bool = False
     # Cloud Run injects PORT; takes precedence over MCP_SERVER_PORT.
     port: int | None = None
     log_level: str = "INFO"
@@ -3349,6 +3355,62 @@ def _stateless_http_enabled() -> bool:
     return settings.mcp_stateless_http
 
 
+def _is_loopback_bind(host: str) -> bool:
+    """Whether the HTTP transport's bind address is reachable only on this box."""
+    candidate = host.strip().strip("[]").lower()
+    if candidate in {"localhost", "localhost.localdomain"}:
+        return True
+    try:
+        return ipaddress.ip_address(candidate).is_loopback
+    except ValueError:
+        # A hostname we would have to resolve to classify. Treat it as exposed:
+        # a warning that did not need saying costs a line, one that did and was
+        # not said costs the port.
+        return False
+
+
+def _warn_if_exposed_without_tls() -> None:
+    """Warn when the HTTP transport is reachable off-box with nothing in front.
+
+    Unlike stdio (pipes to a child process, no socket at all), the HTTP/SSE
+    transport is a real listener — and this server terminates no TLS and
+    authenticates no caller. Whatever can reach the port can call every
+    registered tool, spending the server's own ``API_KEY`` against the API, and
+    reads the queries and results in transit. The credential itself never
+    crosses this hop; the access it buys does.
+
+    Both jobs belong to an ingress, which is the intended HTTP deployment —
+    Cloud Run terminates TLS at its front end — so this is scoped to actual
+    evidence of exposure rather than firing on every HTTP start and teaching
+    operators to scroll past it. ``MCP_BEHIND_PROXY=true`` acknowledges a proxy
+    we have no way to detect.
+
+    The counterpart on the API's own listeners is its 2.28.0 warning for Flight
+    SQL authenticating over plaintext gRPC. Those are raw protocol sockets that
+    no ordinary proxy can front, which is why they grew their own TLS settings
+    and this transport does not.
+    """
+    if settings.mcp_transport == "stdio":
+        return
+    if settings.mcp_behind_proxy or _is_loopback_bind(settings.mcp_server_host):
+        return
+    # Cloud Run always serves https on the service URL and forwards plain HTTP
+    # to the container, so the bind has to be 0.0.0.0 and says nothing.
+    if os.environ.get("K_SERVICE"):
+        return
+    logger.warning(
+        "The %s transport is bound to %s with no TLS and no caller "
+        "authentication: anything that reaches port %s can call every tool "
+        "with this server's API credential, over a channel that is readable "
+        "in transit. Put an ingress in front that terminates TLS and controls "
+        "access, bind MCP_SERVER_HOST to loopback, or set MCP_BEHIND_PROXY=true "
+        "to acknowledge one this server cannot see.",
+        settings.mcp_transport,
+        settings.mcp_server_host,
+        settings.effective_port,
+    )
+
+
 def main() -> None:
     """Run the MCP server using settings from environment / .env file."""
     _configure_logging()
@@ -3418,6 +3480,7 @@ def main() -> None:
     logger.info("  Log Format: %s", settings.log_format)
     logger.info("  Timeout:    %ss", settings.api_timeout)
     logger.info("")
+    _warn_if_exposed_without_tls()
     if settings.mcp_transport == "stdio":
         counted = "?" if tool_count is None else str(tool_count)
         logger.info("Registered %s MCP tools (%s mode)", counted, mode_label)

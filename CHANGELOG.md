@@ -6,32 +6,59 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [2.28.0] — 2026-09-10
 
-A compatibility release that ships no server change: `server.py` is
-byte-identical to 2.27.0, and no tool was added, removed or re-signatured. It
-exists because the startup gate compares `major.minor` against the API's
-`/health` version, so a wrapper on 2.27.0 refuses to start against an API on
-2.28.0.
+Tracks OrionBelt Semantic Layer API **v2.28.x**. The compatibility gate compares
+`major.minor` against the API's `/health` version, so this release is required
+to run against a 2.28 API.
 
-Tracks OrionBelt Semantic Layer API **v2.28.x**. Everything 2.28.0 added sits on
-the two SQL wire surfaces, neither of which this server touches:
-
-- **TLS on the Postgres wire and Arrow Flight SQL listeners.** `PGWIRE_TLS_CERT`
-  / `PGWIRE_TLS_KEY` make the pgwire listener answer `S` to an `SSLRequest`, and
-  `FLIGHT_TLS_CERT` / `FLIGHT_TLS_KEY` make the Flight listener serve
-  `grpc+tls`; `*_TLS_CLIENT_CA` on either additionally requires a client
-  certificate. These are server-side settings on listeners the MCP server never
-  opens — it reaches the API over HTTP through `API_BASE_URL` and nothing else,
-  so its transport security is whatever terminates that URL.
-
-- **DuckDB attaching a model as a Postgres catalog**, and the multi-statement
-  simple-query support underneath it. `ATTACH … (TYPE postgres)` mounts a model
-  as `obsl.<model>.model` in a plain DuckDB shell. That is an alternative client
-  path to the same governed model, parallel to this server rather than under it.
-
-The REST surface is unchanged between 2.27.0 and 2.28.0 — no router, request or
-response schema, and no query-model field moved — so there is nothing to wrap
-and no tool behavior differs. The tool counts are unchanged: 17 in
+Nothing in 2.28.0 reaches the REST surface this server wraps. No router, request
+or response schema, and no query-model field changed between v2.27.0 and
+v2.28.0; the sole API-side edit is `app.py` wiring Flight TLS into startup.
+Everything the release added sits on the two SQL wire surfaces — TLS on the
+pgwire and Arrow Flight listeners, multi-statement simple queries, and DuckDB
+attaching a model as a Postgres catalog via `ATTACH … (TYPE postgres)`. Those
+are client paths parallel to this server rather than under it. No tool was
+added, removed or re-signatured, and the counts are unchanged: 17 in
 single-model mode, 21 in multi-model, 22 distinct.
+
+### Added
+
+- **A startup warning when the HTTP transport is exposed with nothing in front
+  of it.** The counterpart to the API's own 2.28.0 warning for Flight SQL
+  authenticating over plaintext gRPC, and the same reasoning: a deployment that
+  reads as protected and is not is worse than one that is visibly neither.
+
+  The HTTP/SSE transport terminates no TLS and authenticates no caller — it
+  expects an ingress to do both, which on Cloud Run is automatic. Exposed
+  directly, anything that reaches the port can call every registered tool,
+  including `execute_query` where the capability is enabled, spending this
+  server's own `API_KEY` against the API over a channel readable in transit.
+  The credential itself never crosses that hop; the access it buys does.
+
+  The warning is scoped to evidence of exposure rather than firing on every HTTP
+  start — a non-loopback bind, off Cloud Run (`K_SERVICE`), without the new
+  acknowledgement below. A warning that fires on the correct deployment is one
+  operators learn to scroll past, which costs more than it saves. A bind host
+  that would need resolving to classify counts as exposed: a warning that did
+  not need saying costs a line, one that did and was not said costs the port.
+
+  `stdio` is untouched and warns about nothing — it is pipes to a child process,
+  with no socket to expose.
+
+- **`MCP_BEHIND_PROXY`** (default `false`), acknowledging a TLS-terminating,
+  access-controlling ingress the server has no way to detect. It silences the
+  warning and does nothing else: it grants no capability and changes no
+  behavior, so setting it wrongly misleads the reader of the log rather than the
+  server.
+
+- **A transport-security section in the README**, stating what each hop actually
+  gets. Client → server is whatever the ingress provides, and nothing without
+  one; server → API is TLS whenever `API_BASE_URL` is `https://` (the default),
+  with certificates verified against httpx's default CA bundle (certifi) — there is no
+  `verify=False` in the file and no setting to disable it short of an `http://`
+  URL. It also records why the API's new `PGWIRE_TLS_*` and `FLIGHT_TLS_*`
+  settings have no counterpart here: those are raw protocol listeners no
+  ordinary reverse proxy can front, while an HTTP service gets TLS from any
+  ingress.
 
 ## [2.27.0] — 2026-09-09
 
