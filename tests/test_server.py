@@ -3898,6 +3898,11 @@ def test_cloud_run_notes_access_control_instead_of_warning(caplog, monkeypatch):
     assert len(notes) == 1
     message = notes[0].getMessage()
     assert "Cloud Run terminates TLS" in message
+    # Names the ways access can be settled rather than prescribing IAM — OBSL's
+    # own rollout closes the service with --ingress, not an invoker role.
+    assert "IAM invoker" in message
+    assert "--ingress" in message
+    assert "load balancer" in message
     assert "--allow-unauthenticated" in message
 
 

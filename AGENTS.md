@@ -59,7 +59,9 @@ This repo's version mirrors the OBSL API version. When the API bumps, adapt here
 3. **Never commit to `main`.** Use a `chore/`, `fix/`, or `feature/` branch → PR → **squash** merge.
 4. A **full release** is `./scripts/release.sh` (3 steps: squash-merge PR → GitHub release → PyPI publish). The multi-arch Docker Hub image (`ralforion/orionbelt-semantic-layer-mcp:<ver>` + `:latest`) is built by `.github/workflows/docker-publish.yml`, triggered automatically when step 2 pushes the `v*` tag — it is no longer pushed by the script. Don't replicate the script by hand. It runs its own ruff/format/test/version/changelog pre-flight and refuses to run on `main` or with a dirty tree.
 
-Cloud Run deployment is **not** in this repo — the MCP service is rolled by the API repo's `scripts/deploy-gcloud.sh` as part of the bundled API+UI+MCP rollout.
+Cloud Run deployment is **not** in this repo — the MCP service is rolled by the API repo's `scripts-infra/deploy-mcp-gcloud.sh`. That directory is gitignored there, so it will not turn up in a clone or a repo-wide grep; ask rather than conclude it is missing. The API and UI have their own scripts beside it (`deploy-gcloud.sh`, `deploy-ui-gcloud.sh`) — three separate rollouts, not one bundled command.
+
+The MCP service runs `MCP_TRANSPORT=http` bound to `0.0.0.0` with `--allow-unauthenticated`, gated by `--ingress internal-and-cloud-load-balancing` plus Cloud Armor on the load balancer. Access control is therefore the LB, not IAM — which is why the two flags look alarming only when read apart.
 
 ## Conventions
 

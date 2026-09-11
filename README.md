@@ -112,10 +112,12 @@ it expects an ingress in front that does both. These are two separate jobs, and
 no platform does both for you by default.
 
 On Cloud Run, the intended deployment, **TLS is automatic**: the service URL is
-served over HTTPS and plain HTTP is forwarded to the container. **Caller
-authentication is not.** It is a deploy-time IAM choice — a service deployed
-with `--allow-unauthenticated` is reachable by anyone who learns its URL, over
-HTTPS, with no credential required. Encrypted is not the same as restricted.
+served over HTTPS and plain HTTP is forwarded to the container. **Access control
+is not.** It is a deploy-time choice, settled any of three ways — IAM invoker
+permission, an `--ingress` restriction, or an authenticating load balancer in
+front. With none of them, `--allow-unauthenticated` leaves the service reachable
+by anyone who learns its URL, over HTTPS, with no credential required. Encrypted
+is not the same as restricted.
 
 This matters because the two hops have different answers:
 
@@ -139,8 +141,9 @@ see.
 On Cloud Run it logs an informational note instead of that warning, naming the
 half that is still yours: TLS is handled, access control is whatever you
 deployed with. **Silence there is not evidence the service is restricted** — the
-process cannot read its own IAM policy. Confirm the service requires an IAM
-invoker, or front it with something that authenticates.
+process cannot read its own IAM policy or ingress setting. Confirm one of the
+three above is in place; if one is, `MCP_BEHIND_PROXY=true` records that and
+silences the note.
 
 > The API's own `PGWIRE_TLS_*` and `FLIGHT_TLS_*` settings (2.28.0) do not apply
 > here. Those are raw protocol listeners that no ordinary reverse proxy can
