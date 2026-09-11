@@ -6,7 +6,89 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.29.0] — 2026-09-11
+
+Tracks OrionBelt Semantic Layer API **v2.29.x**. The compatibility gate compares
+`major.minor` against the API's `/health` version, so this release is required
+to run against a 2.29 API.
+
+No router, request or response schema, and no query-model field changed between
+API v2.28.0 and v2.29.0, so no tool was added, removed or re-signatured, and the
+counts are unchanged: 17 in single-model mode, 21 in multi-model, 22 distinct.
+What did change reaches this server anyway, because it is a REST client: the
+API can now serve HTTPS itself (`API_TLS_CERT` / `API_TLS_KEY`) and require a
+client certificate (`API_TLS_CLIENT_CA`). Against an API configured that way,
+this server could not connect at all.
+
+### Added
+
+- **Client-side TLS to the API: `API_CA_CERT`, `API_CLIENT_CERT`,
+  `API_CLIENT_KEY`.** The counterpart to the API's `API_TLS_*`, and the same
+  three settings the API's own CLI gained for `obsl --server` in 2.29.0
+  (`OBSL_CA_CERT` / `OBSL_CLIENT_CERT` / `OBSL_CLIENT_KEY`), built the same way.
+
+  Before this the connection could present no certificate and trust no private
+  CA short of `SSL_CERT_FILE`, so an API requiring mutual TLS — or a gateway in
+  front that asks for a certificate — refused the handshake and every tool with
+  it. That is a wall rather than a degradation. All three unset, nothing
+  changes: httpx's default trust store and no client certificate.
+
+  The certificate material is loaded when the server starts, on **every**
+  transport — including HTTP, which otherwise defers everything to the first
+  request — so a path that is missing, unreadable, or present but not what it
+  claims stops startup naming the setting and the file. Without that it would
+  surface on the first tool call as an SSL error from inside httpx naming
+  neither.
+
+  - **`API_CA_CERT` replaces the trust store rather than extending it.**
+    Without it the context is built from httpx's own default, not
+    `ssl.create_default_context()`: the two are different stores (certifi vs
+    OpenSSL's, which on some platforms is nearly empty), so adding a client
+    certificate must not silently change which authorities the API is checked
+    against. A test compares the two CA sets directly.
+  - **Certificate settings on an `http://` `API_BASE_URL` are refused.** There
+    is no handshake, so nothing would be presented or verified — a
+    configuration that reads as TLS and is not, which is the failure the API's
+    own loader refuses to start over.
+  - **Encrypted private keys are refused rather than prompted for.** With no
+    password callback OpenSSL prompts on the terminal, and under `stdio` stdin
+    is the MCP pipe: the prompt would read protocol bytes or hang. The callback
+    OpenSSL runs only for an encrypted key is what lets the error say so.
+  - There is still no way to disable verification.
+
+  A context rather than httpx's `cert=` / `verify=<str>`, both deprecated in
+  0.28; a test pins their absence as an error. And one test performs a real
+  mutual-TLS handshake against a local listener: respx intercepts the
+  transport, so no mocked test ever reaches the wire.
+
+- **An `API TLS:` line in the startup banner** reporting what the API hop ended
+  up with — plaintext, verified against the default store or `API_CA_CERT`,
+  with or without a client certificate — so confirming it needs no packet
+  capture.
+
 ### Changed
+
+- **Connection failures to the API say why, and name the setting to fix.**
+  Against an API that serves TLS itself, the two likeliest failures are
+  configuration on this side, and neither read as TLS. An untrusted API
+  certificate logged *"Cannot reach … — is the service running?"* about a
+  service that was running. A refused client certificate was worse: under TLS
+  1.3 the rejection arrives after the handshake has "succeeded", as the server
+  dropping the connection, and that `RemoteProtocolError` was caught by nothing
+  — startup died on a raw traceback. Found by running this server against a
+  real 2.29 API with `API_TLS_CLIENT_CA` set, not by the mocked suite.
+
+  Every transport error is now caught, on startup and on tool calls alike, and
+  mapped: an untrusted certificate points at `API_CA_CERT`, a missing or
+  rejected client certificate at `API_CLIENT_CERT` / the API's
+  `API_TLS_CLIENT_CA`, and a dropped `https://` connection with no client
+  certificate configured says one may be required. A plain refused connection
+  keeps its old message.
+
+- **The README no longer says an HTTP service gets TLS only from an ingress.**
+  True of the API's REST surface until 2.29.0, false since. The note now frames
+  the API's `*_TLS_*` settings as the server half, none of them read here, and
+  points at the new client half.
 
 - **The Cloud Run note names the ways access can be settled rather than
   prescribing IAM.** 2.28.0 told operators to confirm the service requires an

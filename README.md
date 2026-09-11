@@ -7,8 +7,8 @@
 
 <p align="center"><strong>Thin MCP server that delegates to the OrionBelt® Semantic Layer REST API</strong></p>
 
-[![Version 2.28.0](https://img.shields.io/badge/version-2.28.0-purple.svg)](https://github.com/ralforion/orionbelt-semantic-layer-mcp/releases)
-[![OrionBelt® Semantic Layer 2.28](https://img.shields.io/badge/OrionBelt_Semantic_Layer-2.28-0054A6.svg)](https://github.com/ralforion/orionbelt-semantic-layer)
+[![Version 2.29.0](https://img.shields.io/badge/version-2.29.0-purple.svg)](https://github.com/ralforion/orionbelt-semantic-layer-mcp/releases)
+[![OrionBelt® Semantic Layer 2.29](https://img.shields.io/badge/OrionBelt_Semantic_Layer-2.29-0054A6.svg)](https://github.com/ralforion/orionbelt-semantic-layer)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/ralforion/orionbelt-semantic-layer-mcp/blob/main/LICENSE)
 [![FastMCP](https://img.shields.io/badge/FastMCP-3.4+-8A2BE2)](https://gofastmcp.com)
@@ -124,7 +124,7 @@ This matters because the two hops have different answers:
 | Hop | Security |
 | --- | --- |
 | MCP client → this server | `stdio`: pipes to a child process, no socket at all. `http`/`sse`: whatever the ingress in front provides — nothing if there is none |
-| This server → the API | TLS whenever `API_BASE_URL` is `https://` (the default), with certificates verified against httpx's default CA bundle (certifi); there is no `verify=False` and no way to disable it short of an `http://` URL |
+| This server → the API | TLS whenever `API_BASE_URL` is `https://` (the default), with certificates verified against httpx's default CA bundle (certifi), or against `API_CA_CERT` for a private CA; `API_CLIENT_CERT` adds a client certificate for mutual TLS. There is no `verify=False` and no way to disable it short of an `http://` URL |
 
 Exposing the HTTP transport directly is the case to avoid. Anything that can
 reach the port can call every registered tool — including `execute_query` where
@@ -145,10 +145,41 @@ process cannot read its own IAM policy or ingress setting. Confirm one of the
 three above is in place; if one is, `MCP_BEHIND_PROXY=true` records that and
 silences the note.
 
-> The API's own `PGWIRE_TLS_*` and `FLIGHT_TLS_*` settings (2.28.0) do not apply
-> here. Those are raw protocol listeners that no ordinary reverse proxy can
-> front, which is why they carry their own TLS configuration; an HTTP service
-> gets it from any ingress.
+> The API's own `*_TLS_*` settings are the *server* half and none of them is read
+> here. `PGWIRE_TLS_*` and `FLIGHT_TLS_*` (2.28.0) secure listeners this server
+> never connects to. `API_TLS_*` (2.29.0) makes the REST API serve HTTPS itself,
+> and `API_TLS_CLIENT_CA` makes it *require* a client certificate — which is
+> what the settings below are for.
+
+#### TLS to the API
+
+When the API serves HTTPS with a certificate from a private CA, or requires
+mutual TLS — `API_TLS_CLIENT_CA` on the API, or a gateway in front that asks
+for a client certificate — point this server at the material:
+
+```bash
+API_BASE_URL=https://obsl.internal:8000
+API_CA_CERT=/certs/ca.crt            # trust this CA instead of the default store
+API_CLIENT_CERT=/certs/mcp.crt       # present this certificate…
+API_CLIENT_KEY=/certs/mcp.key        # …with this key (omit if it is in the same PEM)
+```
+
+The certificate is loaded when the server starts, on every transport, so a path
+that is missing, unreadable, or not what it claims stops startup naming the
+setting and the file — rather than surfacing later as an SSL error from inside
+the HTTP client. The startup banner's `API TLS:` line reports what the hop
+ended up with.
+
+- **`API_CA_CERT` replaces the default trust store, it does not extend it.**
+  Unset, verification uses httpx's default (certifi, or `SSL_CERT_FILE` /
+  `SSL_CERT_DIR`), and adding a client certificate does not change that.
+- **These require an `https://` `API_BASE_URL`.** On `http://` there is no
+  handshake, so nothing would be presented or verified; that configuration is
+  refused rather than left to read as TLS.
+- **Password-protected keys are refused, not prompted for.** Under `stdio`,
+  stdin is the MCP pipe, so OpenSSL's terminal prompt would corrupt the protocol
+  or hang. Provide the key decrypted, protected by file permissions or a
+  secret mount.
 
 ### MCP client configuration
 
@@ -175,6 +206,9 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 | `API_BASE_URL`    | — (required) | OrionBelt® Semantic Layer REST API URL |
 | `API_KEY`         | — (unset)    | API credential; required only when the API runs with `AUTH_MODE=api_key` |
 | `API_KEY_HEADER`  | `X-API-Key`  | Header the credential is sent in; must match the API's `API_KEY_HEADER` |
+| `API_CA_CERT`     | — (unset)    | PEM CA bundle to verify the API against, **replacing** the default trust store; for a private CA. Requires an `https://` `API_BASE_URL` — see [TLS to the API](#tls-to-the-api) |
+| `API_CLIENT_CERT` | — (unset)    | PEM client certificate presented to the API, for mutual TLS (`API_TLS_CLIENT_CA` on the API, or a gateway that asks for one) |
+| `API_CLIENT_KEY`  | — (unset)    | PEM private key for `API_CLIENT_CERT`; omit when the key is in the same file. Unencrypted only |
 | `MCP_TRANSPORT`   | `stdio`      | `stdio`, `http`, or `sse`             |
 | `MCP_SERVER_HOST` | `localhost`  | Bind host for HTTP/SSE                |
 | `MCP_SERVER_PORT` | `9000`       | Bind port for HTTP/SSE                |
