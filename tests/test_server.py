@@ -7,6 +7,7 @@ import importlib
 import inspect
 import json
 import logging
+import ssl
 import sys
 import types
 
@@ -3916,3 +3917,361 @@ def test_cloud_run_note_suppressed_when_proxy_acknowledged(caplog, monkeypatch):
     with caplog.at_level(logging.INFO, logger=server.logger.name):
         server._warn_if_transport_exposed()
     assert caplog.records == []
+
+
+# ---------------------------------------------------------------------------
+# Client-side TLS to the API (API_CLIENT_CERT / API_CLIENT_KEY / API_CA_CERT)
+# ---------------------------------------------------------------------------
+
+
+def _mint_pki(
+    tmp_path, *, encrypt_client_key: bool = False, ca_name: str = "obsl-mcp-test-ca"
+) -> dict[str, str]:
+    """A CA, a server certificate for 127.0.0.1 and a client certificate, as PEM files.
+
+    The CA carries the basic constraint: without it ``get_ca_certs()`` reports
+    nothing, so a test asserting the trust store was replaced would pass
+    against an empty set.
+    """
+    pytest.importorskip("cryptography", reason="cryptography required to mint test certs")
+    import datetime as dt
+    import ipaddress as ip
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+
+    now = dt.datetime.now(dt.UTC)
+
+    def _name(cn: str) -> x509.Name:
+        return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+
+    def _build(subject, issuer, pub, signer, *, ca=False, san=None, eku=None):
+        builder = (
+            x509.CertificateBuilder()
+            .subject_name(_name(subject))
+            .issuer_name(_name(issuer))
+            .public_key(pub)
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - dt.timedelta(minutes=5))
+            .not_valid_after(now + dt.timedelta(days=1))
+            .add_extension(x509.BasicConstraints(ca=ca, path_length=None), critical=True)
+        )
+        if san is not None:
+            builder = builder.add_extension(x509.SubjectAlternativeName(san), critical=False)
+        if eku is not None:
+            builder = builder.add_extension(x509.ExtendedKeyUsage([eku]), critical=False)
+        return builder.sign(signer, hashes.SHA256())
+
+    def _write(name: str, data: bytes) -> str:
+        path = tmp_path / name
+        path.write_bytes(data)
+        return str(path)
+
+    def _key_pem(key, password: bytes | None = None) -> bytes:
+        algo = (
+            serialization.BestAvailableEncryption(password)
+            if password
+            else serialization.NoEncryption()
+        )
+        return key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, algo
+        )
+
+    pem = serialization.Encoding.PEM
+    ca_key = ec.generate_private_key(ec.SECP256R1())
+    ca_cert = _build(ca_name, ca_name, ca_key.public_key(), ca_key, ca=True)
+    srv_key = ec.generate_private_key(ec.SECP256R1())
+    srv_cert = _build(
+        "127.0.0.1",
+        ca_name,
+        srv_key.public_key(),
+        ca_key,
+        san=[x509.IPAddress(ip.ip_address("127.0.0.1"))],
+        eku=ExtendedKeyUsageOID.SERVER_AUTH,
+    )
+    cli_key = ec.generate_private_key(ec.SECP256R1())
+    cli_cert = _build(
+        "obsl-mcp",
+        ca_name,
+        cli_key.public_key(),
+        ca_key,
+        eku=ExtendedKeyUsageOID.CLIENT_AUTH,
+    )
+    return {
+        "ca": _write("ca.crt", ca_cert.public_bytes(pem)),
+        "server_cert": _write("server.crt", srv_cert.public_bytes(pem)),
+        "server_key": _write("server.key", _key_pem(srv_key)),
+        "client_cert": _write("client.crt", cli_cert.public_bytes(pem)),
+        "client_key": _write(
+            "client.key", _key_pem(cli_key, b"secret" if encrypt_client_key else None)
+        ),
+    }
+
+
+def _tls_settings(monkeypatch, *, url="https://127.0.0.1:1", cert=None, key=None, ca=None):
+    monkeypatch.setattr(server.settings, "api_base_url", url)
+    monkeypatch.setattr(server.settings, "api_client_cert", cert)
+    monkeypatch.setattr(server.settings, "api_client_key", key)
+    monkeypatch.setattr(server.settings, "api_ca_cert", ca)
+
+
+def test_api_tls_unset_keeps_httpx_default(monkeypatch):
+    """No settings: verify=True, i.e. exactly the behaviour before they existed."""
+    _tls_settings(monkeypatch)
+    assert server._api_tls_verify() is True
+
+
+def test_api_tls_key_without_cert_refused(monkeypatch, tmp_path):
+    pki = _mint_pki(tmp_path)
+    _tls_settings(monkeypatch, key=pki["client_key"])
+    with pytest.raises(server.ApiTLSConfigError, match="API_CLIENT_KEY is set without"):
+        server._api_tls_verify()
+
+
+@pytest.mark.parametrize("setting", ["cert", "key", "ca"])
+def test_api_tls_missing_file_names_setting_and_path(monkeypatch, tmp_path, setting):
+    pki = _mint_pki(tmp_path)
+    paths = {"cert": pki["client_cert"], "key": pki["client_key"], "ca": pki["ca"]}
+    paths[setting] = str(tmp_path / "absent.pem")
+    _tls_settings(monkeypatch, **paths)
+    name = {"cert": "API_CLIENT_CERT", "key": "API_CLIENT_KEY", "ca": "API_CA_CERT"}[setting]
+    with pytest.raises(server.ApiTLSConfigError, match=rf"{name}: no such file: .*absent\.pem"):
+        server._api_tls_verify()
+
+
+def test_api_tls_expands_home(monkeypatch, tmp_path):
+    """~/ is validated *and* loaded expanded, not checked expanded and used literally."""
+    _mint_pki(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _tls_settings(monkeypatch, cert="~/client.crt", key="~/client.key", ca="~/ca.crt")
+    assert isinstance(server._api_tls_verify(), ssl.SSLContext)
+
+
+def test_api_tls_on_plain_http_refused(monkeypatch, tmp_path):
+    """Certificates on http:// would be silently ignored — refuse rather than read as TLS."""
+    pki = _mint_pki(tmp_path)
+    _tls_settings(
+        monkeypatch, url="http://api.internal:8000", cert=pki["client_cert"], key=pki["client_key"]
+    )
+    with pytest.raises(server.ApiTLSConfigError, match="API_CLIENT_CERT set, but API_BASE_URL"):
+        server._api_tls_verify()
+
+
+def test_api_tls_bad_ca_bundle_names_setting(monkeypatch, tmp_path):
+    bogus = tmp_path / "bogus.pem"
+    bogus.write_text("not a certificate\n")
+    _tls_settings(monkeypatch, ca=str(bogus))
+    with pytest.raises(server.ApiTLSConfigError, match="API_CA_CERT: not a usable PEM CA bundle"):
+        server._api_tls_verify()
+
+
+def test_api_tls_mismatched_key_names_both_settings(monkeypatch, tmp_path):
+    pki = _mint_pki(tmp_path)
+    _tls_settings(monkeypatch, cert=pki["client_cert"], key=pki["server_key"])
+    with pytest.raises(
+        server.ApiTLSConfigError, match="API_CLIENT_CERT/API_CLIENT_KEY: could not load"
+    ):
+        server._api_tls_verify()
+
+
+def test_api_tls_encrypted_key_refused_without_prompting(monkeypatch, tmp_path):
+    """An encrypted key must never reach OpenSSL's terminal prompt: on stdio, stdin is MCP."""
+    pki = _mint_pki(tmp_path, encrypt_client_key=True)
+    _tls_settings(monkeypatch, cert=pki["client_cert"], key=pki["client_key"])
+    with pytest.raises(server.ApiTLSConfigError, match="private key is encrypted"):
+        server._api_tls_verify()
+
+
+def test_api_tls_client_cert_keeps_httpx_trust(monkeypatch, tmp_path):
+    """Adding a client certificate must not change which CAs the server is checked against."""
+    pki = _mint_pki(tmp_path)
+    _tls_settings(monkeypatch, cert=pki["client_cert"], key=pki["client_key"])
+    context = server._api_tls_verify()
+    default = httpx.create_ssl_context(verify=True)
+    assert context.get_ca_certs() == default.get_ca_certs()
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+
+
+def test_api_tls_ca_cert_replaces_trust(monkeypatch, tmp_path):
+    pki = _mint_pki(tmp_path)
+    _tls_settings(monkeypatch, ca=pki["ca"])
+    context = server._api_tls_verify()
+    subjects = [dict(x[0] for x in c["subject"]) for c in context.get_ca_certs()]
+    assert subjects == [{"commonName": "obsl-mcp-test-ca"}]
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+
+
+def test_api_tls_no_deprecated_httpx_api(monkeypatch, tmp_path):
+    """cert= and verify=<str> are deprecated in httpx 0.28 — pin their absence as an error."""
+    import warnings
+
+    pki = _mint_pki(tmp_path)
+    for kwargs in (
+        {"ca": pki["ca"]},
+        {"cert": pki["client_cert"], "key": pki["client_key"]},
+        {"cert": pki["client_cert"], "key": pki["client_key"], "ca": pki["ca"]},
+    ):
+        _tls_settings(monkeypatch, **kwargs)
+        server._http_client = None
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            server._get_client().close()
+        server._http_client = None
+
+
+@pytest.mark.parametrize(
+    "url,cert,ca,expected",
+    [
+        ("http://api:8000", None, None, "none (plaintext http://)"),
+        ("https://api", None, None, "verified against default trust store, no client certificate"),
+        ("https://api", "c.pem", "ca.pem", "verified against API_CA_CERT, client certificate"),
+    ],
+)
+def test_api_tls_summary(monkeypatch, url, cert, ca, expected):
+    _tls_settings(monkeypatch, url=url, cert=cert, ca=ca)
+    assert server._api_tls_summary() == expected
+
+
+def test_main_exits_on_unusable_api_tls(monkeypatch, tmp_path, caplog):
+    """Refused at startup on every transport, not deferred to the first tool call."""
+    monkeypatch.setattr(server, "_configure_logging", lambda: None)
+    monkeypatch.setattr(server.settings, "mcp_transport", "http")
+    _tls_settings(monkeypatch, cert=str(tmp_path / "absent.crt"))
+    with (
+        caplog.at_level(logging.ERROR, logger=server.logger.name),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        server.main()
+    assert exc_info.value.code == 1
+    assert "API TLS configuration is unusable: API_CLIENT_CERT: no such file" in caplog.text
+
+
+@pytest.fixture()
+def mtls_api(tmp_path):
+    """A real HTTPS listener on 127.0.0.1 that requires a client cert signed by the test CA.
+
+    respx intercepts the transport, so no mocked test ever performs a handshake;
+    this is the only one that proves the context reaches the wire.
+    """
+    import http.server
+    import threading
+
+    pki = _mint_pki(tmp_path)
+
+    class _Health(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler's naming
+            body = json.dumps({"status": "ok", "peer": self.request.getpeercert()["subject"]})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body.encode())
+
+        def log_message(self, *args):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Health)
+    context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH, cafile=pki["ca"])
+    context.load_cert_chain(pki["server_cert"], pki["server_key"])
+    context.verify_mode = ssl.CERT_REQUIRED
+    httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"https://127.0.0.1:{httpd.server_address[1]}", pki
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_mtls_handshake_with_client_certificate(monkeypatch, mtls_api):
+    url, pki = mtls_api
+    _tls_settings(
+        monkeypatch, url=url, cert=pki["client_cert"], key=pki["client_key"], ca=pki["ca"]
+    )
+    resp = server._get_client().get("/health")
+    assert resp.status_code == 200
+    # The server saw *our* certificate, not merely a completed handshake.
+    assert "obsl-mcp" in json.dumps(resp.json()["peer"])
+
+
+def test_mtls_refused_without_client_certificate(monkeypatch, mtls_api):
+    """A refused client cert must say so — under TLS 1.3 it looks like a dropped connection."""
+    url, pki = mtls_api
+    _tls_settings(monkeypatch, url=url, ca=pki["ca"])
+    with pytest.raises(_ToolError, match="(?i)set API_CLIENT_CERT and API_CLIENT_KEY"):
+        server._do_request(server._get_client(), "GET", "/health", None)
+
+
+def test_mtls_client_certificate_from_wrong_ca_rejected(monkeypatch, mtls_api, tmp_path):
+    url, pki = mtls_api
+    other = tmp_path / "other"
+    other.mkdir()
+    # A differently named CA: one sharing the name fails as a bad signature instead.
+    stranger = _mint_pki(other, ca_name="some-other-ca")
+    _tls_settings(
+        monkeypatch,
+        url=url,
+        cert=stranger["client_cert"],
+        key=stranger["client_key"],
+        ca=pki["ca"],
+    )
+    with pytest.raises(_ToolError, match="rejected the client certificate"):
+        server._do_request(server._get_client(), "GET", "/health", None)
+
+
+def test_mtls_private_ca_not_trusted_by_default(monkeypatch, mtls_api):
+    """Without API_CA_CERT the private CA is untrusted: verification is on, never skipped."""
+    url, pki = mtls_api
+    _tls_settings(monkeypatch, url=url, cert=pki["client_cert"], key=pki["client_key"])
+    with pytest.raises(_ToolError, match="not trusted.*set API_CA_CERT"):
+        server._do_request(server._get_client(), "GET", "/health", None)
+
+
+def test_health_check_names_tls_cause(monkeypatch, mtls_api, caplog):
+    """Startup says why, instead of asking whether a running service is running."""
+    url, pki = mtls_api
+    _tls_settings(monkeypatch, url=url, cert=pki["client_cert"], key=pki["client_key"])
+    with (
+        caplog.at_level(logging.ERROR, logger=server.logger.name),
+        pytest.raises(SystemExit),
+    ):
+        server._check_api_health()
+    assert "API health check failed: The API's TLS certificate" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "exc,url,cert,expected",
+    [
+        (httpx.ConnectError("[Errno 61] Connection refused"), "https://a", None, "Cannot connect"),
+        (httpx.ConnectError("[SSL: WRONG_VERSION_NUMBER]"), "https://a", None, "TLS handshake"),
+        (httpx.RemoteProtocolError("Server disconnected"), "https://a", None, "API_CLIENT_CERT"),
+        (httpx.RemoteProtocolError("Server disconnected"), "http://a", None, "failed: Server"),
+        (
+            httpx.ReadError("[SSL: TLSV13_ALERT_CERTIFICATE_REQUIRED] tlsv13 alert"),
+            "https://a",
+            None,
+            "requires a client certificate",
+        ),
+        (
+            httpx.ReadError("[SSL: TLSV1_ALERT_UNKNOWN_CA] tlsv1 alert unknown ca"),
+            "https://a",
+            "c.pem",
+            "rejected the client certificate",
+        ),
+    ],
+)
+def test_transport_error_message(monkeypatch, exc, url, cert, expected):
+    _tls_settings(monkeypatch, url=url, cert=cert)
+    assert expected in server._transport_error_message(exc)
+
+
+def test_transport_error_hint_absent_when_client_cert_set(monkeypatch):
+    """The client-cert hint is only for when none is configured."""
+    _tls_settings(monkeypatch, url="https://a", cert="c.pem")
+    message = server._transport_error_message(httpx.ReadError("reset"))
+    assert "API_CLIENT_CERT" not in message

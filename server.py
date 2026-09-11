@@ -28,11 +28,13 @@ import ipaddress
 import json
 import logging
 import os
+import ssl
 import threading
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Literal, NoReturn
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 from fastmcp import FastMCP
@@ -63,6 +65,15 @@ class Settings(BaseSettings):
     api_key: str | None = None
     # Header the credential is sent in; must match the API's API_KEY_HEADER.
     api_key_header: str = "X-API-Key"
+    # Client-side TLS for the hop to the API, for an API that serves HTTPS
+    # itself (API_TLS_* on the API, v2.29+) or a gateway in front of it.
+    # API_CLIENT_CERT (+ API_CLIENT_KEY unless the key is in the same PEM)
+    # presents a certificate, for mutual TLS (API_TLS_CLIENT_CA on the API).
+    # API_CA_CERT *replaces* the default trust store, for a private CA. All
+    # unset: httpx's default trust, no client certificate — unchanged.
+    api_client_cert: str | None = None
+    api_client_key: str | None = None
+    api_ca_cert: str | None = None
     mcp_transport: Literal["stdio", "http", "sse"] = "stdio"
     mcp_server_host: str = "localhost"
     mcp_server_port: int = 9000
@@ -461,8 +472,126 @@ class PhaseMiddleware(Middleware):
 # ---------------------------------------------------------------------------
 
 
+class ApiTLSConfigError(ValueError):
+    """``API_CLIENT_CERT`` / ``API_CLIENT_KEY`` / ``API_CA_CERT`` are unusable."""
+
+
+class _EncryptedKeyError(Exception):
+    """Raised by the password callback: the key is encrypted and we never prompt."""
+
+
+def _refuse_password_prompt() -> NoReturn:
+    # Without a callback OpenSSL prompts on the terminal for an encrypted key —
+    # and under the stdio transport stdin is the MCP pipe, so the prompt would
+    # read protocol bytes or hang. OpenSSL calls this only when a key is
+    # encrypted, which is what lets the error below say so.
+    raise _EncryptedKeyError
+
+
+def _ssl_reason(exc: BaseException) -> str:
+    """The useful half of an ssl/OS error, without the file path repeated."""
+    reason = getattr(exc, "reason", None) or getattr(exc, "strerror", None)
+    return str(reason or exc).strip() or exc.__class__.__name__
+
+
+def _api_tls_verify() -> ssl.SSLContext | bool:
+    """The ``verify`` value for the API client, built from the ``API_*`` TLS settings.
+
+    ``True`` when none is set: httpx's default trust (certifi, or
+    ``SSL_CERT_FILE`` / ``SSL_CERT_DIR``) and no client certificate, exactly as
+    before these settings existed. Never ``False`` — there is deliberately no
+    way to switch verification off.
+
+    Every failure names the setting and the file. Otherwise a path that is
+    missing, unreadable, or not what it claims surfaces as an SSL error from
+    inside httpx on the first request, naming neither.
+    """
+    if settings.api_client_key and not settings.api_client_cert:
+        raise ApiTLSConfigError(
+            "API_CLIENT_KEY is set without API_CLIENT_CERT. A private key alone "
+            "cannot identify a client; set the certificate too."
+        )
+
+    paths: dict[str, str | None] = {}
+    for name, value in (
+        ("API_CLIENT_CERT", settings.api_client_cert),
+        ("API_CLIENT_KEY", settings.api_client_key),
+        ("API_CA_CERT", settings.api_ca_cert),
+    ):
+        if not value:
+            paths[name] = None
+            continue
+        # Validate and use the *expanded* path: checking ~/ca.pem and then
+        # handing OpenSSL the literal string would pass here and fail later.
+        path = Path(value).expanduser()
+        if not path.is_file():
+            raise ApiTLSConfigError(f"{name}: no such file: {path}")
+        if not os.access(path, os.R_OK):
+            raise ApiTLSConfigError(f"{name}: not readable: {path}")
+        paths[name] = str(path)
+
+    cert, key, ca = paths["API_CLIENT_CERT"], paths["API_CLIENT_KEY"], paths["API_CA_CERT"]
+    if cert is None and ca is None:
+        return True
+
+    # Certificate material on a plaintext URL would be silently ignored: no
+    # handshake, so nothing presented and nothing verified. A configuration
+    # that reads as TLS and is not is worse than one that refuses to start.
+    if urlsplit(settings.api_base_url).scheme.lower() != "https":
+        configured = ", ".join(name for name in ("API_CLIENT_CERT", "API_CA_CERT") if paths[name])
+        raise ApiTLSConfigError(
+            f"{configured} set, but API_BASE_URL is not https:// "
+            f"({settings.api_base_url}) — the connection would be plaintext and "
+            "the certificate settings ignored."
+        )
+
+    # Two constructions, and the split matters. Without API_CA_CERT we must
+    # land on *httpx's* default trust, not ssl's: ssl.create_default_context()
+    # uses OpenSSL's own store, which on some platforms is close to empty, so
+    # adding a client certificate would silently change which authorities the
+    # server is checked against. With API_CA_CERT we replace the store on
+    # purpose — the construction httpx's verify=<str> deprecation points at.
+    try:
+        if ca:
+            context = ssl.create_default_context(cafile=ca)
+        else:
+            context = httpx.create_ssl_context(verify=True)
+    except (ssl.SSLError, OSError) as exc:
+        raise ApiTLSConfigError(
+            f"API_CA_CERT: not a usable PEM CA bundle ({_ssl_reason(exc)}): {ca}"
+        ) from None
+    if cert:
+        names = "API_CLIENT_CERT/API_CLIENT_KEY" if key else "API_CLIENT_CERT"
+        try:
+            context.load_cert_chain(cert, key, password=_refuse_password_prompt)
+        except _EncryptedKeyError:
+            raise ApiTLSConfigError(
+                f"{names}: the private key is encrypted. Password-protected keys "
+                "are not supported; provide the key decrypted, protected by file "
+                "permissions or a secret mount."
+            ) from None
+        except (ssl.SSLError, OSError) as exc:
+            raise ApiTLSConfigError(
+                f"{names}: could not load the certificate ({_ssl_reason(exc)})"
+            ) from None
+    return context
+
+
+def _api_tls_summary() -> str:
+    """One line for the startup banner describing the API hop's TLS."""
+    if urlsplit(settings.api_base_url).scheme.lower() != "https":
+        return "none (plaintext http://)"
+    trust = "API_CA_CERT" if settings.api_ca_cert else "default trust store"
+    client = "client certificate" if settings.api_client_cert else "no client certificate"
+    return f"verified against {trust}, {client}"
+
+
 def _get_client() -> httpx.Client:
-    """Get or create the shared httpx client."""
+    """Get or create the shared httpx client.
+
+    Raises :class:`ApiTLSConfigError` when the client-TLS settings are unusable;
+    ``main`` calls this before serving so that surfaces as a startup failure.
+    """
     global _http_client
     if _http_client is None:
         with _state_lock:
@@ -476,8 +605,53 @@ def _get_client() -> httpx.Client:
                     base_url=settings.api_base_url,
                     timeout=settings.api_timeout,
                     headers=headers,
+                    # Built once, here: the context validated is the one on the
+                    # wire. A context rather than cert=, which httpx 0.28
+                    # deprecates.
+                    verify=_api_tls_verify(),
                 )
     return _http_client
+
+
+def _transport_error_message(exc: httpx.TransportError) -> str:
+    """Say why the API could not be reached, naming the setting when it is TLS.
+
+    Against an API that serves TLS itself (v2.29+) the two likeliest failures
+    are ours to fix, and neither reads as a TLS problem if left raw: an
+    untrusted certificate is a ``ConnectError`` indistinguishable from a
+    stopped service, and a refused client certificate arrives under TLS 1.3
+    after the handshake has already "succeeded" — as the server dropping the
+    connection with no response.
+    """
+    url = settings.api_base_url
+    text = str(exc)
+    upper = text.upper()
+    if "CERTIFICATE_VERIFY_FAILED" in upper:
+        return (
+            f"The API's TLS certificate at {url} is not trusted ({text}). If it is "
+            "issued by a private CA, set API_CA_CERT to that CA's certificate."
+        )
+    if "CERTIFICATE_REQUIRED" in upper:
+        return (
+            f"The API at {url} requires a client certificate and none was "
+            "presented. Set API_CLIENT_CERT and API_CLIENT_KEY."
+        )
+    if "ALERT_UNKNOWN_CA" in upper or "ALERT_BAD_CERTIFICATE" in upper:
+        return (
+            f"The API at {url} rejected the client certificate ({text}). It must "
+            "be signed by the CA the API trusts for clients (API_TLS_CLIENT_CA)."
+        )
+    if "SSL" in upper or "TLS" in upper:
+        return f"TLS handshake with the API at {url} failed: {text}"
+    if isinstance(exc, httpx.ConnectError):
+        return f"Cannot connect to OrionBelt Semantic Layer API at {url}"
+    message = f"Connection to the API at {url} failed: {text.rstrip('.') or type(exc).__name__}"
+    if urlsplit(url).scheme.lower() == "https" and not settings.api_client_cert:
+        message += (
+            ". If the API requires a client certificate (API_TLS_CLIENT_CA on the "
+            "API, or a gateway in front), set API_CLIENT_CERT and API_CLIENT_KEY."
+        )
+    return message
 
 
 def _create_api_session() -> str:
@@ -486,12 +660,10 @@ def _create_api_session() -> str:
     try:
         resp = client.post(f"{_API_V1}/sessions", json={"metadata": {"source": "mcp"}})
         resp.raise_for_status()
-    except httpx.ConnectError:
-        raise ToolError(
-            f"Cannot connect to OrionBelt Semantic Layer API at {settings.api_base_url}"
-        ) from None
     except httpx.TimeoutException:
         raise ToolError("API request timed out while creating session") from None
+    except httpx.TransportError as exc:  # after TimeoutException, its subclass
+        raise ToolError(_transport_error_message(exc)) from None
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 429:
             detail = _parse_error_detail(exc.response)
@@ -629,12 +801,10 @@ def _do_request(
     """Execute a single HTTP request, wrapping connection/timeout errors."""
     try:
         return client.request(method, path, json=json_body, params=params)
-    except httpx.ConnectError:
-        raise ToolError(
-            f"Cannot connect to OrionBelt Semantic Layer API at {settings.api_base_url}"
-        ) from None
     except httpx.TimeoutException:
         raise ToolError("API request timed out") from None
+    except httpx.TransportError as exc:  # after TimeoutException, its subclass
+        raise ToolError(_transport_error_message(exc)) from None
 
 
 def _api_request(
@@ -3259,11 +3429,10 @@ def _check_api_health() -> None:
         resp = _do_request(client, "GET", "/health", None)
         resp.raise_for_status()
         logger.info("API health check passed (%s)", settings.api_base_url)
-    except ToolError:
-        logger.error(
-            "Cannot reach OrionBelt Semantic Layer API at %s — is the service running?",
-            settings.api_base_url,
-        )
+    except ToolError as exc:
+        # The message says why — a stopped service, an untrusted certificate
+        # and a refused client certificate need different fixes.
+        logger.error("API health check failed: %s", exc)
         raise SystemExit(1) from None
     except httpx.HTTPStatusError as exc:
         logger.error(
@@ -3401,9 +3570,9 @@ def _warn_if_transport_exposed() -> None:
     correct warning gets classified as noise.
 
     The counterpart on the API's own listeners is its 2.28.0 warning for Flight
-    SQL authenticating over plaintext gRPC. Those are raw protocol sockets that
-    no ordinary proxy can front, which is why they grew their own TLS settings
-    and this transport does not.
+    SQL authenticating over plaintext gRPC. Those listeners — and, since 2.29.0,
+    its REST surface — can serve TLS themselves (``*_TLS_*``); this transport
+    cannot, so an ingress is the only way it gets TLS at all.
     """
     if settings.mcp_transport == "stdio":
         return
@@ -3444,6 +3613,15 @@ def main() -> None:
     logger.info("OrionBelt Semantic Layer MCP Server v%s", __version__)
     logger.info("Thin MCP server — delegates to OrionBelt Semantic Layer REST API")
     logger.info("=" * 60)
+
+    # Build the API client now, on every transport: it carries the TLS context,
+    # so unusable certificate settings stop startup naming the setting, rather
+    # than failing on the first tool call (HTTP defers everything else).
+    try:
+        _get_client()
+    except ApiTLSConfigError as exc:
+        logger.error("API TLS configuration is unusable: %s", exc)
+        raise SystemExit(1) from None
 
     if settings.mcp_transport == "stdio":
         # stdio: eager init — connection is local & synchronous, fail-fast is fine.
@@ -3496,6 +3674,7 @@ def main() -> None:
     logger.info("")
     logger.info("Configuration:")
     logger.info("  API URL:    %s", settings.api_base_url)
+    logger.info("  API TLS:    %s", _api_tls_summary())
     logger.info("  Transport:  %s", settings.mcp_transport)
     if settings.mcp_transport != "stdio":
         logger.info("  Host:       %s", settings.mcp_server_host)
