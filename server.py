@@ -3387,10 +3387,18 @@ def _warn_if_transport_exposed() -> None:
     Cloud Run is the one deployment we *can* detect, and it splits the two jobs:
     TLS is automatic (the service URL is HTTPS and plain HTTP is forwarded to
     the container, so the mandatory 0.0.0.0 bind says nothing about exposure),
-    while caller authentication is a deploy-time IAM choice this process cannot
+    while what may reach the service is a deploy-time choice this process cannot
     read. Suppressing the alarm there and saying nothing else would let silence
     read as proof of protection, so it gets its own note about the half that is
     still the operator's.
+
+    That half is not only IAM. An ``--ingress`` restriction or an authenticating
+    load balancer in front settles it just as well, and OBSL's own rollout uses
+    exactly that — ``--allow-unauthenticated`` with
+    ``--ingress internal-and-cloud-load-balancing``, which is a closed service
+    rather than an open one. So the note names the ways rather than prescribing
+    IAM: telling an operator to fix something they solved differently is how a
+    correct warning gets classified as noise.
 
     The counterpart on the API's own listeners is its 2.28.0 warning for Flight
     SQL authenticating over plaintext gRPC. Those are raw protocol sockets that
@@ -3404,12 +3412,13 @@ def _warn_if_transport_exposed() -> None:
     if os.environ.get("K_SERVICE"):
         logger.info(
             "Cloud Run terminates TLS at its front end, so the %s bind on port "
-            "%s is expected and traffic to the service URL is encrypted. Caller "
-            "authentication is a separate, deploy-time choice this server cannot "
-            "read: deployed with --allow-unauthenticated, anyone who learns the "
-            "URL can call every tool with this server's API credential. Confirm "
-            "the service requires an IAM invoker, or front it with something "
-            "that authenticates.",
+            "%s is expected and traffic to the service URL is encrypted. What "
+            "may reach the service is a separate, deploy-time choice this "
+            "process cannot read: IAM invoker permission, an --ingress "
+            "restriction, or an authenticating load balancer in front. With "
+            "none of those, --allow-unauthenticated leaves every tool callable "
+            "by anyone who learns the URL, spending this server's API "
+            "credential. Confirm one of them is in place.",
             settings.mcp_server_host,
             settings.effective_port,
         )

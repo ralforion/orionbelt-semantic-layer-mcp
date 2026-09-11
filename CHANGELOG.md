@@ -4,6 +4,22 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Changed
+
+- **The Cloud Run note names the ways access can be settled rather than
+  prescribing IAM.** 2.28.0 told operators to confirm the service requires an
+  IAM invoker, which is only one of three answers — an `--ingress` restriction
+  or an authenticating load balancer settles it just as well. OBSL's own rollout
+  uses exactly that: `--allow-unauthenticated` together with
+  `--ingress internal-and-cloud-load-balancing` and Cloud Armor on the LB, a
+  closed service rather than an open one. The note as shipped would have fired
+  on that deployment prescribing a fix for something already solved a different
+  way, which is how a correct warning gets learned as noise — the failure the
+  scoping in 2.28.0 was designed to avoid, arriving from the other side. The
+  README passage and `MCP_BEHIND_PROXY` guidance match.
+
 ## [2.28.0] — 2026-09-10
 
 Tracks OrionBelt Semantic Layer API **v2.28.x**. The compatibility gate compares
