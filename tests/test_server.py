@@ -3801,14 +3801,14 @@ def _tool_names_in_fresh_module(single: bool) -> set[str]:
 
 
 def test_registered_tool_counts_are_what_the_readme_claims():
-    """17 single-model / 21 multi-model / 22 distinct / 16 shared."""
+    """24 single-model / 28 multi-model / 29 distinct / 23 shared."""
     single = _tool_names_in_fresh_module(True)
     multi = _tool_names_in_fresh_module(False)
 
-    assert len(single) == 17
-    assert len(multi) == 21
-    assert len(single | multi) == 22
-    assert len(single & multi) == 16
+    assert len(single) == 24
+    assert len(multi) == 28
+    assert len(single | multi) == 29
+    assert len(single & multi) == 23
     assert single - multi == {"get_model"}
     assert "validate_model" in single & multi
 
@@ -4275,3 +4275,435 @@ def test_transport_error_hint_absent_when_client_cert_set(monkeypatch):
     _tls_settings(monkeypatch, url="https://a", cert="c.pem")
     message = server._transport_error_message(httpx.ReadError("reset"))
     assert "API_CLIENT_CERT" not in message
+
+
+# ---------------------------------------------------------------------------
+# Business rules + ontology links (API 2.30)
+# ---------------------------------------------------------------------------
+
+_RULE_SUMMARY = {
+    "name": "High Value Client",
+    "type": "eligibility",
+    "level": "aggregate",
+    "findings": "matches",
+    "severity": None,
+    "grain": ["Client Name"],
+    "description": "Clients whose lifetime sales pass the threshold",
+    "owner": "sales-ops",
+    "dimensions": [],
+    "measures": ["Total Sales"],
+    "depends_on": [],
+    "executable": True,
+    "error": None,
+}
+_RULE_LIST = {
+    "dialect": "duckdb",
+    "rules": [
+        _RULE_SUMMARY,
+        {
+            **_RULE_SUMMARY,
+            "name": "Healthy Category",
+            "type": "validation",
+            "findings": "violations",
+            "severity": "warning",
+            "grain": ["Product Category"],
+            "measures": ["Total Sales", "Return Rate"],
+            "depends_on": ["High Return Rate"],
+            "executable": False,
+            "error": "UNKNOWN_RULE: High Return Rate",
+        },
+    ],
+    "statistics": {
+        "total": 2,
+        "by_type": {"eligibility": 1, "validation": 1},
+        "by_level": {"aggregate": 2},
+        "by_severity": {"warning": 1},
+        "executable": 1,
+        "not_executable": 1,
+    },
+}
+_MAPPING = {
+    "concept": "schema:Product",
+    "expanded_iri": "https://schema.org/Product",
+    "relation": "exact",
+    "justification": "curated",
+    "source": None,
+    "ontology_version": "29.0",
+    "confidence": 0.9,
+    "comment": None,
+}
+
+
+def test_list_rules_renders_statistics_and_rules(mock_api: respx.MockRouter):
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/rules").mock(
+        return_value=httpx.Response(200, json=_RULE_LIST)
+    )
+    out = server._impl_list_rules("m001")
+    assert out.startswith("2 rules on duckdb:")
+    assert "by type: eligibility 1, validation 1" in out
+    assert "executable: 1, not executable: 1" in out
+    assert "High Value Client  (eligibility, aggregate, matches, grain Client Name)" in out
+    assert "reads: Total Sales" in out
+    assert "Healthy Category  (validation, aggregate, violations, severity warning" in out
+    assert "depends on: High Return Rate" in out
+    assert "not executable: UNKNOWN_RULE: High Return Rate" in out
+
+
+def test_list_rules_without_rules(mock_api: respx.MockRouter):
+    server._single_model_mode = True
+    mock_api.get("/v1/rules").mock(
+        return_value=httpx.Response(
+            200, json={"dialect": "duckdb", "rules": [], "statistics": {"total": 0}}
+        )
+    )
+    assert "declares no business rules" in server._impl_list_rules(None)
+
+
+def test_explain_rule_includes_condition_mappings_and_compiled_sql(mock_api: respx.MockRouter):
+    _mock_create_session(mock_api)
+    detail = {
+        **_RULE_SUMMARY,
+        "condition": {"field": "Total Sales", "op": ">", "value": 50000},
+        "synonyms": ["key account"],
+        "external_concept_mappings": [_MAPPING],
+        "query": {},
+    }
+    mock_api.get("/v1/sessions/test-session-1/models/m001/rules/High%20Value%20Client").mock(
+        return_value=httpx.Response(200, json=detail)
+    )
+    compile_route = mock_api.post(
+        "/v1/sessions/test-session-1/models/m001/rules/High%20Value%20Client/compile"
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "name": "High Value Client",
+                "level": "aggregate",
+                "findings": "matches",
+                "dialect": "duckdb",
+                "sql": "SELECT ... HAVING SUM(amount) > 50000",
+                "query": {},
+                "warnings": [{"code": "X", "severity": "warning", "message": "careful"}],
+            },
+        )
+    )
+    out = server._impl_explain_rule("m001", "High Value Client")
+    assert out.startswith(
+        "Rule: High Value Client  (eligibility, aggregate, matches, grain Client Name)"
+    )
+    assert "owner: sales-ops" in out
+    assert "synonyms: key account" in out
+    assert "maps to: exact schema:Product  (https://schema.org/Product)" in out
+    assert "justification curated; version 29.0; confidence 0.9" in out
+    assert '"field": "Total Sales"' in out
+    assert "Compiled SQL (duckdb):\nSELECT ... HAVING SUM(amount) > 50000" in out
+    assert "warning: [warning:X] careful" in out
+    assert compile_route.called
+
+
+def test_explain_rule_reports_a_rule_that_does_not_compile(mock_api: respx.MockRouter):
+    _mock_create_session(mock_api)
+    detail = {**_RULE_SUMMARY, "condition": {"rule": "Nope"}, "synonyms": []}
+    mock_api.get("/v1/sessions/test-session-1/models/m001/rules/High%20Value%20Client").mock(
+        return_value=httpx.Response(200, json=detail)
+    )
+    mock_api.post(
+        "/v1/sessions/test-session-1/models/m001/rules/High%20Value%20Client/compile"
+    ).mock(return_value=httpx.Response(400, json={"detail": "UNKNOWN_RULE: Nope"}))
+    out = server._impl_explain_rule("m001", "High Value Client")
+    assert "Compiled SQL: not available (" in out and "UNKNOWN_RULE: Nope" in out
+
+
+def test_evaluate_rule_lists_findings(mock_api: respx.MockRouter):
+    _mock_create_session(mock_api)
+    route = mock_api.post(
+        "/v1/sessions/test-session-1/models/m001/rules/High%20Value%20Client/evaluate"
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "name": "High Value Client",
+                "type": "eligibility",
+                "level": "aggregate",
+                "findings": "matches",
+                "severity": None,
+                "dialect": "duckdb",
+                "sql": "SELECT ...",
+                "columns": [{"name": "Client Name"}, {"name": "Total Sales"}],
+                "rows": [["Alex Costa", 337741.72], ["Avery Klein", None]],
+                "row_count": 2,
+                "limit": 2,
+                "execution_time_ms": 8.4,
+                "cached": True,
+                "warnings": [],
+            },
+        )
+    )
+    out = server._impl_evaluate_rule("m001", "High Value Client", 2, None, False)
+    assert out.startswith(
+        "High Value Client: 2 matches  (eligibility, aggregate, duckdb, 8 ms, cached)"
+    )
+    assert "showing the first 2" in out
+    assert "Client Name | Total Sales" in out
+    assert "Alex Costa | 337741.72" in out
+    assert "Avery Klein | " in out
+    assert json.loads(route.calls[0].request.content) == {"format_values": False, "limit": 2}
+
+
+def test_evaluate_rules_report(mock_api: respx.MockRouter):
+    server._single_model_mode = True
+    route = mock_api.post("/v1/rules/evaluate").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "model_id": "m",
+                "dialect": "duckdb",
+                "generated_at": "2026-09-13T00:00:00Z",
+                "filters": {},
+                "summary": {
+                    "total": 2,
+                    "executed": 1,
+                    "compiled": 0,
+                    "skipped": 0,
+                    "failed": 1,
+                    "with_findings": 1,
+                },
+                "results": [
+                    {
+                        "name": "High Value Client",
+                        "type": "eligibility",
+                        "level": "aggregate",
+                        "findings": "matches",
+                        "severity": None,
+                        "status": "executed",
+                        "finding_count": 1,
+                        "columns": ["Client Name"],
+                        "rows": [["Alex Costa"]],
+                        "sql": None,
+                        "error": None,
+                        "cached": False,
+                        "elapsed_ms": 3.0,
+                    },
+                    {
+                        "name": "Healthy Category",
+                        "type": "validation",
+                        "level": "aggregate",
+                        "findings": "violations",
+                        "severity": "warning",
+                        "status": "failed",
+                        "finding_count": None,
+                        "columns": [],
+                        "rows": [],
+                        "sql": None,
+                        "error": "UNKNOWN_RULE",
+                        "cached": False,
+                        "elapsed_ms": 0.0,
+                    },
+                ],
+                "elapsed_ms": 12.0,
+            },
+        )
+    )
+    out = server._impl_evaluate_rules(None, ["validation"], None, False, None, 5, True, None)
+    assert out.startswith(
+        "Rule report (duckdb, dry run: compiled only, 12 ms): 2 rules, 1 executed"
+    )
+    assert "High Value Client  (eligibility, aggregate): executed, 1 matches" in out
+    assert "    Client Name\n" in out and "    Alex Costa" in out
+    assert "Healthy Category  (validation, aggregate): failed, severity warning" in out
+    assert "error: UNKNOWN_RULE" in out
+    body = json.loads(route.calls[0].request.content)
+    assert body == {
+        "executable_only": False,
+        "limit": 5,
+        "dry_run": True,
+        "include_sql": False,
+        "types": ["validation"],
+    }
+
+
+def test_evaluate_rule_is_gated_by_query_execute_but_the_report_is_not():
+    assert server._TOOL_CAPABILITY["evaluate_rule"] == server.CAP_QUERY_EXECUTE
+    assert "evaluate_rules" not in server._TOOL_CAPABILITY
+
+
+def test_find_concept_mappings_filters_and_renders(mock_api: respx.MockRouter):
+    _mock_create_session(mock_api)
+    route = mock_api.get(
+        "/v1/sessions/test-session-1/models/m001/concept-mappings",
+        params={"namespace": "schema", "types": "dimension,measure"},
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "mappings": [{**_MAPPING, "object": {"type": "dimension", "name": "Product"}}],
+                "total": 1,
+                "concept": None,
+            },
+        )
+    )
+    out = server._impl_find_concept_mappings("m001", None, "schema", None, ["dimension", "measure"])
+    assert out.startswith("1 concept mappings:")
+    assert "[dimension] Product  ->  exact schema:Product  (https://schema.org/Product)" in out
+    assert route.called
+
+
+def test_find_concept_mappings_empty(mock_api: respx.MockRouter):
+    server._single_model_mode = True
+    mock_api.get("/v1/concept-mappings", params={"concept": "x:Y"}).mock(
+        return_value=httpx.Response(200, json={"mappings": [], "total": 0, "concept": "x:Y"})
+    )
+    assert "No external concept mappings match" in server._impl_find_concept_mappings(
+        None, "x:Y", None, None, None
+    )
+
+
+def test_list_concept_namespaces(mock_api: respx.MockRouter):
+    _mock_create_session(mock_api)
+    mock_api.get("/v1/sessions/test-session-1/models/m001/concept-mappings/namespaces").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "prefixes": {"schema": "https://schema.org/", "fibo": "https://fibo.example/"},
+                "namespaces": [
+                    {
+                        "prefix": "schema",
+                        "namespace": "https://schema.org/",
+                        "mapping_count": 4,
+                        "object_count": 3,
+                    }
+                ],
+            },
+        )
+    )
+    out = server._impl_list_concept_namespaces("m001")
+    assert "  schema: https://schema.org/  (mappings 4, objects 3)" in out
+    assert "Declared prefixes without a mapping:\n  fibo: https://fibo.example/" in out
+
+
+def test_list_unmapped_artefacts(mock_api: respx.MockRouter):
+    _mock_create_session(mock_api)
+    mock_api.get(
+        "/v1/sessions/test-session-1/models/m001/concept-mappings/unmapped",
+        params={"types": "metric"},
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "objects": [{"type": "metric", "name": "Gross Margin"}],
+                "total": 1,
+                "types": ["metric"],
+            },
+        )
+    )
+    out = server._impl_list_unmapped_artefacts("m001", ["metric"])
+    assert out == "1 unmapped artefacts (metric):\n  [metric] Gross Margin"
+
+
+def test_describe_model_shows_ontology_links_and_rules(mock_api: respx.MockRouter):
+    server._single_model_mode = True
+    schema = json.loads(json.dumps(_SCHEMA_RESPONSE))
+    schema["ontology_prefixes"] = {"schema": "https://schema.org/"}
+    schema["external_concept_mappings"] = [{**_MAPPING, "concept": "schema:Organization"}]
+    schema["dimensions"][0]["external_concept_mappings"] = [_MAPPING]
+    mock_api.get("/v1/schema").mock(return_value=httpx.Response(200, json=schema))
+    mock_api.get("/v1/rules").mock(return_value=httpx.Response(200, json=_RULE_LIST))
+    out = server._impl_describe_model(None)
+    assert "    maps to: exact schema:Product  (https://schema.org/Product)" in out
+    assert (
+        "ONTOLOGY:\n  prefix schema: https://schema.org/\n  maps to: exact schema:Organization"
+        in out
+    )
+    assert "RULES: 2 (eligibility 1, validation 1; executable 1)  -- see list_rules" in out
+
+
+def test_describe_model_without_rules_endpoint_is_unchanged(mock_api: respx.MockRouter):
+    """An older API (no /rules) or a model without rules adds nothing."""
+    server._single_model_mode = True
+    mock_api.get("/v1/schema").mock(return_value=httpx.Response(200, json=_SCHEMA_RESPONSE))
+    mock_api.get("/v1/rules").mock(return_value=httpx.Response(404, json={"detail": "nope"}))
+    out = server._impl_describe_model(None)
+    assert "RULES:" not in out and "ONTOLOGY:" not in out and "maps to:" not in out
+
+
+def test_sparql_query_surfaces_unbound_variable_warnings(mock_api: respx.MockRouter):
+    server._single_model_mode = True
+    mock_api.post("/v1/sparql").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "type": "select",
+                "variables": ["label"],
+                "results": [{"label": "Orders"}],
+                "boolean": None,
+                "warnings": ["Variable ?lable is used in ORDER BY but never bound"],
+            },
+        )
+    )
+    out = server._impl_sparql_query(
+        None, "SELECT ?label WHERE { ?s rdfs:label ?label } ORDER BY ?lable"
+    )
+    assert out.endswith("\n\nwarning: Variable ?lable is used in ORDER BY but never bound")
+    mock_api.post("/v1/sparql").mock(
+        return_value=httpx.Response(
+            200,
+            json={"type": "select", "variables": ["x"], "results": [], "warnings": ["unbound ?x"]},
+        )
+    )
+    assert server._impl_sparql_query(None, "SELECT ?x WHERE {}") == (
+        "SPARQL query returned no results.\nwarning: unbound ?x"
+    )
+
+
+def test_query_string_joins_lists_and_skips_unset():
+    assert server._query_string(concept=None, types=["a", "b"], relation="") == "?types=a%2Cb"
+    assert server._query_string() == ""
+
+
+def test_new_tools_are_run_time_and_registered():
+    expected = {
+        "list_rules",
+        "explain_rule",
+        "evaluate_rule",
+        "evaluate_rules",
+        "find_concept_mappings",
+        "list_concept_namespaces",
+        "list_unmapped_artefacts",
+    }
+    assert expected <= server._RUN_TIME_TOOLS
+    assert expected <= _tool_names_in_fresh_module(False)
+    assert expected <= _tool_names_in_fresh_module(True)
+
+
+def test_debug_validation_documents_2_30_codes():
+    text = server._DEBUG_VALIDATION_TEXT
+    for code in (
+        "RULE_PARSE_ERROR",
+        "INVALID_RULE_CONDITION",
+        "UNKNOWN_RULE_FIELD",
+        "UNKNOWN_RULE",
+        "UNKNOWN_RULE_GRAIN",
+        "RULE_GRAIN_REQUIRED",
+        "RULE_GRAIN_NOT_ALLOWED",
+        "RULE_DIMENSION_OUTSIDE_GRAIN",
+        "RULE_REFERENCE_MISMATCH",
+        "CYCLIC_RULE_REFERENCE",
+        "INVALID_RULE_SEVERITY",
+        "ONTOLOGY_PARSE_ERROR",
+        "INVALID_ONTOLOGY_PREFIX",
+        "UNKNOWN_ONTOLOGY_PREFIX",
+        "INVALID_CONCEPT_IRI",
+        "INVALID_CONCEPT_MAPPING",
+        "DUPLICATE_CONCEPT_MAPPING",
+        "CONFLICTING_CONCEPT_MAPPING",
+        "ONTOLOGY_PREFIX_CONFLICT",
+    ):
+        assert f"`{code}`" in text, f"{code} is missing from debug_validation"
+
+
+def test_write_business_rule_prompt_is_registered():
+    prompts = {p.name for p in asyncio.run(server.mcp._list_prompts())}
+    assert "write_business_rule" in prompts
+    text = server._WRITE_BUSINESS_RULE_TEXT
+    assert "RULE_DIMENSION_OUTSIDE_GRAIN" in text and "broadMatch" in text

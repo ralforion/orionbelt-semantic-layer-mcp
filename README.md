@@ -7,8 +7,8 @@
 
 <p align="center"><strong>Thin MCP server that delegates to the OrionBelt® Semantic Layer REST API</strong></p>
 
-[![Version 2.29.0](https://img.shields.io/badge/version-2.29.0-purple.svg)](https://github.com/ralforion/orionbelt-semantic-layer-mcp/releases)
-[![OrionBelt® Semantic Layer 2.29](https://img.shields.io/badge/OrionBelt_Semantic_Layer-2.29-0054A6.svg)](https://github.com/ralforion/orionbelt-semantic-layer)
+[![Version 2.30.0](https://img.shields.io/badge/version-2.30.0-purple.svg)](https://github.com/ralforion/orionbelt-semantic-layer-mcp/releases)
+[![OrionBelt® Semantic Layer 2.30](https://img.shields.io/badge/OrionBelt_Semantic_Layer-2.29-0054A6.svg)](https://github.com/ralforion/orionbelt-semantic-layer)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/ralforion/orionbelt-semantic-layer-mcp/blob/main/LICENSE)
 [![FastMCP](https://img.shields.io/badge/FastMCP-3.4+-8A2BE2)](https://gofastmcp.com)
@@ -51,8 +51,8 @@ The OrionBelt® Semantic Layer platform has two deployment modes. This MCP serve
 - **No business logic** — all tool calls delegate to the REST API (v1 endpoints)
 - **Dual-mode** — auto-detects single-model or multi-model API mode at startup
 - **Auto-session management** — creates an API session on first tool call, caches the ID (multi-model mode)
-- **17 tools** (single-model mode) or **21 tools** (multi-model mode) for querying (QueryObject), execution, batch, discovery, composability (ACR), examples, diagrams, RDF/SPARQL, OSI export, model validation (offline or against the live datasource), and OBML reference + function catalog + JSON schemas. (22 distinct tools exist in total; the API mode selects which subset is active — they overlap in 16 — and no client ever sees all 22 at once.) The visible surface is narrowed further in the design-time phase and when query execution is disabled (see [Design-time vs run-time tool switching](#design-time-vs-run-time-tool-switching))
-- **4 prompts + 2 resources** for OBML / OBSQL reference and usage guidance
+- **24 tools** (single-model mode) or **28 tools** (multi-model mode) for querying (QueryObject), execution, batch, discovery, composability (ACR), examples, diagrams, RDF/SPARQL, business rules (list, explain, evaluate), ontology links (concept mappings, namespaces, unmapped artefacts), OSI export, model validation (offline or against the live datasource), and OBML reference + function catalog + JSON schemas. (29 distinct tools exist in total; the API mode selects which subset is active — they overlap in 23 — and no client ever sees all 29 at once.) The visible surface is narrowed further in the design-time phase and when query execution is disabled (see [Design-time vs run-time tool switching](#design-time-vs-run-time-tool-switching))
+- **5 prompts + 2 resources** for OBML / OBSQL reference, business rules, and usage guidance
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/ralforion/orionbelt-semantic-layer-mcp/main/docs/assets/architecture.png" alt="OrionBelt® Analytics Architecture" width="900">
@@ -257,6 +257,23 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 | `get_model_graph(model_id)`                   | Return the model as OBSL-Core RDF (Turtle)  |
 | `query_model_graph_by_sparql(query, ...)`     | Run a read-only SPARQL query (SELECT / ASK) |
 
+### Business rules
+
+| MCP Tool                                                   | Description                                                                                             |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `list_rules(model_id)`                                     | The model's `rules:` with statistics by type, level (row-level / aggregate), severity and executability |
+| `explain_rule(name, model_id)`                             | One rule in full: definition, what it reads, dependencies, ontology links, and the SQL it compiles to  |
+| `evaluate_rule(name, limit?, dialect?, format_values?, model_id)` | Run one rule and list its findings: members for classification / eligibility, violations for validation / constraint. Needs query execution enabled |
+| `evaluate_rules(types?, severities?, executable_only?, max_rules?, limit=5, dry_run?, dialect?, model_id)` | Run every rule (or a subset) into a report with per-rule status, counts, sample findings and errors; `dry_run=True` compiles only and works with execution disabled |
+
+### Ontology links (external concept mappings)
+
+| MCP Tool                                                   | Description                                                                                     |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `find_concept_mappings(concept?, namespace?, relation?, types?, model_id)` | Every `externalConceptMappings` entry with its artefact, SKOS relation, expanded IRI and provenance; filter by concept, namespace, relation or artefact type |
+| `list_concept_namespaces(model_id)`                        | Which external ontologies the model links into, most used first, plus declared prefixes no mapping uses |
+| `list_unmapped_artefacts(types?, model_id)`                | The artefacts in the mappable scope still without a link                                        |
+
 ### References
 
 | MCP Tool                  | Description                                             |
@@ -291,7 +308,7 @@ design/reference tools:
 | --------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Always**      | always (both phases)        | `load_model`, `remove_model` (transition verbs — stay available in the run phase so a second model can be loaded mid-session, up to `max_models_per_session`); `run_batch` and `validate_model` (self-contained — each takes its model inline, so neither needs prior session state); `get_json_schema` (QueryObject/OBML schemas — needed in both phases) |
 | **Design-only** | only when no model loaded   | `get_obml_reference`, `get_function_catalog`, `list_dialects`                                                                                                          |
-| **Run-only**    | only when a model is loaded | `describe_model`, `get_model_diagram`, `find_artefacts`, `explain_artefact`, `execute_query`, `list_examples`, `get_example`, `get_model_graph`, `get_join_graph`, `find_composables`, `query_model_graph_by_sparql`, `list_models`, `export_model_to_osi` |
+| **Run-only**    | only when a model is loaded | `describe_model`, `get_model_diagram`, `find_artefacts`, `explain_artefact`, `execute_query`, `list_examples`, `get_example`, `get_model_graph`, `get_join_graph`, `find_composables`, `query_model_graph_by_sparql`, `list_rules`, `explain_rule`, `evaluate_rule`, `evaluate_rules`, `find_concept_mappings`, `list_concept_namespaces`, `list_unmapped_artefacts`, `list_models`, `export_model_to_osi` |
 
 ```
                        load_model  (returns "re-list" signal)
