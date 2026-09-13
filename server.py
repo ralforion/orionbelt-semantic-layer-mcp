@@ -34,7 +34,7 @@ from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal, NoReturn
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 import httpx
 from fastmcp import FastMCP
@@ -294,6 +294,14 @@ _RUN_TIME_TOOLS: frozenset[str] = frozenset(
         "find_composables",
         "query_model_graph_by_sparql",
         "list_models",
+        # business rules + ontology links (API 2.30)
+        "list_rules",
+        "explain_rule",
+        "evaluate_rule",
+        "evaluate_rules",
+        "find_concept_mappings",
+        "list_concept_namespaces",
+        "list_unmapped_artefacts",
     }
 )
 
@@ -364,6 +372,9 @@ CAP_QUERY_EXECUTE = "query_execute"
 # no capability and are always available (subject to phase).
 _TOOL_CAPABILITY: dict[str, str] = {
     "execute_query": CAP_QUERY_EXECUTE,
+    # ``evaluate_rules`` is deliberately not gated: with ``dry_run=True`` it
+    # compiles every rule without executing, which works with execution off.
+    "evaluate_rule": CAP_QUERY_EXECUTE,
 }
 
 # Capability flag → a resolver reading the current (startup-detected) config.
@@ -1342,6 +1353,7 @@ def _impl_describe_model(model_id: str | None = None) -> str:
             lines.append(f"    joins to: {', '.join(obj['join_targets'])}")
         if obj.get("synonyms"):
             lines.append(f"    synonyms: {', '.join(obj['synonyms'])}")
+        lines.extend(_render_mapping_lines(obj.get("external_concept_mappings"), "    "))
     lines.append("")
 
     # Dimensions
@@ -1358,6 +1370,7 @@ def _impl_describe_model(model_id: str | None = None) -> str:
             lines.append(f"    description: {dim['description']}")
         if dim.get("synonyms"):
             lines.append(f"    synonyms: {', '.join(dim['synonyms'])}")
+        lines.extend(_render_mapping_lines(dim.get("external_concept_mappings"), "    "))
     lines.append("")
 
     # Measures
@@ -1406,6 +1419,7 @@ def _impl_describe_model(model_id: str | None = None) -> str:
             lines.append(f"    filterContext: {', '.join(fc_parts)}")
         if m.get("synonyms"):
             lines.append(f"    synonyms: {', '.join(m['synonyms'])}")
+        lines.extend(_render_mapping_lines(m.get("external_concept_mappings"), "    "))
     lines.append("")
 
     # Metrics
@@ -1421,6 +1435,31 @@ def _impl_describe_model(model_id: str | None = None) -> str:
                 lines.append(f"    description: {met['description']}")
             if met.get("synonyms"):
                 lines.append(f"    synonyms: {', '.join(met['synonyms'])}")
+            lines.extend(_render_mapping_lines(met.get("external_concept_mappings"), "    "))
+        lines.append("")
+
+    # Ontology links (API 2.30): the prefixes compact IRIs expand with, and
+    # the mappings declared on the model itself (artefact mappings sit under
+    # each artefact above).
+    prefixes = desc.get("ontology_prefixes") or {}
+    model_mappings = desc.get("external_concept_mappings") or []
+    if prefixes or model_mappings:
+        lines.append("ONTOLOGY:")
+        for prefix, namespace in prefixes.items():
+            lines.append(f"  prefix {prefix}: {namespace}")
+        lines.extend(_render_mapping_lines(model_mappings, "  "))
+        lines.append("")
+
+    # Business rules (API 2.30) come from their own endpoint. Best-effort: a
+    # model without rules, or an older API, changes nothing here.
+    rule_stats = _fetch_rule_statistics(model_id)
+    if rule_stats.get("total"):
+        by_type = ", ".join(f"{k} {v}" for k, v in (rule_stats.get("by_type") or {}).items())
+        executable = rule_stats.get("executable", 0)
+        lines.append(
+            f"RULES: {rule_stats['total']} ({by_type}; executable {executable})"
+            "  -- see list_rules / explain_rule / evaluate_rule"
+        )
         lines.append("")
 
     # Model settings + server-resolved dialect/timezone, both from
@@ -1755,14 +1794,20 @@ def _impl_sparql_query(model_id: str | None, query: str) -> str:
 
     variables = data.get("variables", [])
     results = data.get("results", [])
+    # API 2.30 reports variables that are used but never bound (a typo in
+    # ORDER BY or SELECT) as warnings instead of silently ignoring them.
+    warning_lines = _format_warnings(data.get("warnings"), indent="warning: ")
     if not results:
-        return "SPARQL query returned no results."
+        return "\n".join(["SPARQL query returned no results.", *warning_lines])
 
     # Format as a readable table
     lines = [" | ".join(variables)]
     lines.append(" | ".join("---" for _ in variables))
     for row in results:
         lines.append(" | ".join(str(row.get(v, "")) for v in variables))
+    if warning_lines:
+        lines.append("")
+        lines.extend(warning_lines)
     return "\n".join(lines)
 
 
@@ -2257,6 +2302,312 @@ def _impl_run_batch(
 
 
 # ---------------------------------------------------------------------------
+# Business rules + ontology links (API 2.30)
+# ---------------------------------------------------------------------------
+
+
+def _model_request(model_id: str | None, method: str, path: str, json_body: dict | None = None):
+    """Route a model-scoped call to the shortcut or the session endpoint."""
+    if model_id is None:
+        return _shortcut_request(method, path, json_body=json_body)
+    return _session_request(method, f"/models/{model_id}{path}", json_body=json_body)
+
+
+def _query_string(**params: Any) -> str:
+    """``?k=v&...`` for the parameters that are set (lists joined by comma)."""
+    items = {
+        k: (",".join(v) if isinstance(v, list) else v)
+        for k, v in params.items()
+        if v not in (None, "")
+    }
+    return f"?{urlencode(items)}" if items else ""
+
+
+def _render_mapping_lines(mappings: list | None, indent: str) -> list[str]:
+    """One line per external concept mapping: relation, concept, provenance."""
+    lines: list[str] = []
+    for m in mappings or []:
+        if not isinstance(m, dict):
+            continue
+        head = f"{indent}maps to: {m.get('relation', '?')} {m.get('concept', '?')}"
+        if m.get("expanded_iri") and m["expanded_iri"] != m.get("concept"):
+            head += f"  ({m['expanded_iri']})"
+        provenance = [
+            f"{label} {m[key]}"
+            for key, label in (
+                ("justification", "justification"),
+                ("source", "source"),
+                ("ontology_version", "version"),
+                ("confidence", "confidence"),
+                ("comment", "comment"),
+            )
+            if m.get(key) not in (None, "")
+        ]
+        if provenance:
+            head += f"  [{'; '.join(provenance)}]"
+        lines.append(head)
+    return lines
+
+
+def _fetch_rule_statistics(model_id: str | None) -> dict[str, Any]:
+    """Best-effort ``GET .../rules`` statistics for ``describe_model``."""
+    try:
+        data = _parse_json(_model_request(model_id, "GET", "/rules"))
+    except Exception:  # noqa: BLE001 — enrichment must never break the caller
+        return {}
+    stats = data.get("statistics") if isinstance(data, dict) else None
+    return stats if isinstance(stats, dict) else {}
+
+
+def _rule_headline(rule: dict) -> str:
+    """``Name  (type, level, findings[, severity][, grain: ...])``."""
+    tags = [rule.get("type", "?"), rule.get("level", "?"), rule.get("findings", "?")]
+    if rule.get("severity"):
+        tags.append(f"severity {rule['severity']}")
+    if rule.get("grain"):
+        tags.append(f"grain {', '.join(rule['grain'])}")
+    return f"{rule.get('name', '?')}  ({', '.join(tags)})"
+
+
+def _impl_list_rules(model_id: str | None) -> str:
+    """List the model's business rules with statistics (shared implementation)."""
+    data = _parse_json(_model_request(model_id, "GET", "/rules"))
+    rules = data.get("rules") or []
+    if not rules:
+        return "This model declares no business rules (no `rules:` block)."
+    stats = data.get("statistics") or {}
+
+    def counts(key: str) -> str:
+        return ", ".join(f"{k} {v}" for k, v in (stats.get(key) or {}).items()) or "-"
+
+    lines = [
+        f"{stats.get('total', len(rules))} rules on {data.get('dialect', '?')}:",
+        f"  by type: {counts('by_type')}",
+        f"  by level: {counts('by_level')}",
+        f"  by severity: {counts('by_severity')}",
+        f"  executable: {stats.get('executable', 0)}, not executable: "
+        f"{stats.get('not_executable', 0)}",
+        "",
+    ]
+    for rule in rules:
+        lines.append(f"  {_rule_headline(rule)}")
+        if rule.get("description"):
+            lines.append(f"    description: {rule['description']}")
+        reads = [*(rule.get("dimensions") or []), *(rule.get("measures") or [])]
+        if reads:
+            lines.append(f"    reads: {', '.join(reads)}")
+        if rule.get("depends_on"):
+            lines.append(f"    depends on: {', '.join(rule['depends_on'])}")
+        if not rule.get("executable", True):
+            lines.append(f"    not executable: {rule.get('error') or 'unknown reason'}")
+    return "\n".join(lines)
+
+
+def _impl_explain_rule(model_id: str | None, name: str) -> str:
+    """One rule in full, then the SQL it compiles to for the session's dialect."""
+    encoded = quote(name, safe="")
+    rule = _parse_json(_model_request(model_id, "GET", f"/rules/{encoded}"))
+    lines = [f"Rule: {_rule_headline(rule)}"]
+    if rule.get("description"):
+        lines.append(f"  description: {rule['description']}")
+    if rule.get("owner"):
+        lines.append(f"  owner: {rule['owner']}")
+    if rule.get("synonyms"):
+        lines.append(f"  synonyms: {', '.join(rule['synonyms'])}")
+    reads = [*(rule.get("dimensions") or []), *(rule.get("measures") or [])]
+    if reads:
+        lines.append(f"  reads: {', '.join(reads)}")
+    if rule.get("depends_on"):
+        lines.append(f"  depends on: {', '.join(rule['depends_on'])}")
+    lines.extend(_render_mapping_lines(rule.get("external_concept_mappings"), "  "))
+    if not rule.get("executable", True):
+        lines.append(f"  not executable: {rule.get('error') or 'unknown reason'}")
+    lines.append("")
+    lines.append("Condition (OBML):")
+    lines.append(json.dumps(rule.get("condition") or {}, indent=2))
+    # The compiled SQL as a trailing block, the way get_example shows a
+    # compiled preview. Best-effort: a rule that does not compile says why.
+    lines.append("")
+    try:
+        compiled = _parse_json(_model_request(model_id, "POST", f"/rules/{encoded}/compile", {}))
+    except (ToolError, httpx.HTTPError) as exc:
+        lines.append(f"Compiled SQL: not available ({exc})")
+        return "\n".join(lines)
+    lines.append(f"Compiled SQL ({compiled.get('dialect', '?')}):")
+    lines.append(compiled.get("sql") or "")
+    lines.extend(_format_warnings(compiled.get("warnings"), indent="warning: "))
+    return "\n".join(lines)
+
+
+def _render_rows(columns: list[str], rows: list[list], indent: str = "  ") -> list[str]:
+    """A compact pipe-separated table of result rows."""
+    if not columns:
+        return []
+    lines = [f"{indent}{' | '.join(columns)}", f"{indent}{' | '.join('---' for _ in columns)}"]
+    for row in rows:
+        lines.append(f"{indent}{' | '.join('' if v is None else str(v) for v in row)}")
+    return lines
+
+
+def _impl_evaluate_rule(
+    model_id: str | None,
+    name: str,
+    limit: int | None,
+    dialect: str | None,
+    format_values: bool,
+) -> str:
+    """Run one rule and list its findings (shared implementation)."""
+    body: dict = {"format_values": format_values}
+    if limit is not None:
+        body["limit"] = limit
+    if dialect is not None:
+        body["dialect"] = dialect
+    encoded = quote(name, safe="")
+    data = _parse_json(_model_request(model_id, "POST", f"/rules/{encoded}/evaluate", body))
+    count = data.get("row_count", 0)
+    what = data.get("findings", "findings")
+    cached = ", cached" if data.get("cached") else ""
+    lines = [
+        f"{data.get('name', name)}: {count} {what}  "
+        f"({data.get('type', '?')}, {data.get('level', '?')}, "
+        f"{data.get('dialect', '?')}, {data.get('execution_time_ms', 0):.0f} ms{cached})"
+    ]
+    if data.get("severity"):
+        lines[0] += f"  severity {data['severity']}"
+    if data.get("limit") and count >= data["limit"]:
+        lines.append(f"  (showing the first {data['limit']}; pass a higher limit for more)")
+    columns = [
+        c.get("name", "?") if isinstance(c, dict) else str(c) for c in data.get("columns") or []
+    ]
+    if count:
+        lines.append("")
+        lines.extend(_render_rows(columns, data.get("rows") or []))
+    lines.extend(_format_warnings(data.get("warnings"), indent="  warning: "))
+    return "\n".join(lines)
+
+
+def _impl_evaluate_rules(
+    model_id: str | None,
+    types: list[str] | None,
+    severities: list[str] | None,
+    executable_only: bool,
+    max_rules: int | None,
+    limit: int,
+    dry_run: bool,
+    dialect: str | None,
+) -> str:
+    """Run every rule (or a subset) into a report (shared implementation)."""
+    body: dict = {
+        "executable_only": executable_only,
+        "limit": limit,
+        "dry_run": dry_run,
+        "include_sql": False,
+    }
+    if types:
+        body["types"] = types
+    if severities:
+        body["severities"] = severities
+    if max_rules is not None:
+        body["max_rules"] = max_rules
+    if dialect is not None:
+        body["dialect"] = dialect
+    data = _parse_json(_model_request(model_id, "POST", "/rules/evaluate", body))
+    summary = data.get("summary") or {}
+    mode = "dry run: compiled only" if dry_run else "executed"
+    lines = [
+        f"Rule report ({data.get('dialect', '?')}, {mode}, {data.get('elapsed_ms', 0):.0f} ms): "
+        f"{summary.get('total', 0)} rules, {summary.get('executed', 0)} executed, "
+        f"{summary.get('compiled', 0)} compiled, {summary.get('with_findings', 0)} with findings, "
+        f"{summary.get('failed', 0)} failed, {summary.get('skipped', 0)} skipped",
+        "",
+    ]
+    for item in data.get("results") or []:
+        status = item.get("status", "?")
+        detail = [status]
+        if item.get("finding_count") is not None:
+            detail.append(f"{item['finding_count']} {item.get('findings', 'findings')}")
+        if item.get("severity"):
+            detail.append(f"severity {item['severity']}")
+        if item.get("cached"):
+            detail.append("cached")
+        lines.append(
+            f"  {item.get('name', '?')}  ({item.get('type', '?')}, {item.get('level', '?')}): "
+            f"{', '.join(detail)}"
+        )
+        if item.get("error"):
+            lines.append(f"    error: {item['error']}")
+        rows = item.get("rows") or []
+        if rows:
+            lines.extend(_render_rows(item.get("columns") or [], rows, indent="    "))
+    return "\n".join(lines)
+
+
+def _impl_find_concept_mappings(
+    model_id: str | None,
+    concept: str | None,
+    namespace: str | None,
+    relation: str | None,
+    types: list[str] | None,
+) -> str:
+    """List external concept mappings, filtered (shared implementation)."""
+    path = "/concept-mappings" + _query_string(
+        concept=concept, namespace=namespace, relation=relation, types=types
+    )
+    data = _parse_json(_model_request(model_id, "GET", path))
+    mappings = data.get("mappings") or []
+    if not mappings:
+        return "No external concept mappings match (see list_unmapped_artefacts for the gaps)."
+    scope = f" for concept {data['concept']}" if data.get("concept") else ""
+    lines = [f"{data.get('total', len(mappings))} concept mappings{scope}:"]
+    for m in mappings:
+        obj = m.get("object") or {}
+        rendered = _render_mapping_lines([m], "")
+        detail = rendered[0].removeprefix("maps to: ") if rendered else "?"
+        lines.append(f"  [{obj.get('type', '?')}] {obj.get('name', '?')}  ->  {detail}")
+    return "\n".join(lines)
+
+
+def _impl_list_concept_namespaces(model_id: str | None) -> str:
+    """Which external namespaces a model links into (shared implementation)."""
+    data = _parse_json(_model_request(model_id, "GET", "/concept-mappings/namespaces"))
+    namespaces = data.get("namespaces") or []
+    prefixes = data.get("prefixes") or {}
+    if not namespaces and not prefixes:
+        return "This model declares no ontology prefixes and no external concept mappings."
+    lines: list[str] = []
+    if namespaces:
+        lines.append("Namespaces linked into (most used first):")
+        for ns in namespaces:
+            label = f"{ns['prefix']}: " if ns.get("prefix") else ""
+            lines.append(
+                f"  {label}{ns.get('namespace', '?')}  "
+                f"(mappings {ns.get('mapping_count', 0)}, objects {ns.get('object_count', 0)})"
+            )
+    unused = {
+        k: v for k, v in prefixes.items() if not any(n.get("prefix") == k for n in namespaces)
+    }
+    if unused:
+        lines.append("Declared prefixes without a mapping:")
+        for prefix, namespace in unused.items():
+            lines.append(f"  {prefix}: {namespace}")
+    return "\n".join(lines)
+
+
+def _impl_list_unmapped_artefacts(model_id: str | None, types: list[str] | None) -> str:
+    """Artefacts in the mappable scope without a mapping (shared implementation)."""
+    path = "/concept-mappings/unmapped" + _query_string(types=types)
+    data = _parse_json(_model_request(model_id, "GET", path))
+    objects = data.get("objects") or []
+    scope = ", ".join(data.get("types") or []) or "all mappable types"
+    if not objects:
+        return f"Every artefact is mapped ({scope})."
+    lines = [f"{data.get('total', len(objects))} unmapped artefacts ({scope}):"]
+    for obj in objects:
+        lines.append(f"  [{obj.get('type', '?')}] {obj.get('name', '?')}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Tool registration (mode-dependent)
 # ---------------------------------------------------------------------------
 
@@ -2488,6 +2839,157 @@ def _register_model_tools() -> None:
             model_id: a loaded model's id (multi-model); omit in single-model.
         """
         return _impl_get_example(_resolve_model_id(model_id), name)
+
+    # ----- business rules -----
+
+    @mcp.tool
+    def list_rules(model_id: str | None = None) -> str:
+        """List the model's business rules with statistics.
+
+        Rules are conditions over dimensions, measures and metrics declared in
+        the model's ``rules:`` block. Each is row-level (dimensions only, a
+        ``WHERE`` predicate) or aggregate (a measure or metric at a declared
+        ``grain``, a ``HAVING`` condition). ``classification`` and
+        ``eligibility`` rules describe members; ``validation`` and
+        ``constraint`` rules state an invariant whose violations are reported.
+        Statistics by type, level, severity and executability come first.
+
+        Args:
+            model_id: a loaded model's id (multi-model); omit in single-model.
+        """
+        return _impl_list_rules(_resolve_model_id(model_id))
+
+    @mcp.tool
+    def explain_rule(name: str, model_id: str | None = None) -> str:
+        """Explain one business rule: definition, what it reads, dependencies,
+        ontology links, and the SQL it compiles to for the session's dialect.
+
+        Args:
+            name: The rule's name (as listed by ``list_rules``).
+            model_id: a loaded model's id (multi-model); omit in single-model.
+        """
+        return _impl_explain_rule(_resolve_model_id(model_id), name)
+
+    @mcp.tool
+    def evaluate_rule(
+        name: str,
+        limit: int | None = None,
+        dialect: str | None = None,
+        format_values: bool = False,
+        model_id: str | None = None,
+    ) -> str:
+        """Run one business rule and list its findings.
+
+        Findings are the members for a classification or eligibility rule
+        (the rows the condition selects) and the violations for a validation
+        or constraint rule (the rows that break it). Runs through the same
+        cache-aware pipeline as ``execute_query``, so it needs query execution
+        enabled on the API.
+
+        Args:
+            name: The rule's name.
+            limit: Max findings to return (the API's default row limit applies
+                when omitted).
+            dialect: SQL dialect override; defaults to the model's effective one.
+            format_values: Locale-format numbers and dates in the rows.
+            model_id: a loaded model's id (multi-model); omit in single-model.
+        """
+        return _impl_evaluate_rule(_resolve_model_id(model_id), name, limit, dialect, format_values)
+
+    @mcp.tool
+    def evaluate_rules(
+        types: list[str] | None = None,
+        severities: list[str] | None = None,
+        executable_only: bool = False,
+        max_rules: int | None = None,
+        limit: int = 5,
+        dry_run: bool = False,
+        dialect: str | None = None,
+        model_id: str | None = None,
+    ) -> str:
+        """Run every business rule (or a subset) into one report.
+
+        Per rule: status (``executed``, ``compiled`` on a dry run, ``skipped``,
+        ``failed``), the finding count, a few sample findings and any error.
+        A failure never hides the other rules. ``dry_run=True`` compiles every
+        rule without executing anything, which also works when query execution
+        is disabled on the API.
+
+        Args:
+            types: Only these rule types (classification, eligibility,
+                validation, constraint).
+            severities: Only these severities (error, warning, info).
+            executable_only: Skip rules that do not compile instead of
+                reporting them as failed.
+            max_rules: Stop after this many rules.
+            limit: Sample findings to include per rule (default 5).
+            dry_run: Compile only; report status without running.
+            dialect: SQL dialect override; defaults to the model's effective one.
+            model_id: a loaded model's id (multi-model); omit in single-model.
+        """
+        return _impl_evaluate_rules(
+            _resolve_model_id(model_id),
+            types,
+            severities,
+            executable_only,
+            max_rules,
+            limit,
+            dry_run,
+            dialect,
+        )
+
+    # ----- ontology links -----
+
+    @mcp.tool
+    def find_concept_mappings(
+        concept: str | None = None,
+        namespace: str | None = None,
+        relation: str | None = None,
+        types: list[str] | None = None,
+        model_id: str | None = None,
+    ) -> str:
+        """List the model's links into external ontologies.
+
+        Every ``externalConceptMappings`` entry with the artefact it sits on,
+        the SKOS relation (``exact``, ``close``, ``broader`` meaning the
+        external concept is the broader one, ``narrower``, ``related``), the
+        concept expanded to an absolute IRI, and its provenance. Use it to go
+        from an external term ("schema:Product") to the artefacts that mean it.
+
+        Args:
+            concept: Only mappings to this concept (compact or full IRI).
+            namespace: Only mappings into this namespace (prefix name or IRI).
+            relation: Only this relation.
+            types: Only artefacts of these types (model, dataObject, dimension,
+                measure, metric, rule).
+            model_id: a loaded model's id (multi-model); omit in single-model.
+        """
+        return _impl_find_concept_mappings(
+            _resolve_model_id(model_id), concept, namespace, relation, types
+        )
+
+    @mcp.tool
+    def list_concept_namespaces(model_id: str | None = None) -> str:
+        """Which external ontologies the model links into, most used first,
+        plus declared prefixes that no mapping uses yet.
+
+        Args:
+            model_id: a loaded model's id (multi-model); omit in single-model.
+        """
+        return _impl_list_concept_namespaces(_resolve_model_id(model_id))
+
+    @mcp.tool
+    def list_unmapped_artefacts(types: list[str] | None = None, model_id: str | None = None) -> str:
+        """List the artefacts that still have no external concept mapping.
+
+        The governance gap list: everything in the mappable scope (model,
+        data objects, dimensions, measures, metrics, rules) without a link.
+
+        Args:
+            types: Only these artefact types.
+            model_id: a loaded model's id (multi-model); omit in single-model.
+        """
+        return _impl_list_unmapped_artefacts(_resolve_model_id(model_id), types)
 
     # ----- compile / plan -----
 
@@ -3080,6 +3582,56 @@ with `offset`.
 - Dimension names with time grain: append `:month`, `:year`, etc.
 """
 
+_WRITE_BUSINESS_RULE_TEXT = """\
+# Writing a business rule (OBML `rules:` block)
+
+A rule is a named condition over the model's dimensions, measures and metrics.
+No SQL: the API compiles it to the query that reports its findings.
+
+```yaml
+rules:
+  High Value Client:            # the rule's name
+    type: eligibility           # classification | eligibility | validation | constraint
+    description: Clients whose lifetime sales pass the strategic-account threshold
+    grain: [Client Name]        # aggregate rules only: evaluated per these dimensions
+    condition:
+      field: Total Sales        # a dimension, measure or metric name
+      op: ">"                   # the query filter operators (no exists/nonexists)
+      value: 50000
+  Healthy Category:
+    type: validation
+    severity: warning           # validation/constraint only: error | warning | info
+    grain: [Product Category]
+    condition:
+      all:                      # all | any | not compose; rule inlines another rule
+        - {field: Total Sales, op: ">", value: 0}
+        - not: {rule: High Return Rate}
+```
+
+The four things that go wrong without being told:
+
+1. **Level is derived, not declared.** A condition over dimensions only is
+   row-level and compiles to a `WHERE` predicate; one that touches a measure or
+   metric is aggregate and compiles to `HAVING` at the declared `grain`. An
+   aggregate rule must declare `grain`; a row-level rule must not.
+2. **An aggregate rule may compare only dimensions of its grain.** Anything
+   else would be neither grouped nor aggregated (`RULE_DIMENSION_OUTSIDE_GRAIN`).
+3. **Findings semantics.** `classification` and `eligibility` rules describe
+   members: the findings are the rows the condition selects. `validation` and
+   `constraint` rules state an invariant: the findings are its violations, so
+   the compiled query negates the condition. Only these two take `severity`.
+4. **References must match.** `rule: Other` inlines another rule's condition;
+   it must have the same level and grain, and references must form a DAG.
+
+Ontology links on a rule (`externalConceptMappings`) work like on any artefact:
+`concept` (compact or full IRI) plus `relation`, where `broader` means the
+external concept is the broader one (SKOS `broadMatch`).
+
+Then: `load_model` reports every rule problem at once with a source span;
+`list_rules` shows what loaded; `explain_rule` shows the compiled SQL;
+`evaluate_rule` / `evaluate_rules` return the findings.
+"""
+
 _DEBUG_VALIDATION_TEXT = """\
 # OBML Validation Error Codes
 
@@ -3380,6 +3932,65 @@ result, and `load_model` reports the count.
   Fix: Usually nothing — read the values as the engine's own type. If the
   declared type matters downstream, cast in the measure expression.
 
+## Business Rule Errors (`rules:` block, OBSL 2.30+)
+
+- `RULE_PARSE_ERROR`: `rules` is not a mapping, a rule is not a mapping, or a
+  property has the wrong type or an unknown enum value.
+  Fix: `rules` maps rule name → {type?, condition, grain?, severity?, ...};
+  `type` is classification | eligibility | validation | constraint.
+- `INVALID_RULE_CONDITION`: A condition node is not exactly one form
+  (comparison `field`/`op`/`value`, `all`, `any`, `not`, or `rule`), lacks
+  `op`, uses an unknown or disallowed operator, or has an empty `all`/`any`.
+  Fix: One form per node; the operators are the query filter operators
+  (`exists`/`nonexists` excluded).
+- `UNKNOWN_RULE_FIELD`: A comparison names something that is not a dimension,
+  measure or metric.
+  Fix: Use `find_artefacts` to get the exact name.
+- `UNKNOWN_RULE`: A `rule:` reference names a rule that does not exist, or the
+  rule itself.
+- `UNKNOWN_RULE_GRAIN`: `grain` names an unknown dimension.
+- `RULE_GRAIN_REQUIRED`: An aggregate rule (one over a measure or metric) has
+  no `grain`.
+  Fix: Declare the dimensions the aggregate is evaluated at.
+- `RULE_GRAIN_NOT_ALLOWED`: A row-level rule (dimensions only) has a `grain`.
+  Fix: Remove it — row-level rules are a WHERE predicate, not a grouping.
+- `RULE_DIMENSION_OUTSIDE_GRAIN`: An aggregate rule compares a dimension that
+  is not in its grain (it would be neither grouped nor aggregated).
+  Fix: Add the dimension to `grain`, or compare a measure instead.
+- `RULE_REFERENCE_MISMATCH`: A referenced rule has a different level or grain.
+  Fix: Only rules of the same level and grain can be inlined.
+- `CYCLIC_RULE_REFERENCE`: Rules reference each other in a cycle.
+- `INVALID_RULE_SEVERITY`: `severity` on a classification or eligibility rule.
+  Fix: Severity belongs to validation and constraint rules only.
+
+A rule with a problem is reported and dropped; the others still load, so
+every problem surfaces at once.
+
+## Ontology Link Errors (`ontology.prefixes` / `externalConceptMappings`)
+
+- `ONTOLOGY_PARSE_ERROR`: `ontology` or `ontology.prefixes` is not a mapping.
+- `INVALID_ONTOLOGY_PREFIX`: Prefix name is not an identifier, the namespace is
+  not an absolute IRI, or a built-in prefix (rdf, rdfs, owl, skos, xsd) is
+  rebound.
+- `UNKNOWN_ONTOLOGY_PREFIX`: A compact IRI uses a prefix that is neither
+  declared nor built in (the message lists the known ones).
+  Fix: Declare it under `ontology.prefixes`, or write the full IRI.
+- `INVALID_CONCEPT_IRI`: Blank node, relative reference, angle brackets,
+  forbidden characters, or an empty local name.
+  Fix: `prefix:LocalName` or an absolute IRI, no `<...>`, no whitespace.
+- `INVALID_CONCEPT_MAPPING`: An entry is not a mapping, `relation` is missing or
+  unknown, `justification` unknown, `confidence` outside 0..1, or the list is
+  not a list.
+  Fix: `relation` is exact | close | broader | narrower | related (`broader`
+  means the external concept is the broader one).
+- `DUPLICATE_CONCEPT_MAPPING`: Same expanded IRI and relation twice on one
+  artefact.
+- `CONFLICTING_CONCEPT_MAPPING`: Same expanded IRI with two different relations
+  on one artefact.
+- `ONTOLOGY_PREFIX_CONFLICT`: An `extends` fragment or an inheriting child binds
+  an already-bound prefix to a different namespace.
+  Fix: One namespace per prefix across the whole composition.
+
 ## Debugging Steps
 
 1. Run `load_model(model_yaml)` — it validates and returns any errors.
@@ -3413,6 +4024,17 @@ mcp.add_prompt(
         description="All OBML validation error codes with causes and fixes.",
         text=_DEBUG_VALIDATION_TEXT,
         meta={"text": _DEBUG_VALIDATION_TEXT},
+    )
+)
+
+mcp.add_prompt(
+    StaticPrompt(
+        name="write_business_rule",
+        description=(
+            "How to write an OBML business rule: level, grain, findings semantics, references."
+        ),
+        text=_WRITE_BUSINESS_RULE_TEXT,
+        meta={"text": _WRITE_BUSINESS_RULE_TEXT},
     )
 )
 

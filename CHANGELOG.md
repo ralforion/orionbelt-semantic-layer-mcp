@@ -6,6 +6,68 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.30.0] — 2026-09-13
+
+Tracks OrionBelt Semantic Layer API **v2.30.x**. The compatibility gate compares
+`major.minor` against the API's `/health` version, so this release is required
+to run against a 2.30 API.
+
+API 2.30.0 is the first release in a while that widens the REST surface this
+server wraps: OBML gained a `rules:` block (business rules compiled to the
+query that reports their findings) and `externalConceptMappings` with
+`ontology.prefixes` (links from artefacts into an external ontology), each with
+its own endpoints, and the SPARQL endpoint now reports unbound variables. Seven
+tools are added and three existing outputs learn the new fields. Counts: 24 in
+single-model mode, 28 in multi-model, 29 distinct (they overlap in 23).
+
+### Added
+
+- **Business rules: `list_rules`, `explain_rule`, `evaluate_rule`,
+  `evaluate_rules`.** `list_rules` wraps `GET .../rules` (every rule with its
+  type, derived level, findings semantics, severity, grain, what it reads and
+  depends on, plus statistics). `explain_rule` wraps `GET .../rules/{name}`
+  and appends the SQL the rule compiles to for the session's dialect, the way
+  `get_example` shows a compiled preview; a rule that does not compile says
+  why instead. `evaluate_rule` wraps `POST .../rules/{name}/evaluate` and
+  lists the findings (members for classification and eligibility rules,
+  violations for validation and constraint rules); it is gated by the
+  `query_execute` capability like `execute_query`. `evaluate_rules` wraps
+  `POST .../rules/evaluate` into a report with per-rule status, counts, sample
+  findings and errors; it is deliberately not gated, because `dry_run=True`
+  compiles every rule without executing and so works with execution off.
+  There is no `compile_rule` tool: `explain_rule` and a dry run cover it.
+- **Ontology links: `find_concept_mappings`, `list_concept_namespaces`,
+  `list_unmapped_artefacts`.** The discovery endpoints under
+  `.../concept-mappings`: every mapping with the artefact it sits on, its SKOS
+  relation (`broader` means the external concept is the broader one), the
+  concept expanded to an absolute IRI and its provenance, filterable by
+  concept, namespace, relation and artefact type; the namespaces a model links
+  into, most used first, with declared prefixes nothing uses yet; and the
+  artefacts still without a link.
+- **`write_business_rule` prompt.** The four things an agent gets wrong
+  without being told: level is derived from what the condition reads, an
+  aggregate rule compares only dimensions of its grain, validation and
+  constraint findings are violations (the condition negated), and references
+  must match level and grain and form a DAG.
+
+### Changed
+
+- **`describe_model` shows ontology links and rules.** The schema response has
+  carried `ontology_prefixes` and per-artefact `external_concept_mappings`
+  since API 2.30.0 and the renderer dropped both, so an agent never learned an
+  artefact is `exact schema:Product`. Every artefact now lists its mappings
+  with provenance, the model's prefixes and model-level mappings get an
+  `ONTOLOGY:` section, and a `RULES:` line (counts by type, best-effort from
+  the rules endpoint) points at the rule tools.
+- **`query_model_graph_by_sparql` surfaces warnings.** API 2.30.0 walks the
+  query algebra and reports every variable used but never bound (a typo in
+  `ORDER BY` or `SELECT`), which used to be silently ignored. The tool used to
+  drop that list and return the rows as if nothing were wrong.
+- **`debug_validation` prompt covers the new error codes.** The eleven rule
+  codes (`RULE_PARSE_ERROR` ... `INVALID_RULE_SEVERITY`) and the eight
+  ontology-link codes (`ONTOLOGY_PARSE_ERROR` ... `ONTOLOGY_PREFIX_CONFLICT`)
+  with cause and fix.
+
 ## [2.29.0] — 2026-09-11
 
 Tracks OrionBelt Semantic Layer API **v2.29.x**. The compatibility gate compares
