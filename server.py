@@ -39,7 +39,7 @@ from urllib.parse import quote, urlencode, urlsplit
 import httpx
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
-from fastmcp.prompts.prompt import Prompt as _BasePrompt
+from fastmcp.prompts import Prompt as _BasePrompt
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -3330,9 +3330,11 @@ class StaticPrompt(_BasePrompt):
     text: str
 
     def to_mcp_prompt(self, **overrides):  # type: ignore[override]
-        result = super().to_mcp_prompt(**overrides)
-        result.text = self.text  # type: ignore[attr-defined]  # extra="allow"
-        return result
+        # The text rides in `_meta`, not as a top-level attribute: the SDK's
+        # Prompt model rejects unknown attributes (mcp 2.x), so assigning
+        # `result.text` raises and takes the whole prompts/list response with it.
+        meta = {**(overrides.get("_meta") or self.get_meta() or {}), "text": self.text}
+        return super().to_mcp_prompt(**{**overrides, "_meta": meta})
 
     async def render(self, _arguments=None):  # type: ignore[override]
         return self.text
