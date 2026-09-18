@@ -6,6 +6,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.30.1] - 2026-09-18
+
+Tracks OrionBelt Semantic Layer API **v2.30.x** unchanged: the compatibility
+gate compares `major.minor`, so this is a server-only fix release.
+
 ### Fixed
 
 - **Protocol negotiation: accept the `2026-07-28` protocol version.** `fastmcp`
