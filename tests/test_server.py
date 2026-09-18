@@ -4707,3 +4707,30 @@ def test_write_business_rule_prompt_is_registered():
     assert "write_business_rule" in prompts
     text = server._WRITE_BUSINESS_RULE_TEXT
     assert "RULE_DIMENSION_OUTSIDE_GRAIN" in text and "broadMatch" in text
+
+
+async def test_prompts_list_survives_the_protocol_round_trip():
+    """`prompts/list` must render every prompt through the MCP SDK model.
+
+    `_list_prompts` returns FastMCP objects and never calls `to_mcp_prompt`, so
+    it cannot catch a prompt that fails to serialise. That is how a regression
+    reached a release once: the SDK's Prompt model rejects unknown attributes,
+    the conversion raised, and clients saw an empty prompt list.
+    """
+    from fastmcp import Client
+
+    async with Client(server.mcp) as client:
+        prompts = await client.list_prompts()
+
+    by_name = {p.name: p for p in prompts}
+    assert {
+        "write_query",
+        "write_obml_model",
+        "write_obsql_query",
+        "write_business_rule",
+        "debug_validation",
+    } <= set(by_name)
+    # A StaticPrompt's text still reaches the client, now carried in `_meta`
+    # rather than as a top-level attribute the SDK model would reject.
+    meta = by_name["debug_validation"].meta or {}
+    assert "UNKNOWN_COLUMN" in meta.get("text", "")

@@ -15,6 +15,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   version before it could work: 12 such rejections came from the Claude
   connector against the public deployment in one week. The 4.x package layout
   moves `Prompt`, so `fastmcp.prompts.prompt` becomes `fastmcp.prompts`.
+- **`prompts/list` no longer fails on static prompts.** The SDK's `Prompt` model
+  rejects unknown attributes in `mcp` 2.x, so setting `result.text` on it raised
+  and clients saw an empty prompt list. The text now rides in `_meta`.
+  `_list_prompts` never calls `to_mcp_prompt`, which is why the existing prompt
+  tests passed through the break; a protocol-level round trip covers it now.
 
 ## [2.30.0] — 2026-09-13
 
