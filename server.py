@@ -39,7 +39,7 @@ from urllib.parse import quote, urlencode, urlsplit
 import httpx
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
-from fastmcp.prompts.prompt import Prompt as _BasePrompt
+from fastmcp.prompts import Prompt as _BasePrompt
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from pydantic_settings import BaseSettings, SettingsConfigDict
 

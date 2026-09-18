@@ -32,9 +32,9 @@ from `uv.lock` for linux/CPython on Python 3.12–3.14. Development-only
 dependencies (pytest, pytest-asyncio, respx, ruff and vulture) are excluded:
 they are tools the project runs, not code it ships.
 
-Resolutions no published environment can reach (`colorama`, `pywin32` and
-`pywin32-ctypes`) are excluded: the image is linux/CPython, and so is every
-environment this project supports being installed into.
+Resolutions no published environment can reach (`colorama`, `httpx2-jsfetch`,
+`pywin32` and `pywin32-ctypes`) are excluded: the image is linux/CPython, and
+so is every environment this project supports being installed into.
 
 `uv.lock` sees only PyPI packages, so the interpreter and the operating
 system the Docker image is built on are covered separately under
@@ -49,7 +49,7 @@ uv run --no-sync python scripts/third_party_notices.py
 
 ## Summary
 
-71 packages, all of them redistributed by the published image.
+74 packages, all of them redistributed by the published image.
 
 | Package | Version | License | In image |
 | --- | --- | --- | --- |
@@ -71,13 +71,14 @@ uv run --no-sync python scripts/third_party_notices.py
 | docutils | 0.22.4 | Public Domain OR BSD License OR GNU General Public License (GPL) ⚠️ | yes |
 | email-validator | 2.3.0 | The Unlicense (Unlicense) | yes |
 | exceptiongroup | 1.3.1 | MIT License | yes |
-| fastmcp | 3.4.7 | Apache-2.0 | yes |
-| fastmcp-slim | 3.4.7 | Apache-2.0 | yes |
+| fastmcp | 4.0.5 | Apache-2.0 | yes |
+| fastmcp-slim | 4.0.5 | Apache-2.0 | yes |
 | griffelib | 2.0.2 | ISC | yes |
 | h11 | 0.16.0 | MIT License | yes |
 | httpcore | 1.0.9 | BSD-3-Clause | yes |
+| httpcore2 | 2.13.0 | BSD-3-Clause | yes |
 | httpx | 0.28.1 | BSD License | yes |
-| httpx-sse | 0.4.3 | MIT | yes |
+| httpx2 | 2.13.0 | BSD-3-Clause | yes |
 | idna | 3.19 | BSD-3-Clause | yes |
 | importlib-metadata | 8.7.1 | Apache-2.0 | yes |
 | jaraco-classes | 3.4.0 | MIT License | yes |
@@ -91,7 +92,8 @@ uv run --no-sync python scripts/third_party_notices.py
 | jsonschema-specifications | 2025.9.1 | MIT | yes |
 | keyring | 25.7.0 | MIT | yes |
 | markdown-it-py | 4.0.0 | MIT License | yes |
-| mcp | 1.29.1 | MIT License | yes |
+| mcp | 2.2.0 | MIT License | yes |
+| mcp-types | 2.2.0 | MIT License | yes |
 | mdurl | 0.1.2 | MIT License | yes |
 | more-itertools | 10.8.0 | MIT | yes |
 | openapi-pydantic | 0.5.1 | MIT License | yes |
@@ -117,9 +119,10 @@ uv run --no-sync python scripts/third_party_notices.py
 | secretstorage | 3.5.0 | BSD-3-Clause | yes |
 | sse-starlette | 3.3.2 | BSD-3-Clause | yes |
 | starlette | 1.3.1 | BSD-3-Clause | yes |
+| truststore | 0.10.4 | MIT | yes |
 | typing-extensions | 4.15.0 | PSF-2.0 | yes |
 | typing-inspection | 0.4.2 | MIT | yes |
-| uncalled-for | 0.2.0 | MIT License | yes |
+| uncalled-for | 0.4.0 | MIT License | yes |
 | uvicorn | 0.41.0 | BSD-3-Clause | yes |
 | watchfiles | 1.1.1 | MIT License | yes |
 | websockets | 16.0 | BSD-3-Clause | yes |
@@ -195,7 +198,7 @@ instead, because only the project itself can supply its copyright line.
 
 | Package | Version | Declared license |
 | --- | --- | --- |
-| fastmcp-slim | 3.4.7 | Apache-2.0 |
+| fastmcp-slim | 4.0.5 | Apache-2.0 |
 | py-key-value-aio | 0.4.4 | Apache Software License |
 
 ## Full license texts
@@ -1533,7 +1536,7 @@ agrees to be bound by the terms and conditions of this License
 Agreement.
 ```
 
-### fastmcp 3.4.7
+### fastmcp 4.0.5
 
 *LICENSE*
 
@@ -1566,7 +1569,7 @@ APPENDIX: How to apply the Apache License to your work.
    limitations under the License.
 ```
 
-### fastmcp-slim 3.4.7
+### fastmcp-slim 4.0.5
 
 Ships no license file. Declares Apache-2.0, whose terms are reproduced in [Appendix A](#appendix-a--apache-license-20).
 
@@ -1655,6 +1658,41 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
+### httpcore2 2.13.0
+
+*LICENSE.md*
+
+```text
+Copyright © 2026 to present Pydantic Services Inc. and individual contributors.
+Copyright © 2020, [Encode OSS Ltd](https://www.encode.io/).
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+* Redistributions of source code must retain the above copyright notice, this
+  list of conditions and the following disclaimer.
+
+* Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+
+* Neither the name of the copyright holder nor the names of its
+  contributors may be used to endorse or promote products derived from
+  this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
 ### httpx 0.28.1
 
 *LICENSE.md*
@@ -1674,32 +1712,24 @@ Redistribution and use in source and binary forms, with or without modification,
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### httpx-sse 0.4.3
+### httpx2 2.13.0
 
-*LICENSE*
+*LICENSE.md*
 
 ```text
-MIT License
+Copyright © 2026 to present Pydantic Services Inc. and individual contributors.
+Copyright © 2019, [Encode OSS Ltd](https://www.encode.io/).
+All rights reserved.
 
-Copyright (c) 2022 Florimond Manca
+Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+* Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+* Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+* Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
 ### idna 3.19
@@ -2150,7 +2180,35 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-### mcp 1.29.1
+### mcp 2.2.0
+
+*LICENSE*
+
+```text
+MIT License
+
+Copyright (c) 2024 Anthropic, PBC
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### mcp-types 2.2.0
 
 *LICENSE*
 
@@ -3332,6 +3390,34 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
+### truststore 0.10.4
+
+*LICENSE*
+
+```text
+The MIT License (MIT)
+
+Copyright (c) 2022 Seth Michael Larson
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
 ### typing-extensions 4.15.0
 
 *LICENSE*
@@ -3646,7 +3732,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### uncalled-for 0.2.0
+### uncalled-for 0.4.0
 
 *LICENSE*
 
