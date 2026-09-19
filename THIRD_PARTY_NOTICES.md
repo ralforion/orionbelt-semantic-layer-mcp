@@ -55,7 +55,7 @@ uv run --no-sync python scripts/third_party_notices.py
 | --- | --- | --- | --- |
 | aiofile | 3.9.0 | Apache Software License | yes |
 | annotated-types | 0.7.0 | MIT License | yes |
-| anyio | 4.12.1 | MIT | yes |
+| anyio | 4.14.2 | MIT | yes |
 | attrs | 25.4.0 | MIT | yes |
 | authlib | 1.7.2 | BSD License | yes |
 | beartype | 0.22.9 | MIT License | yes |
@@ -631,7 +631,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### anyio 4.12.1
+### anyio 4.14.2
 
 *LICENSE*
 
