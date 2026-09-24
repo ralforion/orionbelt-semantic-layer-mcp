@@ -1361,6 +1361,8 @@ def _impl_describe_model(model_id: str | None = None) -> str:
     for dim in desc.get("dimensions", []):
         grain = f"  grain={dim['time_grain']}" if dim.get("time_grain") else ""
         via = f"  via {dim['via']}" if dim.get("via") else ""
+        if dim.get("path_name"):
+            via += f" path {dim['path_name']}"
         d_name = dim.get("name", "?")
         d_type = dim.get("result_type", "?")
         d_obj = dim.get("data_object", "?")
@@ -1609,6 +1611,8 @@ def _render_dimension_lines(dims: list[dict]) -> list[str]:
     for d in dims:
         grain = f"  grain={d['time_grain']}" if d.get("time_grain") else ""
         via = f"  via {d['via']}" if d.get("via") else ""
+        if d.get("path_name"):
+            via += f" path {d['path_name']}"
         d_name = d.get("name", "?")
         d_type = d.get("result_type", "?")
         d_obj = d.get("data_object", "?")
@@ -3497,6 +3501,48 @@ they join through different fact tables.  The `via` data object must be reachabl
 from the query's fact table, and the dimension's `dataObject` must be reachable
 from `via` in the directed join graph.
 
+`via` alone reads through the primary join from `via` to the dimension's data
+object.  When `via` joins that data object more than once (a primary plus
+secondary joins), add `pathName` to pin the dimension to one named join —
+several roles of the same data object can then appear in **one** query, each
+joined under its own alias:
+
+```yaml
+dataObjects:
+  Orders:
+    joins:
+      - joinType: many-to-one
+        joinTo: Employees
+        pathName: sales
+        columnsFrom: [SalesRepId]
+        columnsTo: [EmployeeId]
+      - joinType: many-to-one
+        joinTo: Employees
+        secondary: true
+        pathName: support
+        columnsFrom: [SupportRepId]
+        columnsTo: [EmployeeId]
+
+dimensions:
+  Sales Employee:
+    dataObject: Employees
+    column: Name
+    resultType: string
+    via: Orders
+    pathName: sales
+  Support Employee:
+    dataObject: Employees
+    column: Name
+    resultType: string
+    via: Orders
+    pathName: support
+```
+
+Role dimensions are pinned: a query's `usePathNames` does not change them.
+`pathName` requires `via` and must name a join declared directly on `via` that
+targets the dimension's data object.  A role reaches only its own data object's
+columns (not objects joined beyond it).
+
 When querying, simply use the role-playing dimension name in `query_json`:
 ```
 query_json='{"select": {"dimensions": ["SalesEmployee"], "measures": ["Revenue"]}}'
@@ -3798,6 +3844,12 @@ references unknown column.
   dimension's target data object is not reachable from `via` in the directed join graph.
   Fix: Check that `via` names an existing data object and that the dimension's `dataObject`
   is reachable from it through primary joins.
+- `INVALID_DIMENSION_PATH`: A dimension sets `pathName` without `via`, or `via` declares
+  no join to the dimension's data object with that `pathName`.
+  Fix: Add `via`, or use one of the declared pathNames listed in the error.
+- `AMBIGUOUS_VIA`: Warning — `via` joins the dimension's data object more than once and
+  the dimension has no `pathName`, so it silently reads through the primary join.
+  Fix: Set `pathName` to pick the role the dimension stands for.
 - `MISSING_VIA`: Warning — a dimension's target data object has direct joins from multiple
   fact tables, which may cause ambiguous join paths.
   Fix: Add role-playing dimensions with `via` to disambiguate, or ignore if ambiguity is
