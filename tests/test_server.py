@@ -896,6 +896,30 @@ def test_list_dimensions(mock_api: respx.MockRouter):
     assert "synonyms: nation" in result
 
 
+def test_dimensions_show_role_path_name(mock_api: respx.MockRouter):
+    """A role dimension's pathName is shown next to its via, in both renderers."""
+    _mock_create_session(mock_api)
+    role = {
+        "name": "Support Employee",
+        "data_object": "Employees",
+        "column": "Name",
+        "result_type": "string",
+        "via": "Orders",
+        "path_name": "support",
+    }
+    mock_api.get("/v1/sessions/test-session-1/models/m001/dimensions").mock(
+        return_value=httpx.Response(200, json=[role])
+    )
+    mock_api.get("/v1/sessions/test-session-1/models/m001/schema").mock(
+        return_value=httpx.Response(200, json={**_DESCRIBE_RESPONSE, "dimensions": [role]})
+    )
+
+    listed = server._impl_list_artefacts("m001", "dimension")
+    described = server._impl_describe_model("m001")
+    for result in (listed, described):
+        assert "(string, Employees.Name  via Orders path support)" in result
+
+
 def test_list_dimensions_empty(mock_api: respx.MockRouter):
     """list_dimensions handles empty list."""
     _mock_create_session(mock_api)

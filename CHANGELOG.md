@@ -6,6 +6,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.31.0] - 2026-09-24
+
+Tracks OrionBelt Semantic Layer API **v2.31.x**. No tools added or changed.
+
+### Added
+
+- **Role dimensions (`pathName` on a dimension).** API 2.31 lets a dimension set
+  `pathName` next to `via` to pin itself to one named join, so several roles of
+  one data object (sales and support employee of an order) fit in one query.
+  `describe_model` and `list_artefacts` show it as `via Orders path support`, and
+  the OBML reference's role-playing section documents the field with an example.
+- **Error reference: `INVALID_DIMENSION_PATH` and `AMBIGUOUS_VIA`.** The two new
+  load-time checks for role dimensions are listed with their fixes.
+
 ## [2.30.1] - 2026-09-18
 
 Tracks OrionBelt Semantic Layer API **v2.30.x** unchanged: the compatibility
