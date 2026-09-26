@@ -28,6 +28,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import ssl
 import threading
 from collections.abc import Callable
@@ -781,6 +782,10 @@ def _raise_api_error(response: httpx.Response, detail: str | None = None) -> NoR
     raise ToolError(f"API error ({response.status_code}): {detail}")
 
 
+# "Session 'abc' not found" (current API) or "Session not found" (older ones).
+_SESSION_NOT_FOUND_RE = re.compile(r"session(?: '[^']*')? not found", re.IGNORECASE)
+
+
 def _is_session_expired(response: httpx.Response) -> bool:
     """Return True if the API error indicates an expired/missing session.
 
@@ -799,9 +804,10 @@ def _is_session_expired(response: httpx.Response) -> bool:
     # Prefer structured error code when available
     if body.get("code") == "SESSION_NOT_FOUND":
         return True
-    # Fallback: match on detail text
-    detail = str(body.get("detail", "")).lower()
-    return "session" in detail and "not found" in detail
+    # Fallback: the API's own wording for a missing session, and nothing else.
+    # A loose "session" + "not found" match misread artefact misses such as
+    # "Dimension 'Session Count' not found" and replaced a healthy session.
+    return bool(_SESSION_NOT_FOUND_RE.match(str(body.get("detail", "")).strip()))
 
 
 def _do_request(
@@ -2714,14 +2720,11 @@ def _impl_artefact_lineage(model_id: str | None, name: str, kind: str | None, fm
         try:
             found.append((k, _model_request(model_id, "GET", path, params=params)))
         except ToolError as exc:
-            # Probing: a 404 means "no such artefact of this kind"; anything
-            # else (auth, 5xx, a missing model) is a real error.
-            message = str(exc)
-            if (
-                kind is not None
-                or not message.startswith("API error (404)")
-                or message.startswith("API error (404): Model '")
-            ):
+            # Probing: only the API's own "no such artefact of this kind" is a
+            # miss. Anything else (auth, 5xx, a missing model or session, no
+            # model loaded in single-model mode) is a real error.
+            miss = f"API error (404): {k.capitalize()} '{name}' not found"
+            if kind is not None or str(exc) != miss:
                 raise
     if not found:
         raise ToolError(

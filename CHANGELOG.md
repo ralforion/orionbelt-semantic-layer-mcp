@@ -31,6 +31,15 @@ Tracks OrionBelt Semantic Layer API **v2.32.x**. One tool added.
   (`reads tables: ...`, best-effort), and points to `get_lineage` for the graph.
   `explain_artefact` and the `write_business_rule` prompt mention `get_lineage` too.
 
+### Fixed
+
+- **An artefact miss no longer looks like an expired session.** Session-expiry
+  detection matched any 404 whose detail held both "session" and "not found",
+  so `Dimension 'Session Count' not found` replaced the healthy session and lost
+  its loaded models. It now matches only the API's own wording
+  (`Session '<id>' not found`, or `Session not found` from older APIs), after
+  the structured `SESSION_NOT_FOUND` code and 410.
+
 ## [2.31.0] - 2026-09-24
 
 Tracks OrionBelt Semantic Layer API **v2.31.x**. No tools added or changed.
