@@ -7,8 +7,8 @@
 
 <p align="center"><strong>Thin MCP server that delegates to the OrionBelt® Semantic Layer REST API</strong></p>
 
-[![Version 2.31.0](https://img.shields.io/badge/version-2.31.0-purple.svg)](https://github.com/ralforion/orionbelt-semantic-layer-mcp/releases)
-[![OrionBelt® Semantic Layer 2.31](https://img.shields.io/badge/OrionBelt_Semantic_Layer-2.31-0054A6.svg)](https://github.com/ralforion/orionbelt-semantic-layer)
+[![Version 2.32.0](https://img.shields.io/badge/version-2.32.0-purple.svg)](https://github.com/ralforion/orionbelt-semantic-layer-mcp/releases)
+[![OrionBelt® Semantic Layer 2.32](https://img.shields.io/badge/OrionBelt_Semantic_Layer-2.32-0054A6.svg)](https://github.com/ralforion/orionbelt-semantic-layer)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/ralforion/orionbelt-semantic-layer-mcp/blob/main/LICENSE)
 [![FastMCP](https://img.shields.io/badge/FastMCP-4.0+-8A2BE2)](https://gofastmcp.com)
@@ -51,7 +51,7 @@ The OrionBelt® Semantic Layer platform has two deployment modes. This MCP serve
 - **No business logic** — all tool calls delegate to the REST API (v1 endpoints)
 - **Dual-mode** — auto-detects single-model or multi-model API mode at startup
 - **Auto-session management** — creates an API session on first tool call, caches the ID (multi-model mode)
-- **24 tools** (single-model mode) or **28 tools** (multi-model mode) for querying (QueryObject), execution, batch, discovery, composability (ACR), examples, diagrams, RDF/SPARQL, business rules (list, explain, evaluate), ontology links (concept mappings, namespaces, unmapped artefacts), OSI export, model validation (offline or against the live datasource), and OBML reference + function catalog + JSON schemas. (29 distinct tools exist in total; the API mode selects which subset is active — they overlap in 23 — and no client ever sees all 29 at once.) The visible surface is narrowed further in the design-time phase and when query execution is disabled (see [Design-time vs run-time tool switching](#design-time-vs-run-time-tool-switching))
+- **25 tools** (single-model mode) or **29 tools** (multi-model mode) for querying (QueryObject), execution, batch, discovery, composability (ACR), examples, diagrams, RDF/SPARQL, lineage of artefacts and queries, business rules (list, explain, evaluate), ontology links (concept mappings, namespaces, unmapped artefacts), OSI export, model validation (offline or against the live datasource), and OBML reference + function catalog + JSON schemas. (30 distinct tools exist in total; the API mode selects which subset is active — they overlap in 24 — and no client ever sees all 30 at once.) The visible surface is narrowed further in the design-time phase and when query execution is disabled (see [Design-time vs run-time tool switching](#design-time-vs-run-time-tool-switching))
 - **5 prompts + 2 resources** for OBML / OBSQL reference, business rules, and usage guidance
 
 <p align="center">
@@ -237,6 +237,7 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 | ---------------------------------------- | ------------------------------------------------------------------------------------------------ |
 | `find_artefacts(model_id, query?, kind?, name?)` | Look up artefacts. With `query` → **fuzzy, ranked search** (resolve a vague term: exact / synonym / fuzzy). Without `query` → **exact, deterministic lookup** (all artefacts, one kind, or one named artefact, full records) |
 | `explain_artefact(model_id, name)`       | Explain lineage of a dimension, measure, or metric                                               |
+| `get_lineage(name? \| query_json?, kind?, dialect?, output_format="text", model_id)` | **Lineage graph** of a dimension, measure, metric or business rule — or of a whole query, with the joins the planner chose (`pathName` and role joins included) — down to the tables it reads. `kind` is optional (every kind is tried; a rule named like a measure returns both). `output_format`: `text`, `mermaid`, `turtle` (`prov:wasDerivedFrom` over the OBSL graph's IRIs, merges with `get_model_graph`) or `json` |
 | `list_examples(model_id, intent?)`       | List authored example queries (filterable by intent tag)                                         |
 | `get_example(model_id, name)`            | Get one example with query + compiled SQL preview                                                |
 | `get_join_graph(model_id)`               | Return the join graph as an adjacency list                                                       |
@@ -262,7 +263,7 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 | MCP Tool                                                   | Description                                                                                             |
 | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | `list_rules(model_id)`                                     | The model's `rules:` with statistics by type, level (row-level / aggregate), severity and executability |
-| `explain_rule(name, model_id)`                             | One rule in full: definition, what it reads, dependencies, ontology links, and the SQL it compiles to  |
+| `explain_rule(name, model_id)`                             | One rule in full: definition, what it reads, the tables behind it, dependencies, ontology links, and the SQL it compiles to  |
 | `evaluate_rule(name, limit?, dialect?, format_values?, model_id)` | Run one rule and list its findings: members for classification / eligibility, violations for validation / constraint. Needs query execution enabled |
 | `evaluate_rules(types?, severities?, executable_only?, max_rules?, limit=5, dry_run?, dialect?, model_id)` | Run every rule (or a subset) into a report with per-rule status, counts, sample findings and errors; `dry_run=True` compiles only and works with execution disabled |
 
@@ -308,7 +309,7 @@ design/reference tools:
 | --------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Always**      | always (both phases)        | `load_model`, `remove_model` (transition verbs — stay available in the run phase so a second model can be loaded mid-session, up to `max_models_per_session`); `run_batch` and `validate_model` (self-contained — each takes its model inline, so neither needs prior session state); `get_json_schema` (QueryObject/OBML schemas — needed in both phases) |
 | **Design-only** | only when no model loaded   | `get_obml_reference`, `get_function_catalog`, `list_dialects`                                                                                                          |
-| **Run-only**    | only when a model is loaded | `describe_model`, `get_model_diagram`, `find_artefacts`, `explain_artefact`, `execute_query`, `list_examples`, `get_example`, `get_model_graph`, `get_join_graph`, `find_composables`, `query_model_graph_by_sparql`, `list_rules`, `explain_rule`, `evaluate_rule`, `evaluate_rules`, `find_concept_mappings`, `list_concept_namespaces`, `list_unmapped_artefacts`, `list_models`, `export_model_to_osi` |
+| **Run-only**    | only when a model is loaded | `describe_model`, `get_model_diagram`, `find_artefacts`, `explain_artefact`, `get_lineage`, `execute_query`, `list_examples`, `get_example`, `get_model_graph`, `get_join_graph`, `find_composables`, `query_model_graph_by_sparql`, `list_rules`, `explain_rule`, `evaluate_rule`, `evaluate_rules`, `find_concept_mappings`, `list_concept_namespaces`, `list_unmapped_artefacts`, `list_models`, `export_model_to_osi` |
 
 ```
                        load_model  (returns "re-list" signal)
@@ -370,7 +371,7 @@ listed from the first request and there is no `load_model` step.
 
 1. **Get reference** — call `get_obml_reference()` to learn OBML syntax
 2. **Load model** — call `load_model(model_yaml)` to get a `model_id`
-3. **Explore** — call `describe_model(model_id)` or use discovery tools (`find_artefacts`, `explain_artefact`)
+3. **Explore** — call `describe_model(model_id)` or use discovery tools (`find_artefacts`, `explain_artefact`, `get_lineage`)
 4. **Execute** — call `execute_query(model_id, query_json='{"select": {"dimensions": [...], "measures": [...]}}')` to compile and run SQL, returning rows (requires `QUERY_EXECUTE=true` on the API; see `get_json_schema("query")` for the QueryObject shape)
 
 ## Integration Guides

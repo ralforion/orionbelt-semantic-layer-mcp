@@ -3825,14 +3825,14 @@ def _tool_names_in_fresh_module(single: bool) -> set[str]:
 
 
 def test_registered_tool_counts_are_what_the_readme_claims():
-    """24 single-model / 28 multi-model / 29 distinct / 23 shared."""
+    """25 single-model / 29 multi-model / 30 distinct / 24 shared."""
     single = _tool_names_in_fresh_module(True)
     multi = _tool_names_in_fresh_module(False)
 
-    assert len(single) == 24
-    assert len(multi) == 28
-    assert len(single | multi) == 29
-    assert len(single & multi) == 23
+    assert len(single) == 25
+    assert len(multi) == 29
+    assert len(single | multi) == 30
+    assert len(single & multi) == 24
     assert single - multi == {"get_model"}
     assert "validate_model" in single & multi
 
@@ -4758,3 +4758,218 @@ async def test_prompts_list_survives_the_protocol_round_trip():
     # rather than as a top-level attribute the SDK model would reject.
     meta = by_name["debug_validation"].meta or {}
     assert "UNKNOWN_COLUMN" in meta.get("text", "")
+
+
+# ---------------------------------------------------------------------------
+# get_lineage (API 2.32)
+# ---------------------------------------------------------------------------
+
+_LINEAGE = {
+    "root": "measure:Total Revenue",
+    "nodes": [
+        {
+            "id": "measure:Total Revenue",
+            "kind": "measure",
+            "name": "Total Revenue",
+            "detail": "sum",
+        },
+        {
+            "id": "column:Orders.Amount",
+            "kind": "column",
+            "name": "Amount",
+            "detail": "Orders",
+        },
+        {
+            "id": "data_object:Orders",
+            "kind": "data_object",
+            "name": "Orders",
+            "detail": "EDW.SALES.ORDERS",
+        },
+    ],
+    "edges": [
+        {"source": "data_object:Orders", "target": "column:Orders.Amount"},
+        {
+            "source": "column:Orders.Amount",
+            "target": "measure:Total Revenue",
+            "label": "expression",
+        },
+    ],
+    "mermaid": "flowchart LR\n  a --> b",
+}
+
+_SESSION_MODEL = "/v1/sessions/test-session-1/models/m001"
+
+
+def test_get_lineage_is_run_time_and_registered():
+    assert "get_lineage" in server._RUN_TIME_TOOLS
+    assert "get_lineage" in _tool_names_in_fresh_module(False)
+    assert "get_lineage" in _tool_names_in_fresh_module(True)
+
+
+def test_get_lineage_with_kind_renders_nodes_and_edges(mock_api: respx.MockRouter):
+    _mock_create_session(mock_api)
+    route = mock_api.get(f"{_SESSION_MODEL}/measures/Total%20Revenue/lineage").mock(
+        return_value=httpx.Response(200, json=_LINEAGE)
+    )
+    out = server._impl_get_lineage("m001", "Total Revenue", "measure", None, None, "text")
+    assert route.calls.last.request.url.params["format"] == "json"
+    assert out.startswith(
+        "Lineage of measure 'Total Revenue'  (3 nodes, 2 edges; root measure:Total Revenue)"
+    )
+    assert "Measures:\n  Total Revenue  (sum)" in out
+    assert "Data objects (tables read):\n  Orders  (EDW.SALES.ORDERS)" in out
+    assert "column:Orders.Amount -> measure:Total Revenue  [expression]" in out
+    # Measures come before columns, columns before tables.
+    assert out.index("Measures:") < out.index("Columns:") < out.index("Data objects")
+
+
+def test_get_lineage_probes_kinds_and_reports_every_match(mock_api: respx.MockRouter):
+    _mock_create_session(mock_api)
+    mock_api.get(f"{_SESSION_MODEL}/dimensions/Churn/lineage").mock(
+        return_value=httpx.Response(404, json={"detail": "Dimension 'Churn' not found"})
+    )
+    mock_api.get(f"{_SESSION_MODEL}/measures/Churn/lineage").mock(
+        return_value=httpx.Response(200, json={**_LINEAGE, "root": "measure:Churn"})
+    )
+    mock_api.get(f"{_SESSION_MODEL}/metrics/Churn/lineage").mock(
+        return_value=httpx.Response(404, json={"detail": "Metric 'Churn' not found"})
+    )
+    mock_api.get(f"{_SESSION_MODEL}/rules/Churn/lineage").mock(
+        return_value=httpx.Response(200, json={**_LINEAGE, "root": "rule:Churn"})
+    )
+    out = server._impl_get_lineage("m001", "Churn", None, None, None, "text")
+    assert "Lineage of measure 'Churn'" in out
+    assert "Lineage of rule 'Churn'" in out
+    raw = json.loads(server._impl_get_lineage("m001", "Churn", None, None, None, "json"))
+    assert set(raw) == {"measure", "rule"}
+    with pytest.raises(_ToolError, match="names a measure and a rule; pass kind"):
+        server._impl_get_lineage("m001", "Churn", None, None, None, "mermaid")
+
+
+def test_get_lineage_unknown_name_and_real_errors(mock_api: respx.MockRouter):
+    _mock_create_session(mock_api)
+    for kind, plural in server._LINEAGE_KINDS.items():
+        mock_api.get(f"{_SESSION_MODEL}/{plural}/Nope/lineage").mock(
+            return_value=httpx.Response(
+                404, json={"detail": f"{kind.capitalize()} 'Nope' not found"}
+            )
+        )
+    with pytest.raises(_ToolError, match="No dimension, measure, metric or rule named 'Nope'"):
+        server._impl_get_lineage("m001", "Nope", None, None, None, "text")
+    # Anything but a 404 while probing is a real error, raised as-is.
+    mock_api.get(f"{_SESSION_MODEL}/dimensions/Boom/lineage").mock(
+        return_value=httpx.Response(500, json={"detail": "kaput"})
+    )
+    with pytest.raises(_ToolError, match=r"API error \(500\): kaput"):
+        server._impl_get_lineage("m001", "Boom", None, None, None, "text")
+    # A missing model 404s on every kind: that is the error, not "no such name".
+    mock_api.get(f"{_SESSION_MODEL}/dimensions/Gone/lineage").mock(
+        return_value=httpx.Response(404, json={"detail": "Model 'm001' not found"})
+    )
+    with pytest.raises(_ToolError, match="Model 'm001' not found"):
+        server._impl_get_lineage("m001", "Gone", None, None, None, "text")
+
+
+def test_get_lineage_mermaid_and_turtle_pass_through(mock_api: respx.MockRouter):
+    server._single_model_mode = True
+    route = mock_api.get("/v1/rules/High%20Value%20Client/lineage").mock(
+        return_value=httpx.Response(
+            200, text="@prefix prov: <x> .", headers={"content-type": "text/turtle"}
+        )
+    )
+    out = server._impl_get_lineage(None, "High Value Client", "rule", None, None, "turtle")
+    assert out == "@prefix prov: <x> ."
+    assert route.calls.last.request.url.params["format"] == "turtle"
+
+
+def test_get_lineage_of_a_query_single_and_multi_model(mock_api: respx.MockRouter):
+    query = {"select": {"dimensions": ["Country"], "measures": ["Total Revenue"]}}
+    _mock_create_session(mock_api)
+    multi = mock_api.post("/v1/sessions/test-session-1/query/lineage").mock(
+        return_value=httpx.Response(200, text="flowchart LR")
+    )
+    out = server._impl_get_lineage("m001", None, None, json.dumps(query), "duckdb", "mermaid")
+    assert out == "flowchart LR"
+    sent = json.loads(multi.calls.last.request.content)
+    assert sent == {"model_id": "m001", "query": query, "dialect": "duckdb"}
+    assert multi.calls.last.request.url.params["format"] == "mermaid"
+
+    single = mock_api.post("/v1/query/lineage").mock(
+        return_value=httpx.Response(200, json={**_LINEAGE, "root": "query:query"})
+    )
+    out = server._impl_get_lineage(None, None, None, json.dumps(query), "duckdb", "text")
+    assert out.startswith("Lineage of the query")
+    assert json.loads(single.calls.last.request.content) == query
+    assert single.calls.last.request.url.params["dialect"] == "duckdb"
+
+
+def test_get_lineage_argument_errors():
+    with pytest.raises(_ToolError, match="exactly one of name"):
+        server._impl_get_lineage("m001", None, None, None, None, "text")
+    with pytest.raises(_ToolError, match="exactly one of name"):
+        server._impl_get_lineage("m001", "X", None, "{}", None, "text")
+    with pytest.raises(_ToolError, match="kind must be one of"):
+        server._impl_get_lineage("m001", "X", "column", None, None, "text")
+    with pytest.raises(_ToolError, match="format must be one of"):
+        server._impl_get_lineage("m001", "X", "measure", None, None, "svg")
+    with pytest.raises(_ToolError, match="Invalid query JSON"):
+        server._impl_get_lineage("m001", None, None, "{nope", None, "text")
+    with pytest.raises(_ToolError, match="kind applies to a named artefact"):
+        server._impl_get_lineage("m001", None, "measure", "{}", None, "text")
+
+
+def test_explain_rule_lists_the_tables_behind_it(mock_api: respx.MockRouter):
+    _mock_create_session(mock_api)
+    detail = {**_RULE_SUMMARY, "condition": {"field": "Total Sales", "op": ">", "value": 1}}
+    mock_api.get(f"{_SESSION_MODEL}/rules/High%20Value%20Client").mock(
+        return_value=httpx.Response(200, json=detail)
+    )
+    mock_api.get(f"{_SESSION_MODEL}/rules/High%20Value%20Client/lineage").mock(
+        return_value=httpx.Response(200, json=_LINEAGE)
+    )
+    mock_api.post(f"{_SESSION_MODEL}/rules/High%20Value%20Client/compile").mock(
+        return_value=httpx.Response(200, json={"dialect": "duckdb", "sql": "SELECT 1"})
+    )
+    out = server._impl_explain_rule("m001", "High Value Client")
+    assert "  reads tables: Orders (EDW.SALES.ORDERS)" in out
+
+
+def test_lineage_probe_miss_on_a_session_named_artefact_keeps_the_session(
+    mock_api: respx.MockRouter,
+):
+    """ "Dimension 'Session Count' not found" is a miss, not an expired session."""
+    create = mock_api.post("/v1/sessions")
+    _mock_create_session(mock_api)
+    mock_api.get(f"{_SESSION_MODEL}/dimensions/Session%20Count/lineage").mock(
+        return_value=httpx.Response(404, json={"detail": "Dimension 'Session Count' not found"})
+    )
+    mock_api.get(f"{_SESSION_MODEL}/measures/Session%20Count/lineage").mock(
+        return_value=httpx.Response(200, json={**_LINEAGE, "root": "measure:Session Count"})
+    )
+    for plural, kind in (("metrics", "Metric"), ("rules", "Rule")):
+        mock_api.get(f"{_SESSION_MODEL}/{plural}/Session%20Count/lineage").mock(
+            return_value=httpx.Response(404, json={"detail": f"{kind} 'Session Count' not found"})
+        )
+    out = server._impl_get_lineage("m001", "Session Count", None, None, None, "text")
+    assert out.startswith("Lineage of measure 'Session Count'")
+    assert create.call_count == 1
+    assert server._api_session_id == "test-session-1"
+
+
+def test_session_expiry_matches_only_the_session_wording():
+    def resp(detail: str) -> httpx.Response:
+        return httpx.Response(404, json={"detail": detail})
+
+    assert server._is_session_expired(resp("Session 'abc' not found"))
+    assert server._is_session_expired(resp("Session not found"))
+    assert not server._is_session_expired(resp("Dimension 'Session Count' not found"))
+    assert not server._is_session_expired(resp("Measure 'Sessions' not found"))
+
+
+def test_lineage_single_model_without_a_model_is_a_real_error(mock_api: respx.MockRouter):
+    server._single_model_mode = True
+    mock_api.get("/v1/dimensions/Revenue/lineage").mock(
+        return_value=httpx.Response(404, json={"detail": "No models loaded in any session"})
+    )
+    with pytest.raises(_ToolError, match="No models loaded in any session"):
+        server._impl_get_lineage(None, "Revenue", None, None, None, "text")
