@@ -294,6 +294,8 @@ _RUN_TIME_TOOLS: frozenset[str] = frozenset(
         "find_composables",
         "query_model_graph_by_sparql",
         "list_models",
+        # lineage of artefacts and queries (API 2.32)
+        "get_lineage",
         # business rules + ontology links (API 2.30)
         "list_rules",
         "explain_rule",
@@ -2310,11 +2312,17 @@ def _impl_run_batch(
 # ---------------------------------------------------------------------------
 
 
-def _model_request(model_id: str | None, method: str, path: str, json_body: dict | None = None):
+def _model_request(
+    model_id: str | None,
+    method: str,
+    path: str,
+    json_body: dict | None = None,
+    params: dict[str, Any] | None = None,
+):
     """Route a model-scoped call to the shortcut or the session endpoint."""
     if model_id is None:
-        return _shortcut_request(method, path, json_body=json_body)
-    return _session_request(method, f"/models/{model_id}{path}", json_body=json_body)
+        return _shortcut_request(method, path, json_body=json_body, params=params)
+    return _session_request(method, f"/models/{model_id}{path}", json_body=json_body, params=params)
 
 
 def _query_string(**params: Any) -> str:
@@ -2423,6 +2431,10 @@ def _impl_explain_rule(model_id: str | None, name: str) -> str:
         lines.append(f"  reads: {', '.join(reads)}")
     if rule.get("depends_on"):
         lines.append(f"  depends on: {', '.join(rule['depends_on'])}")
+    # API 2.32 lineage: the tables behind what the rule reads. Best-effort.
+    tables = _lineage_tables(model_id, "rule", rule.get("name", name))
+    if tables:
+        lines.append(f"  reads tables: {', '.join(tables)}")
     lines.extend(_render_mapping_lines(rule.get("external_concept_mappings"), "  "))
     if not rule.get("executable", True):
         lines.append(f"  not executable: {rule.get('error') or 'unknown reason'}")
@@ -2609,6 +2621,178 @@ def _impl_list_unmapped_artefacts(model_id: str | None, types: list[str] | None)
     for obj in objects:
         lines.append(f"  [{obj.get('type', '?')}] {obj.get('name', '?')}")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Lineage (API 2.32)
+# ---------------------------------------------------------------------------
+
+# Artefact kind → REST collection segment of ``GET .../{plural}/{name}/lineage``.
+# Looked up per kind because a rule may share its name with a measure.
+_LINEAGE_KINDS: dict[str, str] = {
+    "dimension": "dimensions",
+    "measure": "measures",
+    "metric": "metrics",
+    "rule": "rules",
+}
+
+_LINEAGE_FORMATS: tuple[str, ...] = ("text", "mermaid", "turtle", "json")
+
+# Node kinds in the order the text rendering lists them: what is asked about
+# first, the tables last.
+_LINEAGE_NODE_ORDER: tuple[tuple[str, str], ...] = (
+    ("query", "Query"),
+    ("union", "Union (UNION ALL of a multi-fact query's legs)"),
+    ("rule", "Rules"),
+    ("metric", "Metrics"),
+    ("measure", "Measures"),
+    ("dimension", "Dimensions"),
+    ("column", "Columns"),
+    ("data_object", "Data objects (tables read)"),
+)
+
+
+def _lineage_api_format(fmt: str) -> str:
+    """Map the tool's ``format`` to the API's ``?format=`` (text renders from JSON)."""
+    if fmt not in _LINEAGE_FORMATS:
+        raise ToolError(f"format must be one of {', '.join(_LINEAGE_FORMATS)}; got '{fmt}'")
+    return "json" if fmt in ("text", "json") else fmt
+
+
+def _render_lineage(data: dict, title: str) -> str:
+    """Nodes grouped by kind, then the edges, from a ``LineageResponse``."""
+    nodes = data.get("nodes") or []
+    edges = data.get("edges") or []
+    lines = [f"{title}  ({len(nodes)} nodes, {len(edges)} edges; root {data.get('root', '?')})"]
+    known = {kind for kind, _ in _LINEAGE_NODE_ORDER}
+    order = [*_LINEAGE_NODE_ORDER]
+    order.extend((k, k) for k in dict.fromkeys(n.get("kind") for n in nodes) if k not in known)
+    for kind, header in order:
+        members = [n for n in nodes if n.get("kind") == kind]
+        if not members:
+            continue
+        lines.append("")
+        lines.append(f"{header}:")
+        for n in members:
+            detail = f"  ({n['detail']})" if n.get("detail") else ""
+            lines.append(f"  {n.get('name', '?')}{detail}")
+    if edges:
+        lines.append("")
+        lines.append("Edges (source feeds target):")
+        for e in edges:
+            label = f"  [{e['label']}]" if e.get("label") else ""
+            path = f"  (pathName {e['path_name']})" if e.get("path_name") else ""
+            lines.append(f"  {e.get('source', '?')} -> {e.get('target', '?')}{label}{path}")
+    return "\n".join(lines)
+
+
+def _lineage_result(resp: httpx.Response, fmt: str, title: str) -> str:
+    """Shape one lineage response for the requested ``format``."""
+    if fmt in ("mermaid", "turtle"):
+        return resp.text
+    data = _parse_json(resp)
+    if fmt == "json":
+        return json.dumps(data, indent=2)
+    return _render_lineage(data, title)
+
+
+def _impl_artefact_lineage(model_id: str | None, name: str, kind: str | None, fmt: str) -> str:
+    """Lineage of a named dimension, measure, metric or rule.
+
+    Without ``kind``, every kind is tried: a name that resolves to more than
+    one (a rule named like a measure) is reported for each in ``text``/``json``,
+    and must be disambiguated with ``kind`` for ``mermaid``/``turtle``.
+    """
+    if kind is not None and kind not in _LINEAGE_KINDS:
+        raise ToolError(f"kind must be one of {', '.join(_LINEAGE_KINDS)}; got '{kind}'")
+    params = {"format": _lineage_api_format(fmt)}
+    encoded = quote(name, safe="")
+    kinds = [kind] if kind else list(_LINEAGE_KINDS)
+    found: list[tuple[str, httpx.Response]] = []
+    for k in kinds:
+        path = f"/{_LINEAGE_KINDS[k]}/{encoded}/lineage"
+        try:
+            found.append((k, _model_request(model_id, "GET", path, params=params)))
+        except ToolError as exc:
+            # Probing: a 404 means "no such artefact of this kind"; anything
+            # else (auth, 5xx, a missing model) is a real error.
+            message = str(exc)
+            if (
+                kind is not None
+                or not message.startswith("API error (404)")
+                or message.startswith("API error (404): Model '")
+            ):
+                raise
+    if not found:
+        raise ToolError(
+            f"No dimension, measure, metric or rule named '{name}' in this model. "
+            "Use find_artefacts or list_rules to find the exact name."
+        )
+    if len(found) > 1 and fmt in ("mermaid", "turtle"):
+        raise ToolError(
+            f"'{name}' names a {' and a '.join(k for k, _ in found)}; pass kind to pick one."
+        )
+    if fmt == "json":
+        payload = {k: _parse_json(r) for k, r in found}
+        return json.dumps(payload[found[0][0]] if len(found) == 1 else payload, indent=2)
+    return "\n\n".join(_lineage_result(r, fmt, f"Lineage of {k} '{name}'") for k, r in found)
+
+
+def _impl_query_lineage(
+    model_id: str | None, query_json: str, dialect: str | None, fmt: str
+) -> str:
+    """Lineage of a QueryObject, including the joins the planner chose."""
+    try:
+        query = json.loads(query_json)
+    except json.JSONDecodeError as exc:
+        raise ToolError(
+            f"Invalid query JSON: {exc}. The QueryObject schema is available via "
+            "get_json_schema('query')."
+        ) from exc
+    params: dict[str, str] = {"format": _lineage_api_format(fmt)}
+    if model_id is None:
+        if dialect is not None:
+            params["dialect"] = dialect
+        resp = _shortcut_request("POST", "/query/lineage", json_body=query, params=params)
+    else:
+        body: dict = {"model_id": model_id, "query": query}
+        if dialect is not None:
+            body["dialect"] = dialect
+        resp = _session_request("POST", "/query/lineage", json_body=body, params=params)
+    return _lineage_result(resp, fmt, "Lineage of the query")
+
+
+def _impl_get_lineage(
+    model_id: str | None,
+    name: str | None,
+    kind: str | None,
+    query_json: str | None,
+    dialect: str | None,
+    fmt: str,
+) -> str:
+    """Dispatch to artefact or query lineage (shared implementation)."""
+    if (name is None) == (query_json is None):
+        raise ToolError("Pass exactly one of name (an artefact) or query_json (a query).")
+    if query_json is not None:
+        if kind is not None:
+            raise ToolError("kind applies to a named artefact, not to query_json.")
+        return _impl_query_lineage(model_id, query_json, dialect, fmt)
+    assert name is not None
+    return _impl_artefact_lineage(model_id, name, kind, fmt)
+
+
+def _lineage_tables(model_id: str | None, kind: str, name: str) -> list[str]:
+    """Best-effort: the data objects an artefact reads, from its lineage."""
+    path = f"/{_LINEAGE_KINDS[kind]}/{quote(name, safe='')}/lineage"
+    try:
+        data = _parse_json(_model_request(model_id, "GET", path))
+    except Exception:  # noqa: BLE001 — enrichment must never break the caller
+        return []
+    return [
+        f"{n.get('name', '?')} ({n['detail']})" if n.get("detail") else n.get("name", "?")
+        for n in data.get("nodes") or []
+        if n.get("kind") == "data_object"
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -2811,13 +2995,54 @@ def _register_model_tools() -> None:
 
         Traces the composition chain from the named artefact down to the
         underlying data objects and columns.  Useful for understanding how a
-        measure is computed or where a dimension originates.
+        measure is computed or where a dimension originates.  For the full
+        graph (with rules, joins and pathNames, or a whole query's lineage, as
+        Mermaid or Turtle), use ``get_lineage``.
 
         Args:
             name: The dimension, measure, or metric name to explain.
             model_id: a loaded model's id (multi-model); omit in single-model.
         """
         return _impl_explain_artefact(_resolve_model_id(model_id), name)
+
+    @mcp.tool
+    def get_lineage(
+        name: str | None = None,
+        kind: str | None = None,
+        query_json: str | None = None,
+        dialect: str | None = None,
+        output_format: str = "text",
+        model_id: str | None = None,
+    ) -> str:
+        """Lineage graph of an artefact or a query, down to the tables it reads.
+
+        Pass ``name`` for a dimension, measure, metric or business rule, or
+        ``query_json`` for a whole query. The graph follows references down to
+        data objects: columns (computed ones included), filter and grain
+        columns, the measures and metrics a metric or rule reads, rules a rule
+        references, and for a query its ``select.fields`` columns, ``exists``
+        subqueries, and the joins the planner chose (with their ``pathName``,
+        role-playing joins included), across every leg of a multi-fact query
+        (the legs meet in a ``union`` node). Compiles only, never executes.
+
+        Args:
+            name: Artefact name. Mutually exclusive with ``query_json``.
+            kind: "dimension", "measure", "metric" or "rule". Optional: without
+                it every kind is tried, and a name used by two kinds (a rule
+                named like a measure) returns both.
+            query_json: A QueryObject as a JSON string (as for
+                ``execute_query``). Mutually exclusive with ``name``.
+            dialect: SQL dialect to plan the query for (``query_json`` only);
+                defaults to the model's, then the server's.
+            output_format: "text" (default: nodes by kind, then edges), "mermaid"
+                (a flowchart, sources on the left), "turtle" (``prov:wasDerivedFrom``
+                edges over the OBSL graph's IRIs; merges with ``get_model_graph``)
+                or "json" (the raw nodes, edges and Mermaid).
+            model_id: a loaded model's id (multi-model); omit in single-model.
+        """
+        return _impl_get_lineage(
+            _resolve_model_id(model_id), name, kind, query_json, dialect, output_format
+        )
 
     @mcp.tool
     def list_examples(intent: str | None = None, model_id: str | None = None) -> str:
@@ -2865,8 +3090,9 @@ def _register_model_tools() -> None:
 
     @mcp.tool
     def explain_rule(name: str, model_id: str | None = None) -> str:
-        """Explain one business rule: definition, what it reads, dependencies,
-        ontology links, and the SQL it compiles to for the session's dialect.
+        """Explain one business rule: definition, what it reads, the tables
+        behind it, dependencies, ontology links, and the SQL it compiles to for
+        the session's dialect. ``get_lineage(name, kind="rule")`` draws the graph.
 
         Args:
             name: The rule's name (as listed by ``list_rules``).
@@ -3677,6 +3903,7 @@ external concept is the broader one (SKOS `broadMatch`).
 
 Then: `load_model` reports every rule problem at once with a source span;
 `list_rules` shows what loaded; `explain_rule` shows the compiled SQL;
+`get_lineage(name, kind="rule")` shows what it reads down to the tables;
 `evaluate_rule` / `evaluate_rules` return the findings.
 """
 

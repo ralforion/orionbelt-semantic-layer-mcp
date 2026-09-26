@@ -6,6 +6,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.32.0] - 2026-09-26
+
+Tracks OrionBelt Semantic Layer API **v2.32.x**. One tool added.
+
+### Added
+
+- **`get_lineage`: lineage of an artefact or a query, down to the tables.** API
+  2.32 serves lineage per artefact type (`GET /v1/{dimensions,measures,metrics,rules}/{name}/lineage`)
+  and per query (`POST /v1/query/lineage`), with session-scoped forms. One tool
+  covers all five: pass `name` for a dimension, measure, metric or business
+  rule, or `query_json` for a whole query (with the joins the planner chose,
+  their `pathName`, and the `union` node of a multi-fact query). `kind` is
+  optional: without it every kind is tried, and a name two kinds share (a rule
+  named like a measure) returns both. `output_format` is `text` (nodes by kind,
+  then edges), `mermaid`, `turtle` (`prov:wasDerivedFrom` over the OBSL graph's
+  IRIs, so it merges with `get_model_graph`) or `json`. Run-time phase only;
+  it compiles and never executes, so it is not gated by `query_execute`.
+  Tool counts: 25 single-model, 29 multi-model (30 distinct).
+
+### Changed
+
+- **`explain_rule` names the tables behind a rule**, from the rule's lineage
+  (`reads tables: ...`, best-effort), and points to `get_lineage` for the graph.
+  `explain_artefact` and the `write_business_rule` prompt mention `get_lineage` too.
+
 ## [2.31.0] - 2026-09-24
 
 Tracks OrionBelt Semantic Layer API **v2.31.x**. No tools added or changed.
