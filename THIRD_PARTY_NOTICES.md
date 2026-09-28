@@ -71,8 +71,8 @@ uv run --no-sync python scripts/third_party_notices.py
 | docutils | 0.22.4 | Public Domain OR BSD License OR GNU General Public License (GPL) ⚠️ | yes |
 | email-validator | 2.3.0 | The Unlicense (Unlicense) | yes |
 | exceptiongroup | 1.3.1 | MIT License | yes |
-| fastmcp | 4.0.5 | Apache-2.0 | yes |
-| fastmcp-slim | 4.0.5 | Apache-2.0 | yes |
+| fastmcp | 4.0.9 | Apache-2.0 | yes |
+| fastmcp-slim | 4.0.9 | Apache-2.0 | yes |
 | griffelib | 2.0.2 | ISC | yes |
 | h11 | 0.16.0 | MIT License | yes |
 | httpcore | 1.0.9 | BSD-3-Clause | yes |
@@ -198,7 +198,7 @@ instead, because only the project itself can supply its copyright line.
 
 | Package | Version | Declared license |
 | --- | --- | --- |
-| fastmcp-slim | 4.0.5 | Apache-2.0 |
+| fastmcp-slim | 4.0.9 | Apache-2.0 |
 | py-key-value-aio | 0.4.4 | Apache Software License |
 
 ## Full license texts
@@ -1536,7 +1536,7 @@ agrees to be bound by the terms and conditions of this License
 Agreement.
 ```
 
-### fastmcp 4.0.5
+### fastmcp 4.0.9
 
 *LICENSE*
 
@@ -1569,7 +1569,7 @@ APPENDIX: How to apply the Apache License to your work.
    limitations under the License.
 ```
 
-### fastmcp-slim 4.0.5
+### fastmcp-slim 4.0.9
 
 Ships no license file. Declares Apache-2.0, whose terms are reproduced in [Appendix A](#appendix-a--apache-license-20).
 
