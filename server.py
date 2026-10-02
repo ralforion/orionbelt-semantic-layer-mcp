@@ -323,8 +323,10 @@ _RUN_TIME_TOOLS: frozenset[str] = frozenset(
 
 # Reference data and model introspection — answered by the API alone.
 _READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=False)
-# Runs compiled SQL against the live warehouse, whose data changes under us.
-_READ_ONLY_WAREHOUSE = ToolAnnotations(read_only_hint=True, open_world_hint=True)
+# Reaches past the API: compiled SQL against the live warehouse (execute_query,
+# evaluate_rule(s)), a datasource probe (validate_model with ``online``), or a
+# remote endpoint via a SPARQL ``SERVICE`` clause, which the API does not block.
+_READ_ONLY_OPEN_WORLD = ToolAnnotations(read_only_hint=True, open_world_hint=True)
 # Adds a model to the session; never replaces or drops an existing one.
 _SESSION_WRITE = ToolAnnotations(
     read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=False
@@ -334,9 +336,10 @@ _SESSION_DELETE = ToolAnnotations(
     read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=False
 )
 # run_batch: executes against the warehouse and, with ``persist_model``, keeps
-# the model in the session — annotations are static, so the write wins.
+# the model in the session. Destructive because the API's cleanup also evicts a
+# model it only *reused* via dedup — one an earlier load_model put there.
 _BATCH = ToolAnnotations(
-    read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True
+    read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=True
 )
 
 
@@ -2974,7 +2977,7 @@ def _register_model_tools() -> None:
         """
         return _impl_get_graph(_resolve_model_id(model_id))
 
-    @mcp.tool(title="SPARQL Model Graph Query", annotations=_READ_ONLY)
+    @mcp.tool(title="SPARQL Model Graph Query", annotations=_READ_ONLY_OPEN_WORLD)
     def query_model_graph_by_sparql(query: str, model_id: str | None = None) -> str:
         """Execute a read-only SPARQL query against the model's RDF graph.
 
@@ -3134,7 +3137,7 @@ def _register_model_tools() -> None:
         """
         return _impl_explain_rule(_resolve_model_id(model_id), name)
 
-    @mcp.tool(title="Evaluate Business Rule", annotations=_READ_ONLY_WAREHOUSE)
+    @mcp.tool(title="Evaluate Business Rule", annotations=_READ_ONLY_OPEN_WORLD)
     def evaluate_rule(
         name: str,
         limit: int | None = None,
@@ -3160,7 +3163,7 @@ def _register_model_tools() -> None:
         """
         return _impl_evaluate_rule(_resolve_model_id(model_id), name, limit, dialect, format_values)
 
-    @mcp.tool(title="Evaluate Business Rules", annotations=_READ_ONLY_WAREHOUSE)
+    @mcp.tool(title="Evaluate Business Rules", annotations=_READ_ONLY_OPEN_WORLD)
     def evaluate_rules(
         types: list[str] | None = None,
         severities: list[str] | None = None,
@@ -3259,7 +3262,7 @@ def _register_model_tools() -> None:
 
     # ----- execute (always registered; gated by the query_execute capability) -----
 
-    @mcp.tool(title="Execute Query", annotations=_READ_ONLY_WAREHOUSE)
+    @mcp.tool(title="Execute Query", annotations=_READ_ONLY_OPEN_WORLD)
     def execute_query(
         query_json: str,
         model_id: str | None = None,
@@ -3302,7 +3305,7 @@ def _register_model_tools() -> None:
 
     if _single_model_mode:
 
-        @mcp.tool(title="Validate Model", annotations=_READ_ONLY)
+        @mcp.tool(title="Validate Model", annotations=_READ_ONLY_OPEN_WORLD)
         def validate_model(
             model: dict | str | None = None,
             model_yaml: str | None = None,
@@ -3346,7 +3349,7 @@ def _register_model_tools() -> None:
 
     else:
 
-        @mcp.tool(title="Validate Model", annotations=_READ_ONLY)
+        @mcp.tool(title="Validate Model", annotations=_READ_ONLY_OPEN_WORLD)
         def validate_model(
             model: dict | str | None = None,
             model_yaml: str | None = None,
