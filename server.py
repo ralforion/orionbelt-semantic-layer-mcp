@@ -42,6 +42,7 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.prompts import Prompt as _BasePrompt
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from mcp.types import ToolAnnotations
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # ---------------------------------------------------------------------------
@@ -306,6 +307,39 @@ _RUN_TIME_TOOLS: frozenset[str] = frozenset(
         "list_concept_namespaces",
         "list_unmapped_artefacts",
     }
+)
+
+# ---------------------------------------------------------------------------
+# Tool annotations — behavioural hints for hosts (MCP ``ToolAnnotations``)
+# ---------------------------------------------------------------------------
+#
+# Hints only, never access control: hosts use them to decide whether to ask the
+# user before a call. Every registered tool carries one of these presets (a test
+# enforces it). ``destructiveHint``/``idempotentHint`` are meaningful only when
+# ``readOnlyHint`` is false, so the read-only presets leave them unset.
+#
+# Query execution is read-only: the API compiles to SELECT only and opens
+# warehouse connections read-only; its only writes are its own result cache.
+
+# Reference data and model introspection — answered by the API alone.
+_READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=False)
+# Reaches past the API: compiled SQL against the live warehouse (execute_query,
+# evaluate_rule(s)), a datasource probe (validate_model with ``online``), or a
+# remote endpoint via a SPARQL ``SERVICE`` clause, which the API does not block.
+_READ_ONLY_OPEN_WORLD = ToolAnnotations(read_only_hint=True, open_world_hint=True)
+# Adds a model to the session; never replaces or drops an existing one.
+_SESSION_WRITE = ToolAnnotations(
+    read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=False
+)
+# Drops a model from the session; repeating it changes nothing further.
+_SESSION_DELETE = ToolAnnotations(
+    read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=False
+)
+# run_batch: executes against the warehouse and, with ``persist_model``, keeps
+# the model in the session. Destructive because the API's cleanup also evicts a
+# model it only *reused* via dedup — one an earlier load_model put there.
+_BATCH = ToolAnnotations(
+    read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=True
 )
 
 
@@ -1001,7 +1035,7 @@ def obsql_reference() -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool
+@mcp.tool(title="OBML Reference", annotations=_READ_ONLY)
 def get_obml_reference() -> str:
     """Get the OBML format reference.
 
@@ -1013,7 +1047,7 @@ def get_obml_reference() -> str:
     return _fetch_obml_reference()
 
 
-@mcp.tool
+@mcp.tool(title="Function Catalog", annotations=_READ_ONLY)
 def get_function_catalog() -> str:
     """Get the portable scalar-function catalog for OBML expressions.
 
@@ -1066,7 +1100,7 @@ def get_function_catalog() -> str:
     return "\n".join(lines).rstrip()
 
 
-@mcp.tool
+@mcp.tool(title="JSON Schema", annotations=_READ_ONLY)
 def get_json_schema(name: Literal["obml", "query"]) -> str:
     """Get a published JSON Schema by name.
 
@@ -1081,7 +1115,7 @@ def get_json_schema(name: Literal["obml", "query"]) -> str:
     return json.dumps(_parse_json(resp), indent=2)
 
 
-@mcp.tool
+@mcp.tool(title="List Dialects", annotations=_READ_ONLY)
 def list_dialects() -> str:
     """List available SQL dialects, their capabilities, and what each can compute.
 
@@ -2838,7 +2872,7 @@ def _register_model_tools() -> None:
 
     # ----- introspection -----
 
-    @mcp.tool
+    @mcp.tool(title="Describe Model", annotations=_READ_ONLY)
     def describe_model(model_id: str | None = None) -> str:
         """Describe the contents of the model.
 
@@ -2851,7 +2885,7 @@ def _register_model_tools() -> None:
         """
         return _impl_describe_model(_resolve_model_id(model_id))
 
-    @mcp.tool
+    @mcp.tool(title="Model Diagram", annotations=_READ_ONLY)
     def get_model_diagram(
         model_id: str | None = None,
         show_columns: bool = True,
@@ -2870,7 +2904,7 @@ def _register_model_tools() -> None:
         """
         return _impl_get_model_diagram(_resolve_model_id(model_id), show_columns, theme)
 
-    @mcp.tool
+    @mcp.tool(title="Join Graph", annotations=_READ_ONLY)
     def get_join_graph(model_id: str | None = None) -> str:
         """Return the join graph as an adjacency list.
 
@@ -2882,7 +2916,7 @@ def _register_model_tools() -> None:
         """
         return _impl_get_join_graph(_resolve_model_id(model_id))
 
-    @mcp.tool
+    @mcp.tool(title="Find Composables", annotations=_READ_ONLY)
     def find_composables(
         query_json: str | None = None,
         anchors: list[str] | str | None = None,
@@ -2930,7 +2964,7 @@ def _register_model_tools() -> None:
             anchor_type,
         )
 
-    @mcp.tool
+    @mcp.tool(title="Model Graph", annotations=_READ_ONLY)
     def get_model_graph(model_id: str | None = None) -> str:
         """Get the OBSL-Core RDF graph for the model as Turtle.
 
@@ -2943,7 +2977,7 @@ def _register_model_tools() -> None:
         """
         return _impl_get_graph(_resolve_model_id(model_id))
 
-    @mcp.tool
+    @mcp.tool(title="SPARQL Model Graph Query", annotations=_READ_ONLY_OPEN_WORLD)
     def query_model_graph_by_sparql(query: str, model_id: str | None = None) -> str:
         """Execute a read-only SPARQL query against the model's RDF graph.
 
@@ -2958,7 +2992,7 @@ def _register_model_tools() -> None:
 
     # ----- discovery -----
 
-    @mcp.tool
+    @mcp.tool(title="Find Artefacts", annotations=_READ_ONLY)
     def find_artefacts(
         query: str | None = None,
         kind: Literal["dimension", "measure", "metric"] | None = None,
@@ -2992,7 +3026,7 @@ def _register_model_tools() -> None:
             return _impl_find_artefacts(resolved, query, kind)
         return _impl_list_artefacts(resolved, kind, name)
 
-    @mcp.tool
+    @mcp.tool(title="Explain Artefact", annotations=_READ_ONLY)
     def explain_artefact(name: str, model_id: str | None = None) -> str:
         """Explain the lineage of a dimension, measure, or metric.
 
@@ -3008,7 +3042,7 @@ def _register_model_tools() -> None:
         """
         return _impl_explain_artefact(_resolve_model_id(model_id), name)
 
-    @mcp.tool
+    @mcp.tool(title="Lineage", annotations=_READ_ONLY)
     def get_lineage(
         name: str | None = None,
         kind: str | None = None,
@@ -3047,7 +3081,7 @@ def _register_model_tools() -> None:
             _resolve_model_id(model_id), name, kind, query_json, dialect, output_format
         )
 
-    @mcp.tool
+    @mcp.tool(title="List Examples", annotations=_READ_ONLY)
     def list_examples(intent: str | None = None, model_id: str | None = None) -> str:
         """List canonical example queries authored alongside the model.
 
@@ -3062,7 +3096,7 @@ def _register_model_tools() -> None:
         """
         return _impl_list_examples(_resolve_model_id(model_id), intent)
 
-    @mcp.tool
+    @mcp.tool(title="Get Example", annotations=_READ_ONLY)
     def get_example(name: str, model_id: str | None = None) -> str:
         """Get a single example by name with its query and compiled SQL preview.
 
@@ -3074,7 +3108,7 @@ def _register_model_tools() -> None:
 
     # ----- business rules -----
 
-    @mcp.tool
+    @mcp.tool(title="List Business Rules", annotations=_READ_ONLY)
     def list_rules(model_id: str | None = None) -> str:
         """List the model's business rules with statistics.
 
@@ -3091,7 +3125,7 @@ def _register_model_tools() -> None:
         """
         return _impl_list_rules(_resolve_model_id(model_id))
 
-    @mcp.tool
+    @mcp.tool(title="Explain Business Rule", annotations=_READ_ONLY)
     def explain_rule(name: str, model_id: str | None = None) -> str:
         """Explain one business rule: definition, what it reads, the tables
         behind it, dependencies, ontology links, and the SQL it compiles to for
@@ -3103,7 +3137,7 @@ def _register_model_tools() -> None:
         """
         return _impl_explain_rule(_resolve_model_id(model_id), name)
 
-    @mcp.tool
+    @mcp.tool(title="Evaluate Business Rule", annotations=_READ_ONLY_OPEN_WORLD)
     def evaluate_rule(
         name: str,
         limit: int | None = None,
@@ -3129,7 +3163,7 @@ def _register_model_tools() -> None:
         """
         return _impl_evaluate_rule(_resolve_model_id(model_id), name, limit, dialect, format_values)
 
-    @mcp.tool
+    @mcp.tool(title="Evaluate Business Rules", annotations=_READ_ONLY_OPEN_WORLD)
     def evaluate_rules(
         types: list[str] | None = None,
         severities: list[str] | None = None,
@@ -3173,7 +3207,7 @@ def _register_model_tools() -> None:
 
     # ----- ontology links -----
 
-    @mcp.tool
+    @mcp.tool(title="Find Concept Mappings", annotations=_READ_ONLY)
     def find_concept_mappings(
         concept: str | None = None,
         namespace: str | None = None,
@@ -3201,7 +3235,7 @@ def _register_model_tools() -> None:
             _resolve_model_id(model_id), concept, namespace, relation, types
         )
 
-    @mcp.tool
+    @mcp.tool(title="List Concept Namespaces", annotations=_READ_ONLY)
     def list_concept_namespaces(model_id: str | None = None) -> str:
         """Which external ontologies the model links into, most used first,
         plus declared prefixes that no mapping uses yet.
@@ -3211,7 +3245,7 @@ def _register_model_tools() -> None:
         """
         return _impl_list_concept_namespaces(_resolve_model_id(model_id))
 
-    @mcp.tool
+    @mcp.tool(title="List Unmapped Artefacts", annotations=_READ_ONLY)
     def list_unmapped_artefacts(types: list[str] | None = None, model_id: str | None = None) -> str:
         """List the artefacts that still have no external concept mapping.
 
@@ -3228,7 +3262,7 @@ def _register_model_tools() -> None:
 
     # ----- execute (always registered; gated by the query_execute capability) -----
 
-    @mcp.tool
+    @mcp.tool(title="Execute Query", annotations=_READ_ONLY_OPEN_WORLD)
     def execute_query(
         query_json: str,
         model_id: str | None = None,
@@ -3271,7 +3305,7 @@ def _register_model_tools() -> None:
 
     if _single_model_mode:
 
-        @mcp.tool
+        @mcp.tool(title="Validate Model", annotations=_READ_ONLY_OPEN_WORLD)
         def validate_model(
             model: dict | str | None = None,
             model_yaml: str | None = None,
@@ -3315,7 +3349,7 @@ def _register_model_tools() -> None:
 
     else:
 
-        @mcp.tool
+        @mcp.tool(title="Validate Model", annotations=_READ_ONLY_OPEN_WORLD)
         def validate_model(
             model: dict | str | None = None,
             model_yaml: str | None = None,
@@ -3363,7 +3397,7 @@ def _register_model_tools() -> None:
 
     if _single_model_mode:
 
-        @mcp.tool
+        @mcp.tool(title="Get Model", annotations=_READ_ONLY)
         def get_model() -> str:
             """Get the pre-loaded OBML YAML model source.
 
@@ -3382,7 +3416,7 @@ def _register_model_tools() -> None:
 
     # ----- multi-model only: session/model management + one-shot batch -----
 
-    @mcp.tool
+    @mcp.tool(title="Load Model", annotations=_SESSION_WRITE)
     def load_model(
         model: dict | str | None = None,
         osi_yaml: str | None = None,
@@ -3424,7 +3458,7 @@ def _register_model_tools() -> None:
             return _impl_load_model_from_osi(osi_yaml, dedup)
         return _impl_load_model(model, extends, inherits, dedup)
 
-    @mcp.tool
+    @mcp.tool(title="Remove Model", annotations=_SESSION_DELETE)
     def remove_model(model_id: str) -> str:
         """Remove a model from the current session.
 
@@ -3433,7 +3467,7 @@ def _register_model_tools() -> None:
         """
         return _impl_remove_model(model_id)
 
-    @mcp.tool
+    @mcp.tool(title="List Models", annotations=_READ_ONLY)
     def list_models() -> str:
         """List all models currently loaded in a session."""
         resp = _session_request("GET", "/models")
@@ -3449,7 +3483,7 @@ def _register_model_tools() -> None:
             )
         return "\n".join(lines)
 
-    @mcp.tool
+    @mcp.tool(title="Export Model to OSI", annotations=_READ_ONLY)
     def export_model_to_osi(
         model_id: str,
         model_name: str = "semantic_model",
@@ -3481,7 +3515,7 @@ def _register_model_tools() -> None:
             include_ontology,
         )
 
-    @mcp.tool
+    @mcp.tool(title="Run Query Batch", annotations=_BATCH)
     def run_batch(
         queries: list[dict],
         model_yaml: str | None = None,

@@ -6,6 +6,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.33.1] - 2026-10-02
+
+Tracks OrionBelt Semantic Layer API **v2.33.x**. No tools added or removed.
+
+### Added
+
+- Every tool now carries a `title` and MCP tool annotations, so hosts can skip
+  approval prompts for read-only calls. All tools are `readOnlyHint: true`
+  except `load_model`, `remove_model` and `run_batch`. `remove_model` and
+  `run_batch` are `destructiveHint: true`: the API's batch cleanup also evicts a
+  model it reused via dedup. `openWorldHint: true` marks the tools that reach
+  past the API — `execute_query`, `evaluate_rule`, `evaluate_rules` and
+  `run_batch` (the warehouse), `validate_model` (`online` probes the
+  datasource) and `query_model_graph_by_sparql` (a `SERVICE` clause contacts
+  remote endpoints). The hints are advisory; access control is unchanged.
+
 ## [2.33.0] - 2026-10-02
 
 Tracks OrionBelt Semantic Layer API **v2.33.x**. No tools added or changed: the
