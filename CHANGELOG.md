@@ -6,6 +6,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.33.1] - 2026-10-02
+
+Tracks OrionBelt Semantic Layer API **v2.33.x**. No tools added or removed.
+
 ### Added
 
 - Every tool now carries a `title` and MCP tool annotations, so hosts can skip
