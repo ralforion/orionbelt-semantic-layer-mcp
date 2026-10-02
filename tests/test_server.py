@@ -3805,6 +3805,11 @@ def test_registered_tool_count_matches_the_live_surface():
 
 
 def _tool_names_in_fresh_module(single: bool) -> set[str]:
+    """Names of one mode's registered tools (see ``_tools_in_fresh_module``)."""
+    return {t.name for t in _tools_in_fresh_module(single)}
+
+
+def _tools_in_fresh_module(single: bool) -> list:
     """Register one mode's tools in a fresh ``server``, leaving this one alone.
 
     ``_register_model_tools`` adds to a registry it never clears, so calling it
@@ -3819,7 +3824,7 @@ def _tool_names_in_fresh_module(single: bool) -> set[str]:
         fresh._single_model_mode = single
         fresh._query_execute_enabled = True
         fresh._register_model_tools()
-        return {t.name for t in asyncio.run(fresh.mcp._list_tools())}
+        return list(asyncio.run(fresh.mcp._list_tools()))
     finally:
         sys.modules["server"] = original
 
@@ -3835,6 +3840,33 @@ def test_registered_tool_counts_are_what_the_readme_claims():
     assert len(single & multi) == 24
     assert single - multi == {"get_model"}
     assert "validate_model" in single & multi
+
+
+@pytest.mark.parametrize("single", [True, False])
+def test_every_tool_carries_annotations_and_a_title(single):
+    """No tool ships without behavioural hints — hosts gate approval prompts on them."""
+    for tool in _tools_in_fresh_module(single):
+        assert tool.title, f"{tool.name} has no title"
+        ann = tool.annotations
+        assert ann is not None, f"{tool.name} has no annotations"
+        assert ann.read_only_hint is not None, f"{tool.name} lacks readOnlyHint"
+        assert ann.open_world_hint is not None, f"{tool.name} lacks openWorldHint"
+        if not ann.read_only_hint:
+            assert ann.destructive_hint is not None, f"{tool.name} lacks destructiveHint"
+            assert ann.idempotent_hint is not None, f"{tool.name} lacks idempotentHint"
+
+
+def test_tool_annotations_classify_writes_and_warehouse_access():
+    """Only the session-mutating verbs write; only remove_model destroys."""
+    tools = {t.name: t.annotations for t in _tools_in_fresh_module(False)}
+    tools |= {t.name: t.annotations for t in _tools_in_fresh_module(True)}
+
+    writers = {name for name, a in tools.items() if not a.read_only_hint}
+    assert writers == {"load_model", "remove_model", "run_batch"}
+    destructive = {name for name, a in tools.items() if a.destructive_hint}
+    assert destructive == {"remove_model"}
+    open_world = {name for name, a in tools.items() if a.open_world_hint}
+    assert open_world == {"execute_query", "evaluate_rule", "evaluate_rules", "run_batch"}
 
 
 def test_registered_tool_count_never_breaks_startup(monkeypatch):

@@ -6,6 +6,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- Every tool now carries a `title` and MCP tool annotations, so hosts can skip
+  approval prompts for read-only calls. All tools are `readOnlyHint: true`
+  except `load_model`, `remove_model` (the only `destructiveHint: true`) and
+  `run_batch` (which can persist its model). `execute_query`, `evaluate_rule`,
+  `evaluate_rules` and `run_batch` are `openWorldHint: true` because they query
+  the live warehouse. The hints are advisory; access control is unchanged.
+
 ## [2.33.0] - 2026-10-02
 
 Tracks OrionBelt Semantic Layer API **v2.33.x**. No tools added or changed: the
