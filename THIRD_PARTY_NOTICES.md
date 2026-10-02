@@ -107,7 +107,7 @@ uv run --no-sync python scripts/third_party_notices.py
 | pydantic-core | 2.41.5 | MIT | yes |
 | pydantic-settings | 2.15.0 | MIT | yes |
 | pygments | 2.21.0 | BSD-2-Clause | yes |
-| pyjwt | 2.13.0 | MIT | yes |
+| pyjwt | 2.15.0 | MIT | yes |
 | pyperclip | 1.11.0 | BSD License | yes |
 | python-dotenv | 1.2.2 | BSD-3-Clause | yes |
 | python-multipart | 0.0.32 | Apache-2.0 | yes |
@@ -2953,7 +2953,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### pyjwt 2.13.0
+### pyjwt 2.15.0
 
 *AUTHORS.rst*
 
