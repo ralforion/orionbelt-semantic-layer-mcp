@@ -6,6 +6,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.33.0] - 2026-10-02
+
+Tracks OrionBelt Semantic Layer API **v2.33.x**. No tools added or changed: the
+compatibility gate needs a matching `major.minor`, so this release only moves
+the version.
+
+API 2.33 caches compiled queries by default, so a repeated `compile_query`,
+`execute_query` or `run_batch` skips the compiler; the responses are unchanged.
+Its new `GET /v1/cache/compilation` and `POST /v1/cache/compilation/clear` are
+operational endpoints and, like the result cache's, are not wrapped as tools.
+
 ## [2.32.0] - 2026-09-26
 
 Tracks OrionBelt Semantic Layer API **v2.32.x**. One tool added.
