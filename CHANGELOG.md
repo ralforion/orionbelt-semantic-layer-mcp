@@ -6,6 +6,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.34.0] - 2026-10-08
+
+Tracks OrionBelt Semantic Layer API **v2.34.x**. No tools added or removed; the
+REST surface is unchanged and `query_json` is passed through, so the new query
+features work as soon as the API supports them.
+
+### Added
+
+- `write_query` prompt documents the new `asOf` query field (cumulative metrics
+  evaluated as of one period when their time dimension is not selected), the
+  `ilike` / `notilike` filter operators, and the corrected cumulative
+  semantics: per-group partitioning, calendar-period rolling windows, and a
+  time filter that no longer cuts the look-back.
+- `debug_validation` documents the `NON_ADDITIVE_CUMULATIVE_SUM` warning and the
+  narrowed `CUMULATIVE_TIME_DIMENSION_NOT_IN_SELECT` error.
+
+### Changed
+
+- `query_model_graph_by_sparql` is now `openWorldHint: false` and `run_batch` is
+  now `destructiveHint: false`. Both were conservative while MCP 2.33.x could
+  still run against API 2.33.0; the compatibility gate now requires API 2.34,
+  which rejects SPARQL `SERVICE` / `FROM` and no longer evicts a model a batch
+  only reused.
+
 ## [2.33.1] - 2026-10-02
 
 Tracks OrionBelt Semantic Layer API **v2.33.x**. No tools added or removed.

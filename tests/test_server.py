@@ -3857,14 +3857,14 @@ def test_every_tool_carries_annotations_and_a_title(single):
 
 
 def test_tool_annotations_classify_writes_and_warehouse_access():
-    """Only the session-mutating verbs write; run_batch can evict a reused model."""
+    """Only the session-mutating verbs write; only remove_model drops a model."""
     tools = {t.name: t.annotations for t in _tools_in_fresh_module(False)}
     tools |= {t.name: t.annotations for t in _tools_in_fresh_module(True)}
 
     writers = {name for name, a in tools.items() if not a.read_only_hint}
     assert writers == {"load_model", "remove_model", "run_batch"}
     destructive = {name for name, a in tools.items() if a.destructive_hint}
-    assert destructive == {"remove_model", "run_batch"}
+    assert destructive == {"remove_model"}
     open_world = {name for name, a in tools.items() if a.open_world_hint}
     assert open_world == {
         "execute_query",
@@ -3872,7 +3872,6 @@ def test_tool_annotations_classify_writes_and_warehouse_access():
         "evaluate_rules",
         "run_batch",
         "validate_model",
-        "query_model_graph_by_sparql",
     }
 
 

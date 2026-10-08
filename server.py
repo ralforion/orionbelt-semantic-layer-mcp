@@ -324,8 +324,8 @@ _RUN_TIME_TOOLS: frozenset[str] = frozenset(
 # Reference data and model introspection — answered by the API alone.
 _READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=False)
 # Reaches past the API: compiled SQL against the live warehouse (execute_query,
-# evaluate_rule(s)), a datasource probe (validate_model with ``online``), or a
-# remote endpoint via a SPARQL ``SERVICE`` clause, which the API does not block.
+# evaluate_rule(s)) or a datasource probe (validate_model with ``online``). SPARQL
+# is closed-world: since OBSL 2.33.1 the API rejects ``SERVICE`` / ``FROM``.
 _READ_ONLY_OPEN_WORLD = ToolAnnotations(read_only_hint=True, open_world_hint=True)
 # Adds a model to the session; never replaces or drops an existing one.
 _SESSION_WRITE = ToolAnnotations(
@@ -336,10 +336,10 @@ _SESSION_DELETE = ToolAnnotations(
     read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=False
 )
 # run_batch: executes against the warehouse and, with ``persist_model``, keeps
-# the model in the session. Destructive because the API's cleanup also evicts a
-# model it only *reused* via dedup — one an earlier load_model put there.
+# the model in the session. Not destructive: since OBSL 2.33.1 the API's cleanup
+# no longer evicts a model it only *reused* via dedup.
 _BATCH = ToolAnnotations(
-    read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=True
+    read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True
 )
 
 
@@ -2977,7 +2977,7 @@ def _register_model_tools() -> None:
         """
         return _impl_get_graph(_resolve_model_id(model_id))
 
-    @mcp.tool(title="SPARQL Model Graph Query", annotations=_READ_ONLY_OPEN_WORLD)
+    @mcp.tool(title="SPARQL Model Graph Query", annotations=_READ_ONLY)
     def query_model_graph_by_sparql(query: str, model_id: str | None = None) -> str:
         """Execute a read-only SPARQL query against the model's RDF graph.
 
@@ -3646,7 +3646,8 @@ The fields below (filters, groups, dimensionsExclude, coalesce, raw `fields`,
 - Comparison: `gt`, `gte`, `lt`, `lte`, `>`, `>=`, `<`, `<=`
 - Set: `in`, `not_in`, `inlist`, `notinlist`
 - Null: `is_null`, `is_not_null`, `set`, `notset`
-- String: `contains`, `notcontains`, `like`, `notlike`, `starts_with`, `ends_with`
+- String: `contains`, `notcontains`, `like`, `notlike`, `ilike`, `notilike`
+  (case-insensitive, OBSL 2.34+), `starts_with`, `ends_with`
 - Regex: `regex`, `notregex` (per-dialect native syntax)
 - Blank: `blank` (NULL or empty/whitespace), `notblank`
 - Length: `length_eq`, `length_gt`, `length_lt` (value must be integer)
@@ -3698,6 +3699,15 @@ record that the duplication is understood and intended, which silences the
 warning.  The generated SQL is identical either way — this suppresses a
 diagnostic, it does not change the result.
 
+## asOf (cumulative metrics without their time dimension)
+
+A cumulative metric may be queried *without* selecting its `timeDimension`
+(OBSL 2.34+): `Region` + `YTD Sales` gives each region its year-to-date as
+of one period.  Set `"asOf": "2025-06-30"` on the query to pick that period
+(read at the time dimension's grain — a mid-month date means that month).
+Without `asOf`, the latest period with data under the query's filters is
+used.  `asOf` has no effect when the time dimension is selected.
+
 ## Supported Dialects
 
 {dialects}
@@ -3708,7 +3718,10 @@ Metrics are queried by name like any measure.  Three types exist:
 
 - **Derived** (default): expression-based, e.g. `{[Profit]} / {[Revenue]}`.
 - **Cumulative**: running total, rolling window, or grain-to-date over a
-  time dimension.  Queried as a regular metric name.
+  time dimension.  Queried as a regular metric name.  Other selected
+  dimensions partition the accumulation, and a rolling `window` counts
+  calendar periods, not rows.  A filter on the time dimension picks the
+  periods shown; the look-back still reads the history before them.
 - **Period-over-Period (PoP)**: compares a measure across time periods
   (e.g. YoY growth, MoM difference).  Queried as a regular metric name.
 
@@ -4190,6 +4203,12 @@ references unknown column.
   Fix: Use a field name from `select.dimensions` or `select.measures`, or a numeric position.
 - `INVALID_ORDER_BY_POSITION`: Numeric ORDER BY position is out of range.
   Fix: Use a position between 1 and the number of SELECT columns.
+- `CUMULATIVE_TIME_DIMENSION_NOT_IN_SELECT`: Since OBSL 2.34 a cumulative
+  metric no longer needs its `timeDimension` selected (see `asOf`); the error
+  remains only for `grouping: rollup` / `cube`, or when another dimension over
+  the same date column is selected.
+  Fix: Select the metric's `timeDimension`, or drop the rollup/cube or the
+  other dimension on that date column.
 
 ## Dialect Capability Errors (at query time)
 
@@ -4241,6 +4260,12 @@ result, and `load_model` reports the count.
   own `FROM` does not provide, so the statement parses but the database will
   reject it. This is a compiler defect rather than a model one.
   Fix: Nothing to change in the model — report the query upstream.
+- `NON_ADDITIVE_CUMULATIVE_SUM`: A cumulative `sum` metric adds up per-period
+  values of a measure that does not add up across periods — a distinct
+  count, average, min/max (OBSL 2.34+). Summed monthly distinct customers
+  count a customer once per month.
+  Fix: Base the cumulative sum on a `sum`/`count` measure, or use
+  `cumulativeType: avg`/`min`/`max` if per-period values are what you mean.
 - `DECLARED_TYPE_NOT_APPLIED`: A result column could not be reconciled to the
   type the model declares for it, so it is returned as whatever the engine sent
   (OBSL 2.27+). Reconciliation is what makes a `boolean` measure over an
