@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- `scripts/release.sh` puts the version's CHANGELOG entry at the top of the
+  GitHub release notes, above the commit list, and refuses an empty entry.
+  Commit subjects alone ("bump to X.Y.Z") said nothing about what changed.
+
 ## [2.35.0] - 2026-10-24
 
 Tracks OrionBelt Semantic Layer API **v2.35.x**. No tools added or removed. The

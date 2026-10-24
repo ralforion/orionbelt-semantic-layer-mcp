@@ -218,11 +218,24 @@ else
         confirm "Generate notes from ${PREV_TAG}..HEAD?" \
             || fail "Aborted: confirm the previous tag, then re-run."
         NOTES=$(git log "${PREV_TAG}"..HEAD --oneline --no-merges | head -20)
+        # The CHANGELOG entry leads the notes: commit subjects alone ("bump to
+        # X.Y.Z") say nothing about what changed. Everything between this
+        # version's heading and the next `## [` heading, heading excluded.
+        # index() rather than a regex, so the dots in VERSION match literally.
+        CHANGELOG_ENTRY=$(awk -v head="## [$VERSION]" '
+            index($0, head) == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found && !started && /^[[:space:]]*$/ { next }
+            found { started = 1; print }
+        ' "$REPO_ROOT/CHANGELOG.md")
+        [[ -n "${CHANGELOG_ENTRY//[[:space:]]/}" ]] \
+            || fail "CHANGELOG.md entry for [$VERSION] is empty"
         # Build notes via printf into a temp file — avoids the bash heredoc-in-$()
         # apostrophe quirk that triggers "unexpected EOF while looking for `''".
         NOTES_FILE=$(mktemp)
         {
-            printf '## Changes\n\n%s\n\n' "$NOTES"
+            printf '%s\n\n' "$CHANGELOG_ENTRY"
+            printf '## Commits\n\n%s\n\n' "$NOTES"
             printf '**Full Changelog**: https://github.com/ralforion/orionbelt-semantic-layer-mcp/compare/%s...%s\n' \
                 "$PREV_TAG" "$TAG"
         } >"$NOTES_FILE"
