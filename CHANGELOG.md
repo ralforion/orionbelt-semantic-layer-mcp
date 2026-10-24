@@ -6,8 +6,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.35.1] - 2026-10-24
+
+Security patch release. Tracks OrionBelt Semantic Layer API **v2.35.x**; no tool
+changes.
+
+### Security
+
+- `certifi` 2026.2.25 → 2026.10.19 — removes the emSign root CAs whose
+  intermediate CA keys were compromised (critical).
+- `fastmcp` / `fastmcp-slim` 4.1.0 → 4.1.2 — fixes component authorization being
+  skipped on direct calls after a transform, and M2M OAuth providers built
+  without issuer binding, which let the client secret be redirected to an
+  attacker-advertised authorization server.
+- `opentelemetry-api` 1.39.1 → 1.45.1 — bounds `tracestate` parsing.
+
 ### Changed
 
+- Dependencies: `openapi-pydantic` 0.5.1 → 0.6.0 (via fastmcp); `importlib-metadata`
+  and `zipp` are no longer installed. `THIRD_PARTY_NOTICES.md` regenerated.
 - `scripts/release.sh` puts the version's CHANGELOG entry at the top of the
   GitHub release notes, above the commit list, and refuses an empty entry.
   Commit subjects alone ("bump to X.Y.Z") said nothing about what changed.
