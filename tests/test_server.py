@@ -7,6 +7,7 @@ import importlib
 import inspect
 import json
 import logging
+import re
 import ssl
 import sys
 import types
@@ -523,6 +524,64 @@ def test_describe_model_single_model_mode(mock_api: respx.MockRouter):
     assert "Country" in result
     assert "MEASURES:" in result
     assert "Total Revenue" in result
+
+
+def test_describe_model_renders_api_2_35_schema_fields(mock_api: respx.MockRouter):
+    """A reaggregate metric, a column's held grain and an enforced static filter."""
+    server._single_model_mode = True
+    schema = {
+        **_SCHEMA_RESPONSE,
+        "data_objects": [
+            {
+                "name": "Orders",
+                "code": "orders",
+                "columns": [
+                    {"name": "Order ID", "code": "id", "abstract_type": "int"},
+                    {
+                        "name": "Order Month",
+                        "code": "month",
+                        "abstract_type": "date",
+                        "grain": "month",
+                    },
+                ],
+            }
+        ],
+        # SchemaResponse's MetricDetail carries no `per` / `aggregation`, and
+        # `expression` is None for a reaggregate metric.
+        "metrics": [
+            {
+                "name": "Avg Revenue per Customer",
+                "type": "reaggregate",
+                "expression": None,
+                "measure": "Total Revenue",
+            }
+        ],
+        "filters": [
+            {
+                "data_object": "Orders",
+                "column": "Tenant",
+                "operator": "equals",
+                "value": "acme",
+                "enforce": "always",
+            },
+            {
+                "data_object": "Orders",
+                "column": "Deleted",
+                "operator": "equals",
+                "value": False,
+                "enforce": "relevant",
+            },
+        ],
+    }
+    mock_api.get("/v1/schema").mock(return_value=httpx.Response(200, json=schema))
+
+    result = server._impl_describe_model(None)
+    assert "columns: Order ID, Order Month (grain: month)" in result
+    assert "Avg Revenue per Customer  type: reaggregate, measure: Total Revenue" in result
+    assert "expr: None" not in result
+    assert "Orders.Tenant equals value: acme  [enforce: always]" in result
+    deleted = next(line for line in result.splitlines() if "Orders.Deleted" in line)
+    assert "enforce" not in deleted
 
 
 # ---------------------------------------------------------------------------
@@ -2203,11 +2262,44 @@ def test_write_query_prompt(mock_api):
     assert "`mysql`" in result
 
 
+def test_write_query_prompt_examples_are_valid_json(mock_api):
+    """Every QueryObject example parses, so it can be pasted into execute_query.
+
+    The text is filled with str.replace, not str.format, so a `{{` escape would
+    reach the client — and an over-eager unescape drops a real closing brace.
+    Parsing each example catches both; counting braces catches neither.
+    """
+    _mock_dialects(mock_api)
+    result = server.write_query()
+    decoder = json.JSONDecoder()
+    starts = [m.start() for m in re.finditer(r'\{\s*"select"', result)]
+    assert len(starts) >= 5
+    for start in starts:
+        # `[...]` is the minimal example's placeholder, not JSON.
+        text = result[start:].replace("[...]", "[]")
+        try:
+            obj, _ = decoder.raw_decode(text)
+        except json.JSONDecodeError as exc:
+            pytest.fail(f"invalid example JSON: {exc}\n{result[start : start + 200]}")
+        assert "select" in obj
+    assert "{[US Revenue]} / {[Revenue]}" in result
+    assert '"fill": true' in result
+    assert "Reaggregate" in result
+
+
 def test_debug_validation_prompt():
     """debug_validation prompt returns error codes."""
     result = server._DEBUG_VALIDATION_TEXT
     assert "YAML_PARSE_ERROR" in result
     assert "UNKNOWN_COLUMN" in result
+    for code in (
+        "REAGGREGATE_AVG_OF_AVG",
+        "FILL_COMBINATION_NOT_SUPPORTED",
+        "STATIC_FILTER_UNREACHABLE",
+        "GRAIN_FINER_THAN_DECLARED",
+        "FAN_TRAP_RISK",
+    ):
+        assert code in result
 
 
 def test_obml_reference_resource(mock_api):

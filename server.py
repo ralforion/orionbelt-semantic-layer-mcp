@@ -1242,8 +1242,13 @@ def _format_warnings(items: list | None, indent: str = "  warnings: ") -> list[s
 
 
 def _format_metric_summary(met: dict) -> str:
-    """Format a one-line summary for a metric (derived, cumulative, PoP, or window)."""
+    """Format a one-line summary for a metric (derived, cumulative, PoP, window, reaggregate)."""
     met_type = met.get("type", "derived")
+    # Reaggregate (API 2.35): neither schema response carries `per` or the
+    # second-stage `aggregation`, so the measure is all there is to show;
+    # explain_artefact lists both stages.
+    if met_type == "reaggregate":
+        return f"type: reaggregate, measure: {met.get('measure') or '?'}"
     # partitionBy is shared between cumulative and window metrics (v2.6+).
     partition_by = met.get("partition_by") or met.get("partitionBy") or []
     if met_type == "cumulative":
@@ -1389,7 +1394,13 @@ def _impl_describe_model(model_id: str | None = None) -> str:
             lines.append(f"    description: {obj['description']}")
         # SchemaResponse: columns is list[ColumnDetail dict]; describe: list[str]
         cols = obj.get("columns", [])
-        col_names = [c["name"] for c in cols] if cols and isinstance(cols[0], dict) else cols
+        # A column's held grain (API 2.35, ColumnDetail.grain) refuses finer
+        # `dimension:grain` reads, so it is worth showing beside the name.
+        col_names = (
+            [f"{c['name']} (grain: {c['grain']})" if c.get("grain") else c["name"] for c in cols]
+            if cols and isinstance(cols[0], dict)
+            else cols
+        )
         lines.append(f"    columns: {', '.join(col_names)}")
         if obj.get("join_targets"):
             lines.append(f"    joins to: {', '.join(obj['join_targets'])}")
@@ -1559,9 +1570,12 @@ def _impl_describe_model(model_id: str | None = None) -> str:
                 val_str = f"value: {val}"
             else:
                 val_str = ""
+            # enforce: always (API 2.35) refuses a query that cannot reach the
+            # filter instead of skipping it; the default 'relevant' is not shown.
+            enforce = f"  [enforce: {f['enforce']}]" if f.get("enforce") == "always" else ""
             lines.append(
                 f"  {f.get('data_object', '?')}.{f.get('column', '?')} "
-                f"{f.get('operator', '?')} {val_str}"
+                f"{f.get('operator', '?')} {val_str}{enforce}"
             )
         lines.append("")
 
@@ -3281,7 +3295,8 @@ def _register_model_tools() -> None:
             query_json: Complete QueryObject as a JSON string: a ``select`` of
                 dimensions/measures (or ``fields``), plus optional ``where``,
                 ``having``, ``orderBy``, ``limit``, ``offset``, ``dimensionsExclude``,
-                ``usePathNames``, and coalesce groups. Dimension/measure names must
+                ``usePathNames``, ``asOf``, ``fill`` (every period of the time
+                dimension, empty ones too), and coalesce groups. Dimension/measure names must
                 match those defined in the loaded model.
             model_id: a loaded model's id (multi-model); omit in single-model.
             dialect: Target SQL dialect. When omitted the API resolves via
@@ -3708,13 +3723,40 @@ of one period.  Set `"asOf": "2025-06-30"` on the query to pick that period
 Without `asOf`, the latest period with data under the query's filters is
 used.  `asOf` has no effect when the time dimension is selected.
 
+## fill (every period, empty ones too)
+
+A query returns only the periods that have rows, so a month without orders
+is missing from a monthly series.  Set `"fill": true` (OBSL 2.35+) to join
+the rows onto a date spine: from the `where` bounds on the time dimension,
+or else the first and last period with data, crossed with every member of
+the other selected dimensions.  An empty period counts 0, reads a measure's
+`defaultValue`, and is NULL otherwise; `orderBy` and `limit` apply to the
+filled rows.  It needs exactly one time-grained dimension at day grain or
+coarser (`FILL_REQUIRES_ONE_TIME_DIMENSION`, `FILL_GRAIN_NOT_SUPPORTED`), and
+is refused beside `grouping`, `having`, totals, window and period-over-period
+metrics (`FILL_COMBINATION_NOT_SUPPORTED`).
+
+## Filtering a time-grained dimension
+
+A `where` on a dimension that declares a `timeGrain` compares the **period**
+it shows, not the date inside it (OBSL 2.35+): on `Order Month`,
+`= 2025-01-01` is January, `= 2025-01-20` matches nothing, and
+`>= 2025-01-15` starts in February.  To compare dates, filter the qualified
+column (`Orders.Order Date`) or a dimension without a grain.
+
+## Selecting a field once
+
+A dimension, measure or metric may be selected only once per query
+(`DUPLICATE_DIMENSION` / `DUPLICATE_MEASURE`).  The same dimension at two
+grains is two columns (`Order Date:year` beside `Order Date:month`).
+
 ## Supported Dialects
 
 {dialects}
 
 ## Metric Types
 
-Metrics are queried by name like any measure.  Three types exist:
+Metrics are queried by name like any measure.  The types are:
 
 - **Derived** (default): expression-based, e.g. `{[Profit]} / {[Revenue]}`.
 - **Cumulative**: running total, rolling window, or grain-to-date over a
@@ -3724,13 +3766,22 @@ Metrics are queried by name like any measure.  Three types exist:
   periods shown; the look-back still reads the history before them.
 - **Period-over-Period (PoP)**: compares a measure across time periods
   (e.g. YoY growth, MoM difference).  Queried as a regular metric name.
+- **Window**: rank, lag/lead and similar functions over a measure.
+- **Reaggregate** (OBSL 2.35+): a measure aggregated at a finer grain, then
+  aggregated again — "average revenue per customer, by country".  The model
+  names the `measure`, the `per` dimensions added for the first stage, and
+  the second-stage `aggregation`; the query just selects the metric by
+  name.  `explain_artefact` shows both stages.  Refused under
+  `grouping: rollup` / `cube` (`REAGGREGATE_WITH_ROLLUP`); when every `per`
+  dimension is already selected it does nothing and says so
+  (`REAGGREGATE_NO_OP` warning).
 
 ## Measure Filters & Ratios
 
 Measures can have **filters** that restrict which rows contribute to
 aggregation (compiled as `CASE WHEN`).  A filtered measure like
 "US Revenue" can then be used in a **ratio metric**:
-`{{[US Revenue]}} / {{[Revenue]}}`  — no query-level WHERE needed.
+`{[US Revenue]} / {[Revenue]}`  — no query-level WHERE needed.
 
 ## Grain Override & Filter Context
 
@@ -3742,7 +3793,7 @@ OBML model definition (not at query time):
   percent-of-total, percent-of-parent, and cross-grain calculations.
   Modes: `FIXED` (start empty) or `RELATIVE` (inherit query dims).
   Operators: `exclude`, `include`, `keepOnly`.
-  `total: true` is shorthand for `grain: {{mode: FIXED}}`.
+  `total: true` is shorthand for `grain: {mode: FIXED}`.
 
 - **Filter context** (`filterContext:`) — controls which query WHERE
   filters apply to a measure.  Enables unfiltered baselines and
@@ -3830,12 +3881,12 @@ Role-playing dimensions appear as separate columns in CFL output — one row per
 role per person.  To collapse them into a single output column, add a coalesce
 group to the `select.dimensions` array in ``query_json``::
 
-    {{"select": {{
+    {"select": {
         "dimensions": [
-            {{"coalesce": ["SalesEmployee", "PurchaseEmployee"], "as": "Employee"}}
+            {"coalesce": ["SalesEmployee", "PurchaseEmployee"], "as": "Employee"}
         ],
         "measures": ["Total Sales", "Total Purchases"]
-    }}}}
+    }}
 
 Each CFL leg projects only its own role-playing dimension (others NULL); the
 outer wrapper emits ``COALESCE(d1, d2, ...) AS alias`` and groups by it.
@@ -3852,12 +3903,12 @@ Rules:
 Raw mode returns un-aggregated rows — no GROUP BY, no measures, no metrics.
 Put ``fields`` (instead of ``dimensions``/``measures``) inside ``select``::
 
-    query_json='{{
-      "select": {{"fields": ["Orders.OrderDate", "Customers.Country"],
-                  "distinct": true}},
-      "where": [{{"field": "Customers.Country", "op": "equals", "value": "US"}}],
+    query_json='{
+      "select": {"fields": ["Orders.OrderDate", "Customers.Country"],
+                  "distinct": true},
+      "where": [{"field": "Customers.Country", "op": "equals", "value": "US"}],
       "limit": 100
-    }}'
+    }'
 
 Fields use ``DataObject.Column`` syntax referencing physical columns.
 
@@ -3985,7 +4036,8 @@ _DEBUG_VALIDATION_TEXT = """\
   Fix: Derived metrics need `expression`.  Cumulative metrics need `measure`
   + `timeDimension` (and `window`/`grainToDate` are mutually exclusive).
   Period-over-period metrics need `expression` + `periodOverPeriod` block
-  with `timeDimension`, `grain`, and `offsetGrain`.
+  with `timeDimension`, `grain`, and `offsetGrain`.  Reaggregate metrics need
+  `measure`, `per` and `aggregation`.
 - `MEASURE_FILTER_PARSE_ERROR`: Cannot parse a measure filter.
   Fix: Each filter needs `column` ({dataObject, column}), `operator`, and
   `values`.  Filter groups need `logic` (and/or) and `filters` array.
@@ -4038,6 +4090,61 @@ _DEBUG_VALIDATION_TEXT = """\
   month grain as `timestamp` is a date at midnight. A non-temporal `resultType`
   is not cast at all and holds anything.
   Fix: Widen `resultType` to `timestamp` (or drop it), or coarsen `timeGrain`.
+- `GRAIN_FINER_THAN_DECLARED`: A grain is asked of a column that holds a
+  coarser one (OBSL 2.35+) — a day or week of a column of month starts. A
+  column's grain is read from a computed column that is a whole
+  `date_trunc('<grain>', ...)`, or declared with the column field `grain`
+  (`describe_model` shows it beside the column). Checked for a query's
+  `dimension:grain` and, at load, for `timeGrain`, a reaggregate `per` grain, a
+  PoP `grain` and a cumulative `grainToDate`. Coarser grains (quarter, year of
+  months) are answered.
+  Fix: Ask for the column's grain or a coarser one, or read a finer column.
+- `INVALID_TIME_GRAIN`: A query names a grain OBML does not have (e.g.
+  `Order Date:day_of_week`); the message lists the valid ones (OBSL 2.35+,
+  previously an untyped 500).
+- `AGGREGATE_IN_COLUMN_EXPRESSION`: A computed column's expression contains an
+  aggregate or window function (`SUM(...)`, `BOOL_OR`, `ARG_MAX`, ...), which
+  `GROUP BY ALL` would take for a measure (OBSL 2.35+; such a model no longer
+  loads).
+  Fix: Move the aggregate into a measure. For ClickHouse `ANY(...)` the hint
+  suggests `SOME(...)`.
+- `INEXACT_DECIMAL_VALUE`: A non-integer value for a `decimal` field arrived
+  without its written digits (a JSON body, a merged fragment), so it cannot be
+  compared exactly.
+  Fix: Give the digits as text: `valueString: "1.0000000000000001"`.
+
+## Reaggregate Metric Errors (OBSL 2.35+)
+
+A `type: reaggregate` metric computes `measure` at the query's dimensions plus
+`per` (stage 1), then aggregates those values with `aggregation` (stage 2).
+
+- `REAGGREGATE_MEASURE_ONLY`: `measure` names something other than a measure,
+  a reaggregate metric or a cumulative metric.
+- `REAGGREGATE_CYCLE`: A chain of reaggregate metrics refers back to itself.
+- `REAGGREGATE_AVG_OF_AVG`: `aggregation: avg` over something that already
+  averages (directly, or through a min/max/median/percentile/first/last
+  reaggregate of an average) weighs every group alike; the message shows the
+  chain. `avg` over a `sum` or `count` stays allowed.
+- `REAGGREGATE_CUMULATIVE_TIME_DIMENSION`: Over a cumulative metric, `per` has
+  to name its `timeDimension`.
+- `REAGGREGATE_ORDER_KEY`: `first` / `last` need exactly one time entry in
+  `per` (a grained entry, a dimension with `timeGrain`, or a date dimension).
+- `REAGGREGATE_HAVING_MEASURE_ONLY`: A reaggregate `having` condition names a
+  metric; it filters stage-1 groups and takes measures only (no
+  `exists`/`nonexists`).
+- `REAGGREGATE_WITH_ROLLUP`: Selected under `grouping: rollup` / `cube`.
+- `REAGGREGATE_COMBINATION_NOT_SUPPORTED`: A derived metric combines a
+  reaggregate metric with a total, grain, `filterContext`, cumulative or PoP
+  component in one formula.
+  Fix: Select them side by side instead.
+- `REAGGREGATE_POPULATION_PER` / `REAGGREGATE_POPULATION_GROUPING` /
+  `REAGGREGATE_POPULATION_HAVING`: `population: dimension` with a grained or
+  `via` `per` entry, a query dimension reading both members and facts, or a
+  `having`.
+- `REAGGREGATE_CARRY_FORWARD_POPULATION` / `REAGGREGATE_CARRY_FORWARD_AXIS`:
+  `carryForward: true` without `population: dimension`, or over two dates.
+- `REAGGREGATE_NO_OP` (warning): Every `per` dimension is already in the
+  query, so each group has one value and the metric changes nothing.
 
 ## Datasource Errors (online validation only)
 
@@ -4163,8 +4270,10 @@ references unknown column.
   join to).
 - `CONFORMED_GRAIN_ASSUMED` (warning, not an error): A cross-fact measure expression
   had no declared join path and no `anchor:`, so the facts were conformed to the one
-  data object they all join to. The warning names the object chosen. `SUM` is
-  invariant across the readings, but `AVG` / `MIN` / `MAX` are not.
+  data object they all join to. The warning names the object chosen. Only a
+  `SUM` of a product reads the same under every anchor; a sum of terms that do
+  not all carry an anchor column, and `AVG` / `MIN` / `MAX`, do not (see the
+  `FAN_TRAP_RISK` warning).
   Fix: If the chosen grain is not what you meant, set `anchor:` explicitly.
 
 ## Resolution Errors (at query time)
@@ -4209,6 +4318,34 @@ references unknown column.
   the same date column is selected.
   Fix: Select the metric's `timeDimension`, or drop the rollup/cube or the
   other dimension on that date column.
+- `CUMULATIVE_MEASURE_ONLY` / `WINDOW_MEASURE_ONLY`: A cumulative or window
+  metric's `measure` names a derived, cumulative, PoP or window metric. It
+  takes a measure or a reaggregate metric (OBSL 2.35+; previously reported as
+  `UNKNOWN_MEASURE`).
+- `DUPLICATE_DIMENSION` / `DUPLICATE_MEASURE`: The same dimension (at the same
+  grain), measure or metric is selected twice (OBSL 2.35+).
+  Fix: Select it once. Two grains of one dimension are two columns.
+- `UNREACHABLE_FILTER_OBJECT`: No selected fact can reach the data object a
+  `where` filter is on (OBSL 2.35+; before, such a filter was silently
+  skipped). A filter only *some* facts reach is applied where it can be and
+  reported as the `FILTER_NOT_APPLIED` warning instead.
+  Fix: Filter on an object the query's facts join to, or add a measure from a
+  fact that reaches it.
+- `STATIC_FILTER_UNREACHABLE`: A static model filter declared
+  `enforce: always` cannot be applied to a data object the query reads, so the
+  query is refused rather than run unfiltered (a tenant filter fails closed).
+  `describe_model` marks such filters `[enforce: always]`.
+- `FILTER_ADMITS_ROWS_WITHOUT`: A filter on the many side of a join can be
+  satisfied by parents without children (e.g. `Order ID notset`), in a shape
+  that cannot add those parents (ROLLUP / CUBE with several parents).
+  Fix: Express it with `exists` / `nonexists`.
+- `SUBQUERY_FILTER_OBJECT_NOT_JOINABLE`: A nested `exists` / `nonexists`
+  inside a subquery filters a field on the outer subject.
+  Fix: Put that condition in the outer `where`.
+- `FILL_REQUIRES_ONE_TIME_DIMENSION` / `FILL_GRAIN_NOT_SUPPORTED` /
+  `FILL_COMBINATION_NOT_SUPPORTED`: `fill: true` needs exactly one
+  time-grained dimension (outside a coalesce group) at day grain or coarser,
+  and is refused beside `grouping`, `having`, totals, window and PoP metrics.
 
 ## Dialect Capability Errors (at query time)
 
@@ -4274,6 +4411,22 @@ result, and `load_model` reports the count.
   letting the label and the values disagree in silence.
   Fix: Usually nothing — read the values as the engine's own type. If the
   declared type matters downstream, cast in the measure expression.
+- `FILTER_NOT_APPLIED`: A `where` filter could not be applied to some of the
+  query's measures — their fact does not reach it — so they are computed
+  without it (OBSL 2.35+; previously the whole query was refused). The warning
+  names them.
+  Fix: Usually nothing: they are what that fact holds. Drop those measures if
+  every number must honour the filter.
+- `STATIC_FILTER_NOT_APPLIED`: A static model filter (default
+  `enforce: relevant`) was skipped because the query cannot reach its data
+  object. Silent before OBSL 2.35.
+  Fix: If it is a tenant or security filter, declare `enforce: always` so such
+  a query is refused (`STATIC_FILTER_UNREACHABLE`).
+- `FAN_TRAP_RISK`: An anchored measure sums a term with no anchor column, which
+  is added once per anchor row (e.g. `SUM({[Returns].[Qty]} - {[Sales].[Qty]})`
+  anchored on `Returns` subtracts a date's sales once per return).
+  Fix: Split the measure into one per fact and combine them in a derived
+  metric.
 
 ## Business Rule Errors (`rules:` block, OBSL 2.30+)
 
