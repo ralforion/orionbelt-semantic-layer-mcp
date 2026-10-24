@@ -6,6 +6,48 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.35.0] - 2026-10-24
+
+Tracks OrionBelt Semantic Layer API **v2.35.x**. No tools added or removed. The
+REST surface changed only in two schema fields, and `query_json` is passed
+through, so `fill`, reaggregate metrics and the new aggregations work as soon as
+the API supports them.
+
+### Added
+
+- `describe_model` shows a reaggregate metric as `type: reaggregate, measure: …`
+  (it read `expr: None`), marks a static filter declared `enforce: always`, and
+  shows a column's held `grain` beside its name — the two `SchemaResponse`
+  fields API 2.35 added.
+- `write_query` prompt and the `execute_query` docstring document `fill: true`
+  (every period of the time dimension), reaggregate and window metrics, the
+  period semantics of a `where` on a time-grained dimension, and the refusal of
+  a field selected twice.
+- `debug_validation` documents the 2.35 codes: the `REAGGREGATE_*` family,
+  `FILL_*`, `GRAIN_FINER_THAN_DECLARED`, `INVALID_TIME_GRAIN`,
+  `AGGREGATE_IN_COLUMN_EXPRESSION`, `INEXACT_DECIMAL_VALUE`,
+  `CUMULATIVE_MEASURE_ONLY` / `WINDOW_MEASURE_ONLY`, `DUPLICATE_DIMENSION` /
+  `DUPLICATE_MEASURE`, `UNREACHABLE_FILTER_OBJECT`, `STATIC_FILTER_UNREACHABLE`,
+  `FILTER_ADMITS_ROWS_WITHOUT`, `SUBQUERY_FILTER_OBJECT_NOT_JOINABLE`, and the
+  `FILTER_NOT_APPLIED`, `STATIC_FILTER_NOT_APPLIED` and `FAN_TRAP_RISK`
+  warnings.
+
+### Changed
+
+- fastmcp 4.1.0. HTTP sessions now expire after the MCP SDK's 30-minute idle
+  default instead of never.
+
+### Fixed
+
+- `write_query` sent doubled braces to the client — `{{[US Revenue]}}`,
+  `{{"select": …}}` — because the text is filled with `str.replace`, not
+  `str.format`. The examples are valid OBML and JSON again.
+- `debug_validation` no longer claims a cross-fact `SUM` reads the same under
+  every anchor; that holds for a product only (API #605).
+- The third-party notice check follows the version uv pins on each lock edge,
+  so a package locked at two versions by Python marker (beartype, since
+  fastmcp 4.1 supports 3.15) is credited at the one the image installs.
+
 ## [2.34.0] - 2026-10-08
 
 Tracks OrionBelt Semantic Layer API **v2.34.x**. No tools added or removed; the
