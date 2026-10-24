@@ -3651,7 +3651,7 @@ execute_query(
 )
 ```
 
-A minimal query is just `{"select": {"dimensions": [...], "measures": [...]}`.
+A minimal query is just `{"select": {"dimensions": [...], "measures": [...]}}`.
 The fields below (filters, groups, dimensionsExclude, coalesce, raw `fields`,
 …) all go **inside** `query_json`.
 
@@ -3872,7 +3872,7 @@ columns (not objects joined beyond it).
 
 When querying, simply use the role-playing dimension name in `query_json`:
 ```
-query_json='{"select": {"dimensions": ["SalesEmployee"], "measures": ["Revenue"]}'
+query_json='{"select": {"dimensions": ["SalesEmployee"], "measures": ["Revenue"]}}'
 ```
 
 ## Coalesce Dimensions

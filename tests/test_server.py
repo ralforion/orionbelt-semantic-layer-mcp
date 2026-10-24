@@ -7,6 +7,7 @@ import importlib
 import inspect
 import json
 import logging
+import re
 import ssl
 import sys
 import types
@@ -2261,12 +2262,26 @@ def test_write_query_prompt(mock_api):
     assert "`mysql`" in result
 
 
-def test_write_query_prompt_renders_single_braces(mock_api):
-    """The text is filled with str.replace, not str.format: `{{` would reach the client."""
+def test_write_query_prompt_examples_are_valid_json(mock_api):
+    """Every QueryObject example parses, so it can be pasted into execute_query.
+
+    The text is filled with str.replace, not str.format, so a `{{` escape would
+    reach the client — and an over-eager unescape drops a real closing brace.
+    Parsing each example catches both; counting braces catches neither.
+    """
     _mock_dialects(mock_api)
     result = server.write_query()
-    assert "{{" not in result
-    assert "}}}" not in result
+    decoder = json.JSONDecoder()
+    starts = [m.start() for m in re.finditer(r'\{\s*"select"', result)]
+    assert len(starts) >= 5
+    for start in starts:
+        # `[...]` is the minimal example's placeholder, not JSON.
+        text = result[start:].replace("[...]", "[]")
+        try:
+            obj, _ = decoder.raw_decode(text)
+        except json.JSONDecodeError as exc:
+            pytest.fail(f"invalid example JSON: {exc}\n{result[start : start + 200]}")
+        assert "select" in obj
     assert "{[US Revenue]} / {[Revenue]}" in result
     assert '"fill": true' in result
     assert "Reaggregate" in result
