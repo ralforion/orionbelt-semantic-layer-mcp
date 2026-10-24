@@ -117,3 +117,28 @@ def test_a_known_licence_text_reaches_the_notice_verbatim():
     text = NOTICE.read_text(encoding="utf-8")
     assert "### httpx " in text
     assert "Redistributions of source code must retain the above copyright" in text
+
+
+def test_a_forked_package_is_credited_at_the_version_its_edge_pins():
+    """A marker-split lock names one package twice; the edge's pin picks the entry.
+
+    The entry reachable only on an unpublished Python comes last on purpose: going
+    by name alone would credit it, which is how beartype 0.23.1 (3.15+) once got
+    checked against the 0.22.9 that the image actually installs.
+    """
+    lock = {
+        "package": [
+            {
+                "name": notices.ROOT_PACKAGE,
+                "source": {"editable": "."},
+                "dependencies": [
+                    {"name": "dep", "version": "1.0", "marker": "python_full_version < '3.15'"},
+                    {"name": "dep", "version": "2.0", "marker": "python_full_version >= '3.15'"},
+                ],
+            },
+            {"name": "dep", "version": "1.0", "source": {"registry": "x"}},
+            {"name": "dep", "version": "2.0", "source": {"registry": "x"}},
+        ]
+    }
+    assert notices.distributed_closure(lock, []) == {"dep": "1.0"}
+    assert notices.marker_excluded(lock, []) == []

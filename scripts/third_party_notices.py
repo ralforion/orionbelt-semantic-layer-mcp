@@ -470,24 +470,37 @@ def marker_applies(marker: str | None) -> bool:
     return any(parsed.evaluate(environment=env) for env in PUBLISH_ENVIRONMENTS)
 
 
-def distributed_closure(lock: dict[str, Any], extras: Sequence[str]) -> dict[str, str]:
-    """Walk uv.lock from the root package to every dependency we redistribute.
+def _closure_versions(lock: dict[str, Any], extras: Sequence[str]) -> dict[str, set[str]]:
+    """Walk uv.lock from the root package, collecting every version reached per name.
 
-    Returns {normalised name: version}. Extras are followed as their own edges so
-    `fonttools[woff]` pulls brotli while a plain `fonttools` would not.
+    A forked resolution locks one name at several versions, split by marker —
+    beartype 0.22.9 below Python 3.15 and 0.23.1 from it, say. uv then pins the
+    version on each dependency edge, and that pin is what selects the entry: going
+    by name alone credits whichever entry happens to come last in the file.
     """
-    packages = {normalize(p["name"]): p for p in lock["package"]}
-    found: dict[str, str] = {}
-    seen: set[tuple[str, tuple[str, ...]]] = set()
+    packages: dict[str, list[dict[str, Any]]] = {}
+    for entry in lock["package"]:
+        packages.setdefault(normalize(entry["name"]), []).append(entry)
+    found: dict[str, set[str]] = {}
+    seen: set[tuple[str, str | None, tuple[str, ...]]] = set()
 
-    def walk(name: str, extras: tuple[str, ...]) -> None:
-        key = (normalize(name), tuple(sorted(extras)))
+    def walk(name: str, version: str | None, extras: tuple[str, ...]) -> None:
+        key = (normalize(name), version, tuple(sorted(extras)))
         if key in seen:
             return
         seen.add(key)
-        package = packages.get(normalize(name))
-        if package is None:
-            raise SystemExit(f"{name} is required but missing from uv.lock")
+        candidates = packages.get(normalize(name), [])
+        if version is not None:
+            candidates = [c for c in candidates if c.get("version") == version]
+        if not candidates:
+            pinned = f" {version}" if version else ""
+            raise SystemExit(f"{name}{pinned} is required but missing from uv.lock")
+        if len(candidates) > 1:
+            raise SystemExit(
+                f"error: uv.lock has {len(candidates)} entries for {name} and the edge "
+                f"to it pins no version, so there is no telling which one is reached."
+            )
+        package = candidates[0]
         # A project with `dynamic = ["version"]` has no `version` in uv.lock. That
         # is only ever true of the root — a locked third-party dependency always
         # carries one — and the root's is deleted below anyway, so tolerate it
@@ -502,17 +515,34 @@ def distributed_closure(lock: dict[str, Any], extras: Sequence[str]) -> dict[str
                     f"persists this lockfile cannot be described accurately."
                 )
             version = ""
-        found[normalize(name)] = version
+        found.setdefault(normalize(name), set()).add(version)
         edges = list(package.get("dependencies", []))
         for extra in extras:
             edges += package.get("optional-dependencies", {}).get(extra, [])
         for edge in edges:
             if marker_applies(edge.get("marker")):
-                walk(edge["name"], tuple(edge.get("extra", ())))
+                walk(edge["name"], edge.get("version"), tuple(edge.get("extra", ())))
 
-    walk(ROOT_PACKAGE, tuple(extras))
+    walk(ROOT_PACKAGE, None, tuple(extras))
     del found[normalize(ROOT_PACKAGE)]  # our own license is LICENSE, not a notice
     return found
+
+
+def distributed_closure(lock: dict[str, Any], extras: Sequence[str]) -> dict[str, str]:
+    """Walk uv.lock from the root package to every dependency we redistribute.
+
+    Returns {normalised name: version}. Extras are followed as their own edges so
+    `fonttools[woff]` pulls brotli while a plain `fonttools` would not.
+    """
+    found = _closure_versions(lock, extras)
+    split = {name: sorted(versions) for name, versions in found.items() if len(versions) > 1}
+    if split:
+        raise SystemExit(
+            "error: these packages reach the published environments at more than one "
+            "version, and the notice credits one version per package: "
+            + ", ".join(f"{name} ({' / '.join(versions)})" for name, versions in split.items())
+        )
+    return {name: versions.pop() for name, versions in found.items()}
 
 
 # GPL but not LGPL: the lookbehind is what keeps "LGPL-2.1" out of the strong
@@ -727,7 +757,9 @@ def marker_excluded(lock: dict[str, Any], extras: Sequence[str]) -> list[str]:
     original = marker_applies
     try:
         marker_applies = lambda marker: True  # noqa: E731
-        everything = set(distributed_closure(lock, extras))
+        # Ignoring markers reaches both sides of a forked package, which is exactly
+        # the case distributed_closure refuses — only the names matter here.
+        everything = set(_closure_versions(lock, extras))
     finally:
         marker_applies = original
     return sorted(everything - honoured)
