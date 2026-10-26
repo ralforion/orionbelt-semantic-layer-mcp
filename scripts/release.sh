@@ -271,12 +271,19 @@ if confirm "Wait for and smoke-test the PyPI release?"; then
     # The import must come from site-packages, never from the repo. Importing
     # needs API_BASE_URL (the repo's .env supplied it before); a dummy will do,
     # since nothing connects at import time.
-    echo "Waiting for CI to publish, then smoke-testing pip install from PyPI..."
+    # The temp directory has no .python-version, so uv would pick its default
+    # interpreter, which may predate requires-python and fail every attempt as
+    # "not yet available". Request the repo's pin by version, not the .venv's
+    # interpreter path, which would bring the repo environment back.
+    SMOKE_PY=$(tr -d '[:space:]' < "$REPO_ROOT/.python-version" 2>/dev/null || true)
+    [[ -n "$SMOKE_PY" ]] || SMOKE_PY=$(grep '^requires-python' "$REPO_ROOT/pyproject.toml" \
+        | sed 's/.*"\(.*\)".*/\1/')
+    echo "Waiting for CI to publish, then smoke-testing pip install from PyPI (Python ${SMOKE_PY})..."
     SMOKE_DIR=$(mktemp -d)
     SMOKE_OK=0
     for i in $(seq 1 30); do
         if SMOKE_FILE=$(cd "$SMOKE_DIR" && API_BASE_URL=http://127.0.0.1:1 \
-                uv run --isolated --no-project \
+                uv run --isolated --no-project --python "$SMOKE_PY" \
                 --refresh-package orionbelt-semantic-layer-mcp \
                 --with "orionbelt-semantic-layer-mcp==${VERSION}" -- \
                 python -c "import server; print(server.__file__)" 2>/dev/null) \
