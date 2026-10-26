@@ -6,6 +6,43 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.36.0] - 2026-10-26
+
+Tracks OrionBelt Semantic Layer API **v2.36.x**.
+
+### Added
+
+- **`search_values` — dimension-value search** (wraps `POST /v1/values` and
+  `POST /v1/sessions/{id}/models/{mid}/values`, API 2.36). Grounds a filter
+  value before it is written: an agent filtering `Country = 'Germany'` cannot
+  know whether the column holds `Germany`, `DE` or `GERMANY`, and a wrong guess
+  returns no rows rather than an error. With `search`, matches ranked exact,
+  prefix, contains, then fuzzy; without, the values listed, or a date/number
+  dimension's minimum and maximum. Optional `where_json` filters, `limit` and
+  `dialect`. Run-time tool, gated on `query_execute` like `execute_query`, since
+  each step is an executed query. Tool counts: 26 single-model / 30 multi-model.
+- `describe_model` flags a dimension declaring `valueSearch: false`.
+
+### Fixed
+
+- A 403 carrying a non-`AUTH_*` code (`VALUE_SEARCH_DISABLED` on a
+  `valueSearch: false` dimension) is reported as the API refusing the request,
+  with its code, instead of "API authentication failed" with advice to set
+  `API_KEY`. Auth 403s, and 403s without a code, are reported as before.
+
+### Changed
+
+- The `write_query` and `debug_validation` prompts cover the API
+  2.36 query and metric features: calendar-aligned `relative` filters
+  (`calendar`, `toDate`, the `quarter` unit), period literals in date filters
+  (`'2025-Q1'`), `orderBy` on an unselected measure or metric
+  (`ORDER_BY_COMBINATION_NOT_SUPPORTED`), dimension-only queries returning the
+  combinations of every data object joining the dimensions, window metrics with
+  `frame` (`WINDOW_FRAME_NOT_SUPPORTED`), cumulative `windowSpan`
+  (`WINDOW_SPAN_NOT_SUPPORTED`), `extract('day_of_week', x)`, and the
+  `VALUE_SEARCH_*` errors. The OBML and query JSON schemas and the function
+  catalog are served by the API, so they need no change here.
+
 ## [2.35.1] - 2026-10-24
 
 Security patch release. Tracks OrionBelt Semantic Layer API **v2.35.x**; no tool

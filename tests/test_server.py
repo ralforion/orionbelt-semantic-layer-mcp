@@ -1475,6 +1475,117 @@ def test_find_artefacts_no_results(mock_api: respx.MockRouter):
     assert "No artefacts found" in result
 
 
+def test_search_values_multi_model(mock_api: respx.MockRouter):
+    """search_values posts to the session route and renders ranked matches."""
+    _mock_create_session(mock_api)
+    route = mock_api.post("/v1/sessions/test-session-1/models/m001/values").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "dimension": "Country",
+                "values": [
+                    {"value": "Germany", "match": "fuzzy", "score": 0.91},
+                    {"value": "Georgia", "match": "fuzzy", "score": 0.62},
+                ],
+                "truncated": True,
+                "sql": ["SELECT ..."],
+                "warnings": ["fuzzy pass over 42 values"],
+            },
+        )
+    )
+
+    result = server._impl_search_values(
+        "m001", "Country", "Germny", '[{"field": "Region", "op": "equals", "value": "EU"}]', 5, None
+    )
+    body = json.loads(route.calls.last.request.content)
+    assert body == {
+        "dimension": "Country",
+        "search": "Germny",
+        "where": [{"field": "Region", "op": "equals", "value": "EU"}],
+        "limit": 5,
+    }
+    assert "Values of 'Country' matching 'Germny':" in result
+    assert '"Germany"  (fuzzy  score=0.91)' in result
+    assert "more values match" in result
+    assert "warning: fuzzy pass over 42 values" in result
+
+
+def test_search_values_single_model_range(mock_api: respx.MockRouter):
+    """search_values uses POST /v1/values in single-model mode; dates return a range."""
+    server._single_model_mode = True
+    route = mock_api.post("/v1/values").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "dimension": "Order Date",
+                "values": [],
+                "minimum": "2023-01-02",
+                "maximum": "2025-12-30",
+            },
+        )
+    )
+
+    result = server._impl_search_values(None, "Order Date", None, None, None, None)
+    assert json.loads(route.calls.last.request.content) == {"dimension": "Order Date"}
+    assert result == "Range of 'Order Date': 2023-01-02 .. 2025-12-30"
+
+
+def test_search_values_no_match(mock_api: respx.MockRouter):
+    """An empty answer says so rather than returning nothing."""
+    server._single_model_mode = True
+    mock_api.post("/v1/values").mock(
+        return_value=httpx.Response(200, json={"dimension": "Country", "values": []})
+    )
+    result = server._impl_search_values(None, "Country", "xyz", None, None, None)
+    assert result == "No values of 'Country' found matching 'xyz'."
+
+
+def test_search_values_refused_dimension_surfaces_api_error(mock_api: respx.MockRouter):
+    """A valueSearch: false dimension (403) surfaces as a ToolError."""
+    server._single_model_mode = True
+    mock_api.post("/v1/values").mock(
+        return_value=httpx.Response(
+            403,
+            json={
+                "detail": {
+                    "code": "VALUE_SEARCH_DISABLED",
+                    "message": "Dimension 'Email' declares valueSearch: false",
+                }
+            },
+        )
+    )
+    with pytest.raises(_ToolError) as exc:
+        server._impl_search_values(None, "Email", None, None, None, None)
+    msg = str(exc.value)
+    assert msg == (
+        "API refused the request (403 VALUE_SEARCH_DISABLED): "
+        "Dimension 'Email' declares valueSearch: false"
+    )
+    # A model restriction, not a credential problem: no API_KEY advice.
+    assert "authentication" not in msg
+    assert "API_KEY" not in msg
+
+
+def test_search_values_rejects_non_array_where():
+    """where_json must be a JSON array of filters."""
+    with pytest.raises(_ToolError, match="JSON array"):
+        server._impl_search_values(None, "Country", None, '{"field": "x"}', None, None)
+    with pytest.raises(_ToolError, match="Invalid where JSON"):
+        server._impl_search_values(None, "Country", None, "[", None, None)
+
+
+def test_render_dimension_lines_marks_value_search_off():
+    """A dimension with value_search false is flagged; the default is silent."""
+    lines = server._render_dimension_lines(
+        [
+            {"name": "Email", "result_type": "string", "value_search": False},
+            {"name": "Country", "result_type": "string", "value_search": True},
+        ]
+    )
+    flagged = [ln for ln in lines if "valueSearch" in ln]
+    assert flagged == ["    valueSearch: false (values not listable)"]
+
+
 def test_find_artefacts_single_model_mode(mock_api: respx.MockRouter):
     """find_artefacts uses shortcut POST /v1/find in single-model mode."""
     server._single_model_mode = True
@@ -3131,8 +3242,11 @@ def test_tool_capability_ok_gates_execute_tools():
     assert server._tool_capability_ok("describe_model")  # no capability required
     assert server._tool_capability_ok("load_model")
 
+    assert not server._tool_capability_ok("search_values")
+
     server._query_execute_enabled = True
     assert server._tool_capability_ok("execute_query")
+    assert server._tool_capability_ok("search_values")
 
 
 def test_capability_enabled_unknown_fails_open():
@@ -3538,6 +3652,14 @@ def test_auth_error_hints_to_set_api_key(mock_api, monkeypatch):
     assert "set API_KEY" in msg
 
 
+def test_codeless_403_keeps_auth_hint(mock_api, monkeypatch):
+    """A 403 with no structured code (e.g. a proxy) is still reported as auth trouble."""
+    monkeypatch.setattr(server.settings, "api_key", None, raising=False)
+    mock_api.post("/v1/sessions").mock(return_value=httpx.Response(403, text="Forbidden"))
+    with pytest.raises(_ToolError, match=r"authentication failed \(403\).*set API_KEY"):
+        server._create_api_session()
+
+
 def test_auth_error_hints_to_verify_key(mock_api, monkeypatch):
     """A 403 with a credential configured guides the user to verify API_KEY."""
     monkeypatch.setattr(server.settings, "api_key", "supersecretkey123456", raising=False)
@@ -3922,14 +4044,14 @@ def _tools_in_fresh_module(single: bool) -> list:
 
 
 def test_registered_tool_counts_are_what_the_readme_claims():
-    """25 single-model / 29 multi-model / 30 distinct / 24 shared."""
+    """26 single-model / 30 multi-model / 31 distinct / 25 shared."""
     single = _tool_names_in_fresh_module(True)
     multi = _tool_names_in_fresh_module(False)
 
-    assert len(single) == 25
-    assert len(multi) == 29
-    assert len(single | multi) == 30
-    assert len(single & multi) == 24
+    assert len(single) == 26
+    assert len(multi) == 30
+    assert len(single | multi) == 31
+    assert len(single & multi) == 25
     assert single - multi == {"get_model"}
     assert "validate_model" in single & multi
 
@@ -3963,6 +4085,7 @@ def test_tool_annotations_classify_writes_and_warehouse_access():
         "evaluate_rule",
         "evaluate_rules",
         "run_batch",
+        "search_values",
         "validate_model",
     }
 

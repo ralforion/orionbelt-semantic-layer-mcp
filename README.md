@@ -7,8 +7,8 @@
 
 <p align="center"><strong>Thin MCP server that delegates to the OrionBelt® Semantic Layer REST API</strong></p>
 
-[![Version 2.35.1](https://img.shields.io/badge/version-2.35.1-purple.svg)](https://github.com/ralforion/orionbelt-semantic-layer-mcp/releases)
-[![OrionBelt® Semantic Layer 2.35](https://img.shields.io/badge/OrionBelt_Semantic_Layer-2.35-0054A6.svg)](https://github.com/ralforion/orionbelt-semantic-layer)
+[![Version 2.36.0](https://img.shields.io/badge/version-2.36.0-purple.svg)](https://github.com/ralforion/orionbelt-semantic-layer-mcp/releases)
+[![OrionBelt® Semantic Layer 2.36](https://img.shields.io/badge/OrionBelt_Semantic_Layer-2.36-0054A6.svg)](https://github.com/ralforion/orionbelt-semantic-layer)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/ralforion/orionbelt-semantic-layer-mcp/blob/main/LICENSE)
 [![FastMCP](https://img.shields.io/badge/FastMCP-4.0+-8A2BE2)](https://gofastmcp.com)
@@ -51,7 +51,7 @@ The OrionBelt® Semantic Layer platform has two deployment modes. This MCP serve
 - **No business logic** — all tool calls delegate to the REST API (v1 endpoints)
 - **Dual-mode** — auto-detects single-model or multi-model API mode at startup
 - **Auto-session management** — creates an API session on first tool call, caches the ID (multi-model mode)
-- **25 tools** (single-model mode) or **29 tools** (multi-model mode) for querying (QueryObject), execution, batch, discovery, composability (ACR), examples, diagrams, RDF/SPARQL, lineage of artefacts and queries, business rules (list, explain, evaluate), ontology links (concept mappings, namespaces, unmapped artefacts), OSI export, model validation (offline or against the live datasource), and OBML reference + function catalog + JSON schemas. (30 distinct tools exist in total; the API mode selects which subset is active — they overlap in 24 — and no client ever sees all 30 at once.) The visible surface is narrowed further in the design-time phase and when query execution is disabled (see [Design-time vs run-time tool switching](#design-time-vs-run-time-tool-switching))
+- **26 tools** (single-model mode) or **30 tools** (multi-model mode) for querying (QueryObject), execution, batch, discovery, dimension-value search, composability (ACR), examples, diagrams, RDF/SPARQL, lineage of artefacts and queries, business rules (list, explain, evaluate), ontology links (concept mappings, namespaces, unmapped artefacts), OSI export, model validation (offline or against the live datasource), and OBML reference + function catalog + JSON schemas. (31 distinct tools exist in total; the API mode selects which subset is active — they overlap in 25 — and no client ever sees all 31 at once.) The visible surface is narrowed further in the design-time phase and when query execution is disabled (see [Design-time vs run-time tool switching](#design-time-vs-run-time-tool-switching))
 - **5 prompts + 2 resources** for OBML / OBSQL reference, business rules, and usage guidance
 
 <p align="center">
@@ -237,6 +237,7 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 | ---------------------------------------- | ------------------------------------------------------------------------------------------------ |
 | `find_artefacts(model_id, query?, kind?, name?)` | Look up artefacts. With `query` → **fuzzy, ranked search** (resolve a vague term: exact / synonym / fuzzy). Without `query` → **exact, deterministic lookup** (all artefacts, one kind, or one named artefact, full records) |
 | `explain_artefact(model_id, name)`       | Explain lineage of a dimension, measure, or metric                                               |
+| `search_values(dimension, search?, where_json?, limit?, dialect?, model_id?)` | **Dimension-value search** — ground a filter value before writing it (`Germany` vs `DE` vs `GERMANY`). With `search` → ranked exact / prefix / contains / fuzzy matches; without → the values listed, or a date/number dimension's min and max. Runs queries, so requires query execution; a dimension declaring `valueSearch: false` is refused |
 | `get_lineage(name? \| query_json?, kind?, dialect?, output_format="text", model_id)` | **Lineage graph** of a dimension, measure, metric or business rule — or of a whole query, with the joins the planner chose (`pathName` and role joins included) — down to the tables it reads. `kind` is optional (every kind is tried; a rule named like a measure returns both). `output_format`: `text`, `mermaid`, `turtle` (`prov:wasDerivedFrom` over the OBSL graph's IRIs, merges with `get_model_graph`) or `json` |
 | `list_examples(model_id, intent?)`       | List authored example queries (filterable by intent tag)                                         |
 | `get_example(model_id, name)`            | Get one example with query + compiled SQL preview                                                |
@@ -309,7 +310,7 @@ design/reference tools:
 | --------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Always**      | always (both phases)        | `load_model`, `remove_model` (transition verbs — stay available in the run phase so a second model can be loaded mid-session, up to `max_models_per_session`); `run_batch` and `validate_model` (self-contained — each takes its model inline, so neither needs prior session state); `get_json_schema` (QueryObject/OBML schemas — needed in both phases) |
 | **Design-only** | only when no model loaded   | `get_obml_reference`, `get_function_catalog`, `list_dialects`                                                                                                          |
-| **Run-only**    | only when a model is loaded | `describe_model`, `get_model_diagram`, `find_artefacts`, `explain_artefact`, `get_lineage`, `execute_query`, `list_examples`, `get_example`, `get_model_graph`, `get_join_graph`, `find_composables`, `query_model_graph_by_sparql`, `list_rules`, `explain_rule`, `evaluate_rule`, `evaluate_rules`, `find_concept_mappings`, `list_concept_namespaces`, `list_unmapped_artefacts`, `list_models`, `export_model_to_osi` |
+| **Run-only**    | only when a model is loaded | `describe_model`, `get_model_diagram`, `find_artefacts`, `explain_artefact`, `search_values`, `get_lineage`, `execute_query`, `list_examples`, `get_example`, `get_model_graph`, `get_join_graph`, `find_composables`, `query_model_graph_by_sparql`, `list_rules`, `explain_rule`, `evaluate_rule`, `evaluate_rules`, `find_concept_mappings`, `list_concept_namespaces`, `list_unmapped_artefacts`, `list_models`, `export_model_to_osi` |
 
 ```
                        load_model  (returns "re-list" signal)
@@ -344,9 +345,10 @@ rather than an opaque failure:
 ### Capability gating (orthogonal to phase)
 
 Separately from lifecycle phase, a tool can be hidden because the server is
-_configured_ not to support it. The execution tool `execute_query` is gated on
-the API's `query_execute` capability: when the server runs **compile-only** it is
-dropped from `tools/list` and calling it returns a structured error. This
+_configured_ not to support it. The tools that run queries — `execute_query`,
+`evaluate_rule` and `search_values` — are gated on the API's `query_execute`
+capability: when the server runs **compile-only** they are dropped from
+`tools/list` and calling one returns a structured error. This
 composes with phase — a verb is listed only if its **phase is active _and_ its
 capability is enabled**. The mechanism is a general capability registry, so
 future "the server can't do X here" flags hide their tools the same way.
