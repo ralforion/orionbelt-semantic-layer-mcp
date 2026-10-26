@@ -1554,8 +1554,16 @@ def test_search_values_refused_dimension_surfaces_api_error(mock_api: respx.Mock
             },
         )
     )
-    with pytest.raises(_ToolError, match="valueSearch: false"):
+    with pytest.raises(_ToolError) as exc:
         server._impl_search_values(None, "Email", None, None, None, None)
+    msg = str(exc.value)
+    assert msg == (
+        "API refused the request (403 VALUE_SEARCH_DISABLED): "
+        "Dimension 'Email' declares valueSearch: false"
+    )
+    # A model restriction, not a credential problem: no API_KEY advice.
+    assert "authentication" not in msg
+    assert "API_KEY" not in msg
 
 
 def test_search_values_rejects_non_array_where():
@@ -3642,6 +3650,14 @@ def test_auth_error_hints_to_set_api_key(mock_api, monkeypatch):
     msg = str(exc.value)
     assert "authentication failed (401)" in msg
     assert "set API_KEY" in msg
+
+
+def test_codeless_403_keeps_auth_hint(mock_api, monkeypatch):
+    """A 403 with no structured code (e.g. a proxy) is still reported as auth trouble."""
+    monkeypatch.setattr(server.settings, "api_key", None, raising=False)
+    mock_api.post("/v1/sessions").mock(return_value=httpx.Response(403, text="Forbidden"))
+    with pytest.raises(_ToolError, match=r"authentication failed \(403\).*set API_KEY"):
+        server._create_api_session()
 
 
 def test_auth_error_hints_to_verify_key(mock_api, monkeypatch):

@@ -23,6 +23,13 @@ Tracks OrionBelt Semantic Layer API **v2.36.x**.
   each step is an executed query. Tool counts: 26 single-model / 30 multi-model.
 - `describe_model` flags a dimension declaring `valueSearch: false`.
 
+### Fixed
+
+- A 403 carrying a non-`AUTH_*` code (`VALUE_SEARCH_DISABLED` on a
+  `valueSearch: false` dimension) is reported as the API refusing the request,
+  with its code, instead of "API authentication failed" with advice to set
+  `API_KEY`. Auth 403s, and 403s without a code, are reported as before.
+
 ### Changed
 
 - The `write_query` and `debug_validation` prompts cover the API

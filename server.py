@@ -805,10 +805,29 @@ def _parse_error_detail(response: httpx.Response) -> str:
         return response.text
 
 
+def _error_code(response: httpx.Response) -> str | None:
+    """The structured ``code`` of an API error (``detail.code`` or top-level), if any."""
+    try:
+        body = response.json()
+    except (ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(body, dict):
+        return None
+    detail = body.get("detail")
+    code = detail.get("code") if isinstance(detail, dict) else body.get("code")
+    return code if isinstance(code, str) else None
+
+
 def _raise_api_error(response: httpx.Response, detail: str | None = None) -> NoReturn:
     """Raise ToolError from an API error response."""
     if detail is None:
         detail = _parse_error_detail(response)
+    code = _error_code(response)
+    # The API's auth layer always sends an ``AUTH_*`` code. A 403 with any other
+    # code is the model or server refusing the request (``VALUE_SEARCH_DISABLED``
+    # for a ``valueSearch: false`` dimension), which no credential fixes.
+    if response.status_code == 403 and code is not None and not code.startswith("AUTH_"):
+        raise ToolError(f"API refused the request (403 {code}): {detail}")
     if response.status_code in (401, 403):
         hint = (
             "set API_KEY (and API_KEY_HEADER if the API uses a custom header) "
@@ -3913,8 +3932,9 @@ Metrics are queried by name like any measure.  The types are:
   `windowFunction: sum | avg | min | max | count` and `frame: {preceding: N}`
   (OBSL 2.36+) it is a moving aggregate over **rows**: the current row and
   the N before it, by the time dimension ascending — a three-row moving
-  average that skips an empty month.  The time dimension must be selected,
-  and rollup / cube is refused (`WINDOW_FRAME_NOT_SUPPORTED`).
+  average that skips an empty month.  The time dimension must be selected
+  (`WINDOW_TIME_DIMENSION_NOT_IN_SELECT`), and rollup / cube is refused
+  (`WINDOW_FRAME_NOT_SUPPORTED`).
 - **Reaggregate** (OBSL 2.35+): a measure aggregated at a finer grain, then
   aggregated again — "average revenue per customer, by country".  The model
   names the `measure`, the `per` dimensions added for the first stage, and
@@ -4508,8 +4528,12 @@ references unknown column.
   `FILL_COMBINATION_NOT_SUPPORTED`: `fill: true` needs exactly one
   time-grained dimension (outside a coalesce group) at day grain or coarser,
   and is refused beside `grouping`, `having`, totals, window and PoP metrics.
+- `WINDOW_TIME_DIMENSION_NOT_IN_SELECT`: a window metric's `timeDimension`
+  (required for a `frame`, LAG / LEAD) is not among the selected dimensions.
+  Fix: Select the time dimension.
 - `WINDOW_FRAME_NOT_SUPPORTED` (OBSL 2.36+): a window metric with `frame`
-  queried without its time dimension, or under `grouping: rollup` / `cube`.
+  under `grouping: rollup` / `cube`, whose subtotal rows would be read as
+  periods.  Fix: Drop the rollup/cube.
 - `WINDOW_SPAN_NOT_SUPPORTED` (OBSL 2.36+): a `windowSpan` cumulative metric
   queried without its time dimension or under rollup / cube, or over a
   measure deduplicated per join row or carrying a `filterContext`.
