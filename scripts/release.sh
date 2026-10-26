@@ -261,21 +261,40 @@ echo "  → pypi-publish.yml builds & publishes ${TAG} to PyPI"
 if confirm "Wait for and smoke-test the PyPI release?"; then
     # Poll PyPI until the CI workflow has built, uploaded, and the CDN serves
     # the new version. This spans the CI run (build + publish) plus PyPI CDN
-    # propagation, so retry for up to 5 minutes before giving up. Uses
-    # ``uv run --no-project`` so the test ignores the local source tree
-    # and only resolves what's on PyPI.
-    echo "Waiting for CI to publish, then smoke-testing pip install from PyPI..."
+    # propagation, so retry for up to 5 minutes before giving up.
+    #
+    # Run from an empty directory with ``--isolated``: ``--no-project`` alone
+    # still uses the repo's .venv as the base environment, whose editable
+    # install of this very version satisfies the requirement without PyPI,
+    # and ``import server`` would load ./server.py. ``--refresh-package``
+    # re-reads the index each attempt instead of a cached "not there yet".
+    # The import must come from site-packages, never from the repo. Importing
+    # needs API_BASE_URL (the repo's .env supplied it before); a dummy will do,
+    # since nothing connects at import time.
+    # The temp directory has no .python-version, so uv would pick its default
+    # interpreter, which may predate requires-python and fail every attempt as
+    # "not yet available". Request the repo's pin by version, not the .venv's
+    # interpreter path, which would bring the repo environment back.
+    SMOKE_PY=$(tr -d '[:space:]' < "$REPO_ROOT/.python-version" 2>/dev/null || true)
+    [[ -n "$SMOKE_PY" ]] || SMOKE_PY=$(grep '^requires-python' "$REPO_ROOT/pyproject.toml" \
+        | sed 's/.*"\(.*\)".*/\1/')
+    echo "Waiting for CI to publish, then smoke-testing pip install from PyPI (Python ${SMOKE_PY})..."
+    SMOKE_DIR=$(mktemp -d)
     SMOKE_OK=0
     for i in $(seq 1 30); do
-        if uv run --no-project --with "orionbelt-semantic-layer-mcp==${VERSION}" -- \
-                python -c "import server" \
-                >/dev/null 2>&1; then
+        if SMOKE_FILE=$(cd "$SMOKE_DIR" && API_BASE_URL=http://127.0.0.1:1 \
+                uv run --isolated --no-project --python "$SMOKE_PY" \
+                --refresh-package orionbelt-semantic-layer-mcp \
+                --with "orionbelt-semantic-layer-mcp==${VERSION}" -- \
+                python -c "import server; print(server.__file__)" 2>/dev/null) \
+                && [[ "$SMOKE_FILE" == */site-packages/server.py ]]; then
             SMOKE_OK=1
             break
         fi
         echo "  attempt $i/30: not yet available, retrying in 10s..."
         sleep 10
     done
+    rm -rf "$SMOKE_DIR"
     if [[ "$SMOKE_OK" == "1" ]]; then
         ok "Smoke test passed: pip install orionbelt-semantic-layer-mcp==${VERSION} resolves and imports cleanly"
     else
