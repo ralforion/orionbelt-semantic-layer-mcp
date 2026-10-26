@@ -289,6 +289,8 @@ _RUN_TIME_TOOLS: frozenset[str] = frozenset(
         "find_artefacts",
         "explain_artefact",
         "execute_query",
+        # dimension-value search (API 2.36)
+        "search_values",
         "list_examples",
         "get_example",
         "get_model_graph",
@@ -412,6 +414,8 @@ _TOOL_CAPABILITY: dict[str, str] = {
     # ``evaluate_rules`` is deliberately not gated: with ``dry_run=True`` it
     # compiles every rule without executing, which works with execution off.
     "evaluate_rule": CAP_QUERY_EXECUTE,
+    # Each value-search step is an executed dimension-only query (API 2.36).
+    "search_values": CAP_QUERY_EXECUTE,
 }
 
 # Capability flag → a resolver reading the current (startup-detected) config.
@@ -1425,6 +1429,8 @@ def _impl_describe_model(model_id: str | None = None) -> str:
             lines.append(f"    description: {dim['description']}")
         if dim.get("synonyms"):
             lines.append(f"    synonyms: {', '.join(dim['synonyms'])}")
+        if dim.get("value_search") is False:
+            lines.append("    valueSearch: false (values not listable)")
         lines.extend(_render_mapping_lines(dim.get("external_concept_mappings"), "    "))
     lines.append("")
 
@@ -1626,6 +1632,59 @@ def _impl_execute_query(
     return json.dumps(_parse_json(resp), indent=2)
 
 
+def _impl_search_values(
+    model_id: str | None,
+    dimension: str,
+    search: str | None,
+    where_json: str | None,
+    limit: int | None,
+    dialect: str | None,
+) -> str:
+    """List or search a dimension's values (shared implementation, API 2.36)."""
+    body: dict[str, Any] = {"dimension": dimension}
+    if search is not None:
+        body["search"] = search
+    if where_json is not None:
+        try:
+            where = json.loads(where_json)
+        except json.JSONDecodeError as exc:
+            raise ToolError(f"Invalid where JSON: {exc}") from exc
+        if not isinstance(where, list):
+            raise ToolError("'where' must be a JSON array of query filters.")
+        body["where"] = where
+    if limit is not None:
+        body["limit"] = limit
+    if dialect is not None:
+        body["dialect"] = dialect
+    if model_id is None:
+        resp = _shortcut_request("POST", "/values", json_body=body)
+    else:
+        resp = _session_request("POST", f"/models/{model_id}/values", json_body=body)
+    data = _parse_json(resp)
+
+    name = data.get("dimension", dimension)
+    values = data.get("values", [])
+    lines: list[str] = []
+    # A date or number dimension answers with its range instead of values.
+    if data.get("minimum") is not None or data.get("maximum") is not None:
+        lines.append(f"Range of '{name}': {data.get('minimum')} .. {data.get('maximum')}")
+    if values:
+        header = f"Values of '{name}'" + (f" matching '{search}'" if search is not None else "")
+        lines.append(f"{header}:")
+        for v in values:
+            score = v.get("score")
+            score_str = f"  score={score:.2f}" if isinstance(score, int | float) else ""
+            lines.append(f"  {json.dumps(v.get('value'))}  ({v.get('match', '?')}{score_str})")
+        if data.get("truncated"):
+            lines.append("  … more values match; raise 'limit' or narrow 'search'.")
+    elif not lines:
+        target = f" matching '{search}'" if search is not None else ""
+        lines.append(f"No values of '{name}' found{target}.")
+    for w in data.get("warnings", []):
+        lines.append(f"warning: {w}")
+    return "\n".join(lines)
+
+
 def _impl_get_model_diagram(model_id: str | None, show_columns: bool, theme: str) -> str:
     """Generate a Mermaid ER diagram (shared implementation)."""
     if model_id is None:
@@ -1678,6 +1737,8 @@ def _render_dimension_lines(dims: list[dict]) -> list[str]:
             lines.append(f"    description: {d['description']}")
         if d.get("synonyms"):
             lines.append(f"    synonyms: {', '.join(d['synonyms'])}")
+        if d.get("value_search") is False:
+            lines.append("    valueSearch: false (values not listable)")
     return lines
 
 
@@ -3056,6 +3117,45 @@ def _register_model_tools() -> None:
         """
         return _impl_explain_artefact(_resolve_model_id(model_id), name)
 
+    @mcp.tool(title="Search Dimension Values", annotations=_READ_ONLY_OPEN_WORLD)
+    def search_values(
+        dimension: str,
+        search: str | None = None,
+        where_json: str | None = None,
+        limit: int | None = None,
+        dialect: str | None = None,
+        model_id: str | None = None,
+    ) -> str:
+        """List or search the values a dimension holds, to ground a filter value.
+
+        Use before writing a filter such as ``Country = 'Germany'`` when you do
+        not know how the column spells it (``Germany``, ``DE``, ``GERMANY``): a
+        wrong guess returns no rows rather than an error.
+
+        - ``search`` set → case-insensitive match ranked exact, prefix, contains,
+          then fuzzy for misspellings (``Germny`` finds ``Germany``) where the
+          dimension has few enough values.
+        - ``search`` omitted → the values listed in order; a date or number
+          dimension returns its minimum and maximum instead.
+
+        Each step is an executed dimension-only query, so the model's static
+        filters (a tenant filter included) restrict the values. Requires query
+        execution. A dimension declaring ``valueSearch: false`` is refused.
+
+        Args:
+            dimension: The dimension whose values are listed or searched.
+            search: Term to look for. Omit to list the values (or the range).
+            where_json: Query filters narrowing the values, as a JSON array of
+                ``where`` items (same shape as a QueryObject's ``where``).
+            limit: Values to return (API default 20, capped server-side).
+            dialect: Target SQL dialect. When omitted the API resolves via
+                model.settings.defaultDialect → server default.
+            model_id: a loaded model's id (multi-model); omit in single-model.
+        """
+        return _impl_search_values(
+            _resolve_model_id(model_id), dimension, search, where_json, limit, dialect
+        )
+
     @mcp.tool(title="Lineage", annotations=_READ_ONLY)
     def get_lineage(
         name: str | None = None,
@@ -3668,6 +3768,25 @@ The fields below (filters, groups, dimensionsExclude, coalesce, raw `fields`,
 - Length: `length_eq`, `length_gt`, `length_lt` (value must be integer)
 - Range: `between`, `notbetween`, `relative`
 
+`relative` takes `{unit: day|week|month|quarter|year, count, direction?:
+past|future, include_current?, calendar?, toDate?}`.  It counts units back
+from today (`{unit: month, count: 1}` is the 30-odd days before today);
+`calendar: true` (OBSL 2.36+) takes whole calendar periods from the start of
+the current one: `{unit: quarter, count: 1, calendar: true}` is this quarter,
+`include_current: false` makes it the last full one, and `toDate: true` ends
+the current period today (year to date).  A week starts on the model's
+`weekStart`.
+
+On a date or timestamp field a **period literal** (OBSL 2.36+) stands for the
+whole period: `= '2025-Q1'` is the quarter, `<= '2024-12'` runs through the
+last moment of 31 December, `between ['2025-01', '2025-03']` covers three
+months, and `in` may mix periods and ISO dates.  Also inside `exists`
+subqueries.
+
+Unsure how a column spells a value (`Germany`, `DE`, `GERMANY`)?  A wrong
+guess returns no rows, not an error: call `search_values` (OBSL 2.36+) for
+the dimension first.
+
 ## Filter Groups (AND/OR/NOT)
 
 `where` and `having` arrays accept both leaf filters and filter groups
@@ -3744,6 +3863,25 @@ it shows, not the date inside it (OBSL 2.35+): on `Order Month`,
 `>= 2025-01-15` starts in February.  To compare dates, filter the qualified
 column (`Orders.Order Date`) or a dimension without a grain.
 
+## orderBy
+
+`orderBy` takes a selected dimension, a numeric position, or (OBSL 2.36+)
+**any measure or metric, selected or not**: "the three customers with the
+most revenue", showing only their names.  The sort measure is computed over
+the same dimensions and `where` filters and joined onto the rows; a row it
+has no value for sorts as NULL.  An unselected *dimension* is still refused
+(`UNKNOWN_ORDER_BY_FIELD`), and an unselected sort measure beside
+`grouping: rollup` / `cube` is `ORDER_BY_COMBINATION_NOT_SUPPORTED`.
+
+## Dimension-only queries
+
+A query with dimensions and no measures returns the combinations held by
+**every** data object joining those dimensions (OBSL 2.36+; before, one of
+them was picked): with Orders and Returns both joining Customers and
+Products, region by category lists the pairs either holds.  A `where` filter
+keeps only the data objects reaching it, so a filter on an Orders column
+reads Orders alone.
+
 ## Selecting a field once
 
 A dimension, measure or metric may be selected only once per query
@@ -3764,9 +3902,19 @@ Metrics are queried by name like any measure.  The types are:
   dimensions partition the accumulation, and a rolling `window` counts
   calendar periods, not rows.  A filter on the time dimension picks the
   periods shown; the look-back still reads the history before them.
+  `windowSpan: {count: 90, unit: day}` (OBSL 2.36+) instead evaluates the
+  measure over its source rows inside the span ending at each shown period,
+  so a distinct count or an average over "the last 90 days" is right; it
+  needs the time dimension selected and no rollup / cube
+  (`WINDOW_SPAN_NOT_SUPPORTED`).
 - **Period-over-Period (PoP)**: compares a measure across time periods
   (e.g. YoY growth, MoM difference).  Queried as a regular metric name.
-- **Window**: rank, lag/lead and similar functions over a measure.
+- **Window**: rank, lag/lead and similar functions over a measure.  With
+  `windowFunction: sum | avg | min | max | count` and `frame: {preceding: N}`
+  (OBSL 2.36+) it is a moving aggregate over **rows**: the current row and
+  the N before it, by the time dimension ascending — a three-row moving
+  average that skips an empty month.  The time dimension must be selected,
+  and rollup / cube is refused (`WINDOW_FRAME_NOT_SUPPORTED`).
 - **Reaggregate** (OBSL 2.35+): a measure aggregated at a finer grain, then
   aggregated again — "average revenue per customer, by country".  The model
   names the `measure`, the `per` dimensions added for the first stage, and
@@ -3955,6 +4103,8 @@ with `offset`.
 - Use `describe_model` first to see available dimension/measure names.
 - Use `list_dialects` to check dialect capabilities.
 - Dimension names with time grain: append `:month`, `:year`, etc.
+- Weekday in an expression: `extract('day_of_week', x)` is the ISO day of
+  week, Monday 1 to Sunday 7, on every engine (OBSL 2.36+).
 """
 
 _WRITE_BUSINESS_RULE_TEXT = """\
@@ -4034,7 +4184,11 @@ _DEBUG_VALIDATION_TEXT = """\
   Fix: Check required fields (aggregation, resultType) and either columns or expression.
 - `METRIC_PARSE_ERROR`: Cannot parse a metric definition.
   Fix: Derived metrics need `expression`.  Cumulative metrics need `measure`
-  + `timeDimension` (and `window`/`grainToDate` are mutually exclusive).
+  + `timeDimension` (and `window`/`grainToDate` are mutually exclusive;
+  `windowSpan` excludes `window`, `grainToDate`, `cumulativeType` and
+  `partitionBy`, and is refused over a reaggregate metric).  A window metric
+  with `windowFunction: sum|avg|min|max|count` requires `frame: {preceding: N}`
+  and takes no `offset`, `buckets`, `defaultValue` or `orderDirection`.
   Period-over-period metrics need `expression` + `periodOverPeriod` block
   with `timeDimension`, `grain`, and `offsetGrain`.  Reaggregate metrics need
   `measure`, `per` and `aggregation`.
@@ -4303,13 +4457,21 @@ references unknown column.
   Fix: Use a supported operator (equals, gt, gte, lt, lte, inlist, regex, blank, length_eq, etc.).
 - `INVALID_FILTER_VALUE`: Filter value has the wrong type for the operator.
   Fix: `regex`/`notregex` require a string pattern; `length_eq`/`length_gt`/`length_lt`
-  require an integer value.
+  require an integer value.  A period literal (`'2025-Q1'`) is refused with an
+  operator that has no period reading (`contains`) or a period a date cannot
+  bound (`'0000'`, `'9999-12'`).
 - `INVALID_RELATIVE_FILTER`: Malformed relative time filter.
-  Fix: Check unit (day/week/month/year), count, direction, include_current.
+  Fix: Check unit (day/week/month/quarter/year), count, direction,
+  include_current, calendar, toDate.
 - `UNKNOWN_FILTER_FIELD`: Filter field is not a dimension (WHERE) or measure (HAVING).
   Fix: Check field name matches a dimension or measure in the model.
-- `UNKNOWN_ORDER_BY_FIELD`: ORDER BY field is not a dimension or measure in the query's SELECT.
-  Fix: Use a field name from `select.dimensions` or `select.measures`, or a numeric position.
+- `UNKNOWN_ORDER_BY_FIELD`: ORDER BY field is neither a selected dimension nor a
+  measure or metric of the model (since OBSL 2.36 a measure or metric may be
+  sorted by without being selected).
+  Fix: Select the dimension, sort by a model measure/metric, or use a numeric position.
+- `ORDER_BY_COMBINATION_NOT_SUPPORTED`: An unselected sort measure beside
+  `grouping: rollup` / `cube` (OBSL 2.36+).
+  Fix: Select the measure, or drop the rollup/cube.
 - `INVALID_ORDER_BY_POSITION`: Numeric ORDER BY position is out of range.
   Fix: Use a position between 1 and the number of SELECT columns.
 - `CUMULATIVE_TIME_DIMENSION_NOT_IN_SELECT`: Since OBSL 2.34 a cumulative
@@ -4346,6 +4508,15 @@ references unknown column.
   `FILL_COMBINATION_NOT_SUPPORTED`: `fill: true` needs exactly one
   time-grained dimension (outside a coalesce group) at day grain or coarser,
   and is refused beside `grouping`, `having`, totals, window and PoP metrics.
+- `WINDOW_FRAME_NOT_SUPPORTED` (OBSL 2.36+): a window metric with `frame`
+  queried without its time dimension, or under `grouping: rollup` / `cube`.
+- `WINDOW_SPAN_NOT_SUPPORTED` (OBSL 2.36+): a `windowSpan` cumulative metric
+  queried without its time dimension or under rollup / cube, or over a
+  measure deduplicated per join row or carrying a `filterContext`.
+- `VALUE_SEARCH_DISABLED` (403) / `VALUE_SEARCH_NOT_SUPPORTED`
+  (`search_values`, OBSL 2.36+): the dimension declares `valueSearch: false`;
+  or a `search` term was given for a date/number dimension (omit it to get
+  the range) or for a non-string dimension.
 
 ## Dialect Capability Errors (at query time)
 
