@@ -32,9 +32,9 @@ from `uv.lock` for linux/CPython on Python 3.12–3.14. Development-only
 dependencies (pytest, pytest-asyncio, respx, ruff and vulture) are excluded:
 they are tools the project runs, not code it ships.
 
-Resolutions no published environment can reach (`colorama`, `httpx2-jsfetch`,
-`pywin32` and `pywin32-ctypes`) are excluded: the image is linux/CPython, and
-so is every environment this project supports being installed into.
+Resolutions no published environment can reach (`colorama`, `httpx2-jsfetch`
+and `pywin32`) are excluded: the image is linux/CPython, and so is every
+environment this project supports being installed into.
 
 `uv.lock` sees only PyPI packages, so the interpreter and the operating
 system the Docker image is built on are covered separately under
@@ -49,7 +49,7 @@ uv run --no-sync python scripts/third_party_notices.py
 
 ## Summary
 
-72 packages, all of them redistributed by the published image.
+65 packages, all of them redistributed by the published image.
 
 | Package | Version | License | In image |
 | --- | --- | --- | --- |
@@ -57,7 +57,7 @@ uv run --no-sync python scripts/third_party_notices.py
 | annotated-types | 0.7.0 | MIT License | yes |
 | anyio | 4.14.2 | MIT | yes |
 | attrs | 25.4.0 | MIT | yes |
-| authlib | 1.7.2 | BSD License | yes |
+| authlib | 1.9.1 | BSD License | yes |
 | beartype | 0.22.9 | MIT License | yes |
 | cachetools | 7.0.1 | MIT | yes |
 | caio | 0.9.25 | Apache-2.0 | yes |
@@ -71,8 +71,8 @@ uv run --no-sync python scripts/third_party_notices.py
 | docutils | 0.22.4 | Public Domain OR BSD License OR GNU General Public License (GPL) ⚠️ | yes |
 | email-validator | 2.3.0 | The Unlicense (Unlicense) | yes |
 | exceptiongroup | 1.3.1 | MIT License | yes |
-| fastmcp | 4.1.2 | Apache-2.0 | yes |
-| fastmcp-slim | 4.1.2 | Apache-2.0 | yes |
+| fastmcp | 4.1.4 | Apache-2.0 | yes |
+| fastmcp-slim | 4.1.4 | Apache-2.0 | yes |
 | griffelib | 2.0.2 | ISC | yes |
 | h11 | 0.16.0 | MIT License | yes |
 | httpcore | 1.0.9 | BSD-3-Clause | yes |
@@ -80,21 +80,15 @@ uv run --no-sync python scripts/third_party_notices.py
 | httpx | 0.28.1 | BSD License | yes |
 | httpx2 | 2.13.0 | BSD-3-Clause | yes |
 | idna | 3.19 | BSD-3-Clause | yes |
-| jaraco-classes | 3.4.0 | MIT License | yes |
-| jaraco-context | 6.1.0 | MIT | yes |
-| jaraco-functools | 4.4.0 | MIT | yes |
-| jeepney | 0.9.0 | MIT | yes |
 | joserfc | 1.6.8 | BSD License | yes |
 | jsonref | 1.1.0 | MIT | yes |
 | jsonschema | 4.26.0 | MIT | yes |
 | jsonschema-path | 0.4.4 | Apache Software License | yes |
 | jsonschema-specifications | 2025.9.1 | MIT | yes |
-| keyring | 25.7.0 | MIT | yes |
 | markdown-it-py | 4.0.0 | MIT License | yes |
-| mcp | 2.2.0 | MIT License | yes |
-| mcp-types | 2.2.0 | MIT License | yes |
+| mcp | 2.3.0 | MIT License | yes |
+| mcp-types | 2.3.0 | MIT License | yes |
 | mdurl | 0.1.2 | MIT License | yes |
-| more-itertools | 10.8.0 | MIT | yes |
 | openapi-pydantic | 0.6.0 | MIT License | yes |
 | opentelemetry-api | 1.45.1 | Apache-2.0 | yes |
 | packaging | 26.0 | Apache-2.0 OR BSD-2-Clause | yes |
@@ -104,7 +98,7 @@ uv run --no-sync python scripts/third_party_notices.py
 | pycparser | 3.0 | BSD-3-Clause | yes |
 | pydantic | 2.12.5 | MIT | yes |
 | pydantic-core | 2.41.5 | MIT | yes |
-| pydantic-settings | 2.16.0 | MIT | yes |
+| pydantic-settings | 2.16.2 | MIT | yes |
 | pygments | 2.21.0 | BSD-2-Clause | yes |
 | pyjwt | 2.15.0 | MIT | yes |
 | pyperclip | 1.11.0 | BSD License | yes |
@@ -115,7 +109,6 @@ uv run --no-sync python scripts/third_party_notices.py
 | rich | 14.3.3 | MIT License | yes |
 | rich-rst | 1.3.2 | MIT | yes |
 | rpds-py | 0.30.0 | MIT | yes |
-| secretstorage | 3.5.0 | BSD-3-Clause | yes |
 | sse-starlette | 3.3.2 | BSD-3-Clause | yes |
 | starlette | 1.3.1 | BSD-3-Clause | yes |
 | truststore | 0.10.4 | MIT | yes |
@@ -196,7 +189,7 @@ instead, because only the project itself can supply its copyright line.
 
 | Package | Version | Declared license |
 | --- | --- | --- |
-| fastmcp-slim | 4.1.2 | Apache-2.0 |
+| fastmcp-slim | 4.1.4 | Apache-2.0 |
 | py-key-value-aio | 0.4.4 | Apache Software License |
 
 ## Full license texts
@@ -684,7 +677,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### authlib 1.7.2
+### authlib 1.9.1
 
 *LICENSE*
 
@@ -1534,7 +1527,7 @@ agrees to be bound by the terms and conditions of this License
 Agreement.
 ```
 
-### fastmcp 4.1.2
+### fastmcp 4.1.4
 
 *LICENSE*
 
@@ -1567,7 +1560,7 @@ APPENDIX: How to apply the Apache License to your work.
    limitations under the License.
 ```
 
-### fastmcp-slim 4.1.2
+### fastmcp-slim 4.1.4
 
 Ships no license file. Declares Apache-2.0, whose terms are reproduced in [Appendix A](#appendix-a--apache-license-20).
 
@@ -1768,108 +1761,6 @@ NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### jaraco-classes 3.4.0
-
-*LICENSE*
-
-```text
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to
-deal in the Software without restriction, including without limitation the
-rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
-sell copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
-```
-
-### jaraco-context 6.1.0
-
-*LICENSE*
-
-```text
-MIT License
-
-Copyright (c) 2026 <copyright holders>
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
-associated documentation files (the "Software"), to deal in the Software without restriction, including
-without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the
-following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial
-portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT
-LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO
-EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
-IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
-USE OR OTHER DEALINGS IN THE SOFTWARE.
-```
-
-### jaraco-functools 4.4.0
-
-*LICENSE*
-
-```text
-MIT License
-
-Copyright (c) 2025 <copyright holders>
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
-associated documentation files (the "Software"), to deal in the Software without restriction, including
-without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the
-following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial
-portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT
-LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO
-EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
-IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
-USE OR OTHER DEALINGS IN THE SOFTWARE.
-```
-
-### jeepney 0.9.0
-
-*LICENSE*
-
-```text
-The MIT License (MIT)
-
-Copyright (c) 2017 Thomas Kluyver
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
-```
-
 ### joserfc 1.6.8
 
 *LICENSE*
@@ -2018,31 +1909,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-### keyring 25.7.0
-
-*LICENSE*
-
-```text
-MIT License
-
-Copyright (c) 2025 <copyright holders>
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
-associated documentation files (the "Software"), to deal in the Software without restriction, including
-without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the
-following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial
-portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT
-LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO
-EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
-IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
-USE OR OTHER DEALINGS IN THE SOFTWARE.
-```
-
 ### markdown-it-py 4.0.0
 
 *LICENSE*
@@ -2098,7 +1964,7 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-### mcp 2.2.0
+### mcp 2.3.0
 
 *LICENSE*
 
@@ -2126,7 +1992,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### mcp-types 2.2.0
+### mcp-types 2.3.0
 
 *LICENSE*
 
@@ -2205,32 +2071,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 IN THE SOFTWARE.
-```
-
-### more-itertools 10.8.0
-
-*LICENSE*
-
-```text
-Copyright (c) 2012 Erik Rose
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files (the "Software"), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
-of the Software, and to permit persons to whom the Software is furnished to do
-so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
 ```
 
 ### openapi-pydantic 0.6.0
@@ -2510,7 +2350,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### pydantic-settings 2.16.0
+### pydantic-settings 2.16.2
 
 *LICENSE*
 
@@ -3191,38 +3031,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
-```
-
-### secretstorage 3.5.0
-
-*LICENSE*
-
-```text
-Copyright 2012-2025 Dmitry Shachnev <mitya57@gmail.com>
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
-1. Redistributions of source code must retain the above copyright notice, this
-   list of conditions and the following disclaimer.
-2. Redistributions in binary form must reproduce the above copyright notice,
-   this list of conditions and the following disclaimer in the documentation
-   and/or other materials provided with the distribution.
-3. Neither the name of the University nor the names of its contributors may be
-   used to endorse or promote products derived from this software without
-   specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE FOR ANY
-DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
-(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
-LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
-ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
 ### sse-starlette 3.3.2
