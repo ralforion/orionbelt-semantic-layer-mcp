@@ -21,6 +21,10 @@ license texts are present inside the image too, at
 `/app/.venv/lib/python*/site-packages/*.dist-info/licenses/`, alongside
 `/app/LICENSE` and `/app/THIRD_PARTY_NOTICES.md`.
 
+One exception: `dnspython` ships no license file of its own — upstream omits
+it from the wheel — so inside the image this file is the only copy of its
+terms. Its text is reproduced below from the project's own repository.
+
 Apache-2.0's terms carry no copyright holder and are byte-identical wherever
 they appear, so the packages under them point at [Appendix
 A](#appendix-a--apache-license-20) instead of repeating ~10 KB each. Whatever
@@ -66,7 +70,7 @@ uv run --no-sync python scripts/third_party_notices.py
 | click | 8.3.1 | BSD-3-Clause | yes |
 | cryptography | 50.0.1 | Apache-2.0 OR BSD-3-Clause | yes |
 | cyclopts | 4.6.0 | Apache-2.0 | yes |
-| dnspython | 2.8.0 | ISC License (ISCL) | yes |
+| dnspython | 2.9.0 | ISC | yes |
 | docstring-parser | 0.17.0 | MIT License | yes |
 | docutils | 0.22.4 | Public Domain OR BSD License OR GNU General Public License (GPL) ⚠️ | yes |
 | email-validator | 2.3.0 | The Unlicense (Unlicense) | yes |
@@ -80,7 +84,7 @@ uv run --no-sync python scripts/third_party_notices.py
 | httpx | 0.28.1 | BSD License | yes |
 | httpx2 | 2.13.0 | BSD-3-Clause | yes |
 | idna | 3.19 | BSD-3-Clause | yes |
-| joserfc | 1.6.8 | BSD License | yes |
+| joserfc | 1.7.6 | BSD License | yes |
 | jsonref | 1.1.0 | MIT | yes |
 | jsonschema | 4.26.0 | MIT | yes |
 | jsonschema-path | 0.4.4 | Apache Software License | yes |
@@ -1185,9 +1189,9 @@ APPENDIX: How to apply the Apache License to your work.
    limitations under the License.
 ```
 
-### dnspython 2.8.0
+### dnspython 2.9.0
 
-*LICENSE*
+*dnspython.txt (vendored)*
 
 ```text
 ISC License
@@ -1761,7 +1765,7 @@ NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### joserfc 1.6.8
+### joserfc 1.7.6
 
 *LICENSE*
 
