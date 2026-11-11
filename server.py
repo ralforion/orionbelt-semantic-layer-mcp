@@ -274,6 +274,8 @@ _DESIGN_TOOLS: frozenset[str] = frozenset(
         "get_obml_reference",
         "get_function_catalog",
         "list_dialects",
+        # configured data sources, for defaultDataSource / dataSource (API 3.0)
+        "list_datasources",
     }
 )
 
@@ -772,6 +774,11 @@ def _parse_error_detail(response: httpx.Response) -> str:
     Also handles the top-level ``{message, errors, warnings}`` envelope the
     API uses for ``UNKNOWN_PROPERTY`` (Pydantic ``extra="forbid"`` 422s) —
     no ``detail`` wrapper there, so we promote the body itself.
+
+    Each nested error is rendered whole — ``path``, ``context``, ``hint`` and
+    the did-you-mean ``suggestions`` — one per line. Since API 3.0 every
+    compile refusal and model-load error carries them, so an agent can correct
+    a refused query from the error alone instead of guessing.
     """
     try:
         body = response.json()
@@ -789,16 +796,23 @@ def _parse_error_detail(response: httpx.Response) -> str:
                 tag = aggregation or grouping
                 kind = "aggregation" if aggregation else "grouping"
                 message = f"{message} ({kind}={tag!r}, dialect={dialect!r})"
-            # Nested error list (ResolutionError, SQLTranslationError, ...)
+            # Nested error list (ResolutionError, FanoutError, SQLTranslationError,
+            # model validation, UNKNOWN_PROPERTY).
             errors = detail.get("errors")
             if isinstance(errors, list) and errors:
-                parts = [
-                    f"{e.get('code', '?')}: {e.get('message', '?')}"
+                rendered = [
+                    _format_warning({"severity": "error", **e})
                     for e in errors
                     if isinstance(e, dict)
                 ]
-                if parts:
-                    message = f"{message} — {'; '.join(parts)}"
+                if rendered:
+                    header = str(detail.get("error") or message)
+                    # A model-load 422 repeats every error on its one-line
+                    # ``message`` ("Invalid OBML model: [CODE] ... Hint: ..."),
+                    # which the list below renders again: keep the lead-in only.
+                    if not detail.get("error") and ": [" in header:
+                        header = header.split(": [", 1)[0]
+                    message = "\n".join([header, *(f"  {r}" for r in rendered)])
             return str(message)
         return str(detail)
     except (ValueError, json.JSONDecodeError):
@@ -1168,6 +1182,35 @@ def list_dialects() -> str:
     return "\n".join(lines)
 
 
+@mcp.tool(title="List Data Sources", annotations=_READ_ONLY)
+def list_datasources() -> str:
+    """List the configured data sources a model can run on (API 3.0).
+
+    A model picks one with ``settings.defaultDataSource``; a data object may
+    name its own with ``dataSource``, and a query reading data objects of
+    several sources is then answered across them (federated). A model naming
+    none runs on the sole data source of its dialect. ``load_model``'s
+    ``datasource`` overrides the model's choice for that load.
+
+    Shows each source's name, dialect, description and the database, catalog,
+    schema or project it reads — never a host, user, password or token.
+    """
+    resp = _api_request("GET", f"{_API_V1}/datasources", retry_on_expired=False)
+    sources = _parse_json(resp).get("datasources") or []
+    if not sources:
+        return "No data sources are configured on the API."
+    lines = ["Configured data sources:", ""]
+    for s in sources:
+        head = f"  {s.get('name', '?')} ({s.get('dialect', '?')})"
+        if s.get("description"):
+            head += f" — {s['description']}"
+        lines.append(head)
+        target = s.get("target") or {}
+        if target:
+            lines.append("      reads: " + ", ".join(f"{k}={v}" for k, v in target.items()))
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Implementation functions (shared logic for both modes)
 # ---------------------------------------------------------------------------
@@ -1415,6 +1458,11 @@ def _impl_describe_model(model_id: str | None = None) -> str:
         lines.append(f"  {obj_name}  (code: {obj.get('code', '?')})")
         if obj.get("description"):
             lines.append(f"    description: {obj['description']}")
+        # API 3.0: the data source the object's table is read from, when it
+        # names its own (``dataSource``); else the model's defaultDataSource.
+        data_source = _aliased(obj, "dataSource", "data_source")
+        if data_source:
+            lines.append(f"    data source: {data_source}")
         # SchemaResponse: columns is list[ColumnDetail dict]; describe: list[str]
         cols = obj.get("columns", [])
         # A column's held grain (API 2.35, ColumnDetail.grain) refuses finer
@@ -1551,6 +1599,8 @@ def _impl_describe_model(model_id: str | None = None) -> str:
         lines.append("SETTINGS:")
         for label, alias, snake in (
             ("defaultDialect", "defaultDialect", "default_dialect"),
+            # API 3.0: the configured data source (list_datasources) queries run on.
+            ("defaultDataSource", "defaultDataSource", "default_data_source"),
             ("defaultNumericDataType", "defaultNumericDataType", "default_numeric_data_type"),
             ("defaultTimezone", "defaultTimezone", "default_timezone"),
             ("defaultLocale", "defaultLocale", "default_locale"),
@@ -2074,6 +2124,7 @@ def _impl_load_model(
     extends: list[dict] | str | None,
     inherits: str | None,
     dedup: bool,
+    datasource: str | None = None,
 ) -> str:
     """Load a model and render the load summary (shared implementation)."""
     if not model:
@@ -2097,6 +2148,10 @@ def _impl_load_model(
         body["extends_json"] = extends
     if inherits:
         body["inherits"] = inherits
+    # Sent whenever given, "" included: the API refuses an empty name (422), where
+    # dropping it would load on the model's own data source instead.
+    if datasource is not None:
+        body["datasource"] = datasource
     resp = _session_request("POST", "/models", json_body=body)
     data = _parse_json(resp)
     return _render_load_result(data)
@@ -2809,7 +2864,10 @@ def _render_lineage(data: dict, title: str) -> str:
         lines.append(f"{header}:")
         for n in members:
             detail = f"  ({n['detail']})" if n.get("detail") else ""
-            lines.append(f"  {n.get('name', '?')}{detail}")
+            # API 3.0: a data object names the data source its table is read
+            # from, so a query across sources shows which table comes from where.
+            source = f"  [source: {n['data_source']}]" if n.get("data_source") else ""
+            lines.append(f"  {n.get('name', '?')}{detail}{source}")
     if edges:
         lines.append("")
         lines.append("Edges (source feeds target):")
@@ -3408,7 +3466,13 @@ def _register_model_tools() -> None:
         """Compile and execute a semantic query (QueryObject), returning SQL + results.
 
         Pass ``query_json`` — a QueryObject as a JSON string. If no ``limit`` is set,
-        a server-side default row limit applies.
+        a server-side default row limit applies. Measures come back in the order
+        the query selects them (API 3.0). A query reading data objects of several
+        data sources is answered across them: the response's ``federation`` lists
+        each source's query, and ``sql`` is the DuckDB query combining them.
+
+        A refused query fails with every error's code, ``hint`` and did-you-mean
+        suggestions: correct the query from them and retry.
 
         Args:
             query_json: Complete QueryObject as a JSON string: a ``select`` of
@@ -3423,7 +3487,9 @@ def _register_model_tools() -> None:
             output_format: Response format — "json" (default) or "tsv".
             format_values: Format numeric cells as display strings.
             locale: BCP-47 locale for number formatting (e.g. "de").
-            timezone: IANA timezone (e.g. "Europe/Berlin").
+            timezone: IANA timezone (e.g. "Europe/Berlin") labelling result
+                timestamps that carry none. A model's ``settings.queryTimezone``
+                wins over it: its timestamps are wall-clock times in that zone.
         """
         return _impl_execute_query(
             _resolve_model_id(model_id),
@@ -3470,10 +3536,12 @@ def _register_model_tools() -> None:
                     tables and columns the model declares. Default false — offline
                     validation opens no connection.
                 dialect: Datasource to probe when ``online`` is set; defaults to
-                    the server's ``DB_VENDOR``. This names a *connection to open*,
-                    not SQL to generate, so unlike the ``dialect`` on the query
-                    tools it does not fall back to the model's
-                    ``settings.defaultDialect``. Ignored when ``online`` is false.
+                    the dialect of the data source the model names
+                    (``settings.defaultDataSource``), then the server's
+                    ``DB_VENDOR``. This names a *connection to open*, not SQL to
+                    generate, so unlike the ``dialect`` on the query tools it
+                    does not fall back to the model's ``settings.defaultDialect``.
+                    Ignored when ``online`` is false.
 
             ``extends`` / ``inherits`` are absent by design: the stateless
             /validate route this mode uses ignores both, so offering them would
@@ -3520,10 +3588,12 @@ def _register_model_tools() -> None:
                     tables and columns the model declares. Default false — offline
                     validation opens no connection.
                 dialect: Datasource to probe when ``online`` is set; defaults to
-                    the server's ``DB_VENDOR``. This names a *connection to open*,
-                    not SQL to generate, so unlike the ``dialect`` on the query
-                    tools it does not fall back to the model's
-                    ``settings.defaultDialect``. Ignored when ``online`` is false.
+                    the dialect of the data source the model names
+                    (``settings.defaultDataSource``), then the server's
+                    ``DB_VENDOR``. This names a *connection to open*, not SQL to
+                    generate, so unlike the ``dialect`` on the query tools it
+                    does not fall back to the model's ``settings.defaultDialect``.
+                    Ignored when ``online`` is false.
             """
             return _impl_validate_model(model, model_yaml, extends, inherits, online, dialect)
 
@@ -3557,6 +3627,7 @@ def _register_model_tools() -> None:
         extends: list[dict] | str | None = None,
         inherits: str | None = None,
         dedup: bool = True,
+        datasource: str | None = None,
     ) -> str:
         """Load a semantic model and return a model_id.
 
@@ -3582,15 +3653,27 @@ def _register_model_tools() -> None:
                 data objects and joins the child inherits (OBML source only).
             dedup: When true (default), reuse the model_id of identical OBML
                 already loaded in the session. Pass false to force a fresh load.
+            datasource: Optional name of a configured data source (see
+                ``list_datasources``) to run this model's queries on, replacing
+                its ``settings.defaultDataSource``. The same model loaded with
+                another data source is another model, with its own model_id.
+                Where the API executes queries, an unknown name or one of
+                another dialect fails the load (``DATA_SOURCE_UNAVAILABLE``,
+                with did-you-mean suggestions). OBML source only.
         """
         if osi_yaml is not None:
-            if model is not None or extends is not None or inherits is not None:
+            if (
+                model is not None
+                or extends is not None
+                or inherits is not None
+                or datasource is not None
+            ):
                 raise ToolError(
                     "Provide exactly one source: 'osi_yaml' cannot be combined "
-                    "with 'model', 'extends', or 'inherits'."
+                    "with 'model', 'extends', 'inherits', or 'datasource'."
                 )
             return _impl_load_model_from_osi(osi_yaml, dedup)
-        return _impl_load_model(model, extends, inherits, dedup)
+        return _impl_load_model(model, extends, inherits, dedup, datasource)
 
     @mcp.tool(title="Remove Model", annotations=_SESSION_DELETE)
     def remove_model(model_id: str) -> str:
@@ -3673,7 +3756,10 @@ def _register_model_tools() -> None:
         "execute": true, "dialect": "snowflake"}``; ``id`` is optional (server
         auto-assigns ``q0``, ``q1``, …) and per-item ``execute``/``dialect``
         override the batch defaults. Per-query partial failure is the default;
-        ``fail_fast`` cancels the rest on first failure.
+        ``fail_fast`` cancels the rest on first failure. A failed query's
+        ``error`` carries its first error's ``hint``, ``suggestions`` and
+        ``context``, and ``errors`` lists every one (API 3.0): correct the
+        query from them. A query across data sources carries ``federation``.
 
         Args:
             queries: List of query items (see above).
@@ -3907,6 +3993,14 @@ A dimension, measure or metric may be selected only once per query
 (`DUPLICATE_DIMENSION` / `DUPLICATE_MEASURE`).  The same dimension at two
 grains is two columns (`Order Date:year` beside `Order Date:month`).
 
+## Column order
+
+The result's columns follow the select: the dimensions in their order, then
+the measures and metrics **in the order `select.measures` lists them** (OBSL
+3.0+; before, measures of independent facts came back grouped by fact,
+metrics over them after the rest, and `filterContext` measures last).  A
+numeric `orderBy` position (`"field": "3"`) counts columns in that order.
+
 ## Supported Dialects
 
 {dialects}
@@ -3934,7 +4028,8 @@ Metrics are queried by name like any measure.  The types are:
   the N before it, by the time dimension ascending — a three-row moving
   average that skips an empty month.  The time dimension must be selected
   (`WINDOW_TIME_DIMENSION_NOT_IN_SELECT`), and rollup / cube is refused
-  (`WINDOW_FRAME_NOT_SUPPORTED`).
+  (`WINDOW_FRAME_NOT_SUPPORTED`).  A NULL is ordered last, ranked up or
+  down, on every engine (OBSL 3.0+; before, its place was the engine's).
 - **Reaggregate** (OBSL 2.35+): a measure aggregated at a finer grain, then
   aggregated again — "average revenue per customer, by country".  The model
   names the `measure`, the `per` dimensions added for the first stage, and
@@ -4092,7 +4187,28 @@ Raw mode (``select.fields``) is **mutually exclusive** with
 - ``format``: ``"json"`` (default) or ``"tsv"`` (tab-separated text)
 - ``format_values``: Format numeric cells as locale-aware display strings
 - ``locale``: BCP-47 locale tag (e.g. ``"de"``, ``"en-US"``)
-- ``timezone``: IANA timezone (e.g. ``"Europe/Berlin"``)
+- ``timezone``: IANA timezone (e.g. ``"Europe/Berlin"``) labelling timestamps
+  that carry none.  A model's ``settings.queryTimezone`` wins over it (OBSL
+  3.0+): its timestamps are wall-clock times there, and "today" — for
+  ``current_date()`` and every ``relative`` filter — is counted in that zone.
+
+## Queries across data sources (OBSL 3.0+)
+
+A model's data objects may live in different databases: each names its own
+`dataSource`, else the model's `settings.defaultDataSource` applies
+(`describe_model` shows both).  A query reading several is written exactly
+as any other and answered across them: each source runs its part (a *leg*),
+and OBSL combines the legs' results in DuckDB.  The `execute_query` response
+then carries `federation` — each leg's `data_source`, `dialect`, `sql` and
+`data_objects` — while `sql` is the combining query and `dialect` is
+`duckdb`.
+
+Most query shapes work across sources.  What does not is refused at compile
+time with a `FEDERATION_*` code and a hint saying what to do instead (often:
+query each source's measures separately).  At run time a leg returning too
+many rows is `FEDERATION_LEG_TOO_LARGE` (filter it, or select fewer
+dimensions), and a server running its limit of federated queries answers
+`FEDERATION_BUSY` (HTTP 503: retry later).
 
 ## Default Dialect
 
@@ -4117,6 +4233,16 @@ deterministic:
 
 If you need pagination, always set an explicit `orderBy` and pair `limit`
 with `offset`.
+
+## When a query is refused
+
+Since OBSL 3.0 a refused query reports **every** error with what it takes to
+repair it: a stable `code`, the `path` in the query, a `hint` naming the fix,
+did-you-mean `suggestions` (names matched on names and synonyms), and
+structured `context`.  It also says when a name is in the wrong place (a
+dimension listed under measures, a measure filtered in `where`).  Compiling
+first and correcting on refusal is cheaper than checking every name up front:
+read the hint and suggestions, fix the query, and run it again.
 
 ## Tips
 
@@ -4346,12 +4472,30 @@ structurally perfect and still name a table that was dropped.
   could be probed.
   Fix: Configure the connection, or validate offline (`online=false`).
 - `DATASOURCE_UNSUPPORTED_DIALECT`: The `dialect` named for the probe has no
-  driver. Note this names a *connection to open*, defaulting to the server's
-  `DB_VENDOR` — not the model's `settings.defaultDialect`.
+  driver. Note this names a *connection to open*, defaulting to the dialect of
+  the data source the model names (`settings.defaultDataSource`), then the
+  server's `DB_VENDOR` — not the model's `settings.defaultDialect`.
   Fix: Pass a dialect the deployment is configured for; see `list_dialects()`.
 - `DATASOURCE_PROBE_FAILED`: The probe query itself errored for a reason that is
   neither a missing table nor a missing column (permissions, a timeout).
   Fix: Read the message — it carries the engine's own error.
+
+## Data Source Errors (load and execution, OBSL 3.0+)
+
+Note the underscore: `DATA_SOURCE_UNAVAILABLE` is not the online probe's
+`DATASOURCE_UNAVAILABLE` above.
+
+- `DATA_SOURCE_UNAVAILABLE`: The data source a model names
+  (`settings.defaultDataSource`, a data object's `dataSource`, or
+  `load_model(datasource=...)`) cannot run it. Where the API executes queries
+  the load itself fails (at `settings.defaultDataSource`); otherwise the query
+  does. `context.reason` says which case: `unknownSource` (with `suggestions`
+  for a misspelt name and the configured names in `context.dataSources`),
+  `dialectMismatch` (`context.sourceDialect` vs `context.dialect`),
+  `ambiguousSource` (several sources of the dialect and the model names none),
+  `invalidConfiguration` or `extensionOutdated` (server side).
+  Fix: Name a configured source of the model's dialect — see
+  `list_datasources()`.
 
 ## Reference Errors
 
@@ -4541,6 +4685,58 @@ references unknown column.
   (`search_values`, OBSL 2.36+): the dimension declares `valueSearch: false`;
   or a `search` term was given for a date/number dimension (omit it to get
   the range) or for a non-string dimension.
+
+Since OBSL 3.0 each of these carries a `hint`, did-you-mean `suggestions` and
+structured `context` where they apply; an unknown name also says when it is
+a measure listed as a dimension, the reverse, or a measure filtered in `where`.
+
+### Fanout refusals ("Query fanout detected")
+
+A join that repeats a measure's rows would inflate it, so the query is refused
+rather than answered wrong. Stable codes since OBSL 3.0 (`query/plan` reported
+`FANOUT_ERROR` before):
+
+- `FANOUT`: The selected dimensions force a join that repeats the measure's
+  rows. The context names the measure, the join and the dimensions forcing it.
+  Fix: Drop or change those dimensions, or set `"allowFanOut": true` if the
+  multiplication is intended.
+- `NESTED_FANOUT`: Two nested data objects (`nestedIn`) are unnested together,
+  repeating each one's elements per element of the other.
+  Fix: Query one nested object at a time, or set `allowFanOut: true`.
+- `GRAIN_DEDUP_UNSUPPORTED`: A measure needs deduplication per grain, but the
+  query combines it with something the rewrite cannot express (e.g. an
+  averaged total beside it).
+- `ANCHOR_NOT_CONFORMABLE`: An anchored measure reads a fact that shares no
+  join key with its anchor.
+  Fix: Join both to a common data object on the same columns, or anchor the
+  measure on an object that reaches the other fact.
+- `ANCHORED_FILTER_NOT_SUPPORTED`: An anchored measure's filter reads both the
+  conformed fact and the anchor's side.
+  Fix: Split it into a condition on each side.
+
+### Federation refusals (queries across data sources, OBSL 3.0+)
+
+Raised when a query reads data objects of several data sources in a shape the
+combine step cannot answer as one database would. Each has a hint.
+
+- `FEDERATION_UNSUPPORTED_QUERY` / `FEDERATION_UNSUPPORTED_FILTER` /
+  `FEDERATION_UNSUPPORTED_JOIN` / `FEDERATION_UNSUPPORTED_AGGREGATION` /
+  `FEDERATION_UNSUPPORTED_METRIC`: That query shape, filter, join (e.g.
+  many-to-many between sources), aggregation or metric is not supported
+  across sources.
+- `FEDERATION_MULTI_FACT`: The measures' facts cannot be combined across
+  sources in this shape.
+  Fix: Query each data source's measures separately.
+- `FEDERATION_MEASURE_ACROSS_SOURCES`: A measure reads a column computed from
+  another database.
+  Fix: Compute the column from the measure's own database.
+- `FEDERATION_LEG_TOO_LARGE` (at run time): A source's part of the query
+  returned more rows or memory than the server allows. The message names the
+  joins between sources that make it large.
+  Fix: Filter, join the sources on a column with fewer values, or select
+  fewer dimensions.
+- `FEDERATION_BUSY` (HTTP 503): The server is already running its limit of
+  federated queries. Fix: Retry later.
 
 ## Dialect Capability Errors (at query time)
 
