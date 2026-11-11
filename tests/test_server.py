@@ -3708,6 +3708,32 @@ def test_load_model_sends_datasource(mock_api: respx.MockRouter):
     assert "datasource" not in json.loads(route.calls[1].request.read())
 
 
+def test_load_model_sends_an_empty_datasource_for_the_api_to_refuse(mock_api: respx.MockRouter):
+    """``datasource=""`` reaches the API, which refuses it (min_length=1).
+
+    Dropped as falsy, it would load on the model's own data source instead of
+    reporting the invalid input.
+    """
+    _mock_create_session(mock_api)
+    route = mock_api.post("/v1/sessions/test-session-1/models").mock(
+        return_value=httpx.Response(
+            422,
+            json={
+                "detail": [
+                    {
+                        "type": "string_too_short",
+                        "loc": ["body", "datasource"],
+                        "msg": "String should have at least 1 character",
+                    }
+                ]
+            },
+        )
+    )
+    with pytest.raises(_ToolError, match=r"API error \(422\)"):
+        _registered_tool("load_model")(model={"version": 1.0, "dataObjects": {}}, datasource="")
+    assert json.loads(route.calls[0].request.read())["datasource"] == ""
+
+
 def test_load_model_unknown_datasource_surfaces_suggestions(mock_api: respx.MockRouter):
     """DATA_SOURCE_UNAVAILABLE's reason and did-you-mean reach the agent."""
     _mock_create_session(mock_api)

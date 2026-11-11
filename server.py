@@ -2148,7 +2148,9 @@ def _impl_load_model(
         body["extends_json"] = extends
     if inherits:
         body["inherits"] = inherits
-    if datasource:
+    # Sent whenever given, "" included: the API refuses an empty name (422), where
+    # dropping it would load on the model's own data source instead.
+    if datasource is not None:
         body["datasource"] = datasource
     resp = _session_request("POST", "/models", json_body=body)
     data = _parse_json(resp)
