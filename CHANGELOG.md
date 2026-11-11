@@ -6,6 +6,72 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-11-11
+
+Tracks OrionBelt Semantic Layer API **v3.0.x**, which brings federated queries:
+a model's data objects can live in different databases, and a query reading
+several is answered across them. The MCP starts only against a 3.0 API.
+
+### Upgrading from 2.36
+
+The API changes some answers a 2.36 client got, and the MCP passes them
+through unchanged:
+
+- A query returns its measures in the order it selects them. Before, measures
+  of independent facts came back grouped by fact, metrics over them after the
+  rest, and measures with a `filterContext` last. A client reading columns by
+  position, or sorting by position (`"field": "3"`), now gets the select's order.
+- Window metrics (rank, row number, ntile, lag, lead, first and last value) put
+  NULL last, ranked up or down, on every engine.
+- A model with a `queryTimezone` counts "today" in that zone, for
+  `current_date()` and every `relative` filter, and labels result timestamps
+  with it; `execute_query`'s `timezone` no longer overrides that label.
+
+### Added
+
+- **`list_datasources`** (wraps `GET /v1/datasources`, API 3.0): the configured
+  data sources a model can run on, with name, dialect, description and the
+  database, catalog, schema or project each reads, never a host or credential.
+  Design-only tool beside `list_dialects`, for writing
+  `settings.defaultDataSource` or a data object's `dataSource`. Not gated on
+  `query_execute`: the API answers it either way. Tool counts: 27 single-model /
+  31 multi-model.
+- **`load_model(datasource=...)`**: runs the model's queries on a configured
+  data source, replacing its `settings.defaultDataSource`. The same model loaded
+  with another data source is another model, with its own `model_id`. OBML
+  source only; the OSI upload takes none, and combining it with `osi_yaml` is
+  refused.
+- `describe_model` shows the data source a data object names (`dataSource`),
+  and `defaultDataSource` in its SETTINGS block.
+- `get_lineage` names the data source of each data object (`[source: …]`), so
+  the lineage of a query across data sources shows which table comes from where.
+
+### Changed
+
+- **A refused query or model now tells the agent how to repair it.** API 3.0
+  returns a `hint`, did-you-mean `suggestions`, structured `context` and the
+  `path` for every compile refusal (`execute_query`, `search_values`,
+  `evaluate_rule(s)`, `get_lineage` of a query) and every model-load error. The tool error rendered each nested error as
+  `CODE: message` only and dropped all four. Each error is now one line with all
+  of them, under its header (`Query resolution failed`, `Query fanout
+  detected`, `Invalid OBML model`). A model-load error's one-line `message`,
+  which repeats every error, is no longer printed beside the list.
+- The `write_query` and `debug_validation` prompts cover API 3.0: queries across
+  data sources (the `federation` block, `FEDERATION_*` refusals,
+  `FEDERATION_LEG_TOO_LARGE`, `FEDERATION_BUSY`), the measures' column order,
+  NULL ordering in window metrics, `queryTimezone` over `timezone`, how to
+  correct a refused query from its hint and suggestions, the stable fanout codes
+  (`FANOUT`, `NESTED_FANOUT`, `GRAIN_DEDUP_UNSUPPORTED`,
+  `ANCHOR_NOT_CONFORMABLE`, `ANCHORED_FILTER_NOT_SUPPORTED`), and
+  `DATA_SOURCE_UNAVAILABLE` with its `context.reason`.
+- `validate_model`'s `online` probe defaults to the dialect of the model's
+  `settings.defaultDataSource`, then `DB_VENDOR` (docstrings updated).
+- `execute_query` and `run_batch` return the API's JSON as before, so the new
+  `federation` block and the batch error's `context`, `suggestions` and
+  `errors` reach the agent with no change here. The OBML and query JSON
+  schemas, which document `dataSource` and `defaultDataSource`, are served by
+  the API.
+
 ## [2.36.0] - 2026-10-26
 
 Tracks OrionBelt Semantic Layer API **v2.36.x**.

@@ -7,8 +7,8 @@
 
 <p align="center"><strong>Thin MCP server that delegates to the OrionBelt® Semantic Layer REST API</strong></p>
 
-[![Version 2.36.0](https://img.shields.io/badge/version-2.36.0-purple.svg)](https://github.com/ralforion/orionbelt-semantic-layer-mcp/releases)
-[![OrionBelt® Semantic Layer 2.36](https://img.shields.io/badge/OrionBelt_Semantic_Layer-2.36-0054A6.svg)](https://github.com/ralforion/orionbelt-semantic-layer)
+[![Version 3.0.0](https://img.shields.io/badge/version-3.0.0-purple.svg)](https://github.com/ralforion/orionbelt-semantic-layer-mcp/releases)
+[![OrionBelt® Semantic Layer 3.0](https://img.shields.io/badge/OrionBelt_Semantic_Layer-3.0-0054A6.svg)](https://github.com/ralforion/orionbelt-semantic-layer)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/ralforion/orionbelt-semantic-layer-mcp/blob/main/LICENSE)
 [![FastMCP](https://img.shields.io/badge/FastMCP-4.0+-8A2BE2)](https://gofastmcp.com)
@@ -51,7 +51,7 @@ The OrionBelt® Semantic Layer platform has two deployment modes. This MCP serve
 - **No business logic** — all tool calls delegate to the REST API (v1 endpoints)
 - **Dual-mode** — auto-detects single-model or multi-model API mode at startup
 - **Auto-session management** — creates an API session on first tool call, caches the ID (multi-model mode)
-- **26 tools** (single-model mode) or **30 tools** (multi-model mode) for querying (QueryObject), execution, batch, discovery, dimension-value search, composability (ACR), examples, diagrams, RDF/SPARQL, lineage of artefacts and queries, business rules (list, explain, evaluate), ontology links (concept mappings, namespaces, unmapped artefacts), OSI export, model validation (offline or against the live datasource), and OBML reference + function catalog + JSON schemas. (31 distinct tools exist in total; the API mode selects which subset is active — they overlap in 25 — and no client ever sees all 31 at once.) The visible surface is narrowed further in the design-time phase and when query execution is disabled (see [Design-time vs run-time tool switching](#design-time-vs-run-time-tool-switching))
+- **27 tools** (single-model mode) or **31 tools** (multi-model mode) for querying (QueryObject), execution, batch, discovery, dimension-value search, composability (ACR), examples, diagrams, RDF/SPARQL, lineage of artefacts and queries, business rules (list, explain, evaluate), ontology links (concept mappings, namespaces, unmapped artefacts), OSI export, model validation (offline or against the live datasource), and OBML reference + function catalog + JSON schemas + configured data sources. (32 distinct tools exist in total; the API mode selects which subset is active — they overlap in 26 — and no client ever sees all 32 at once.) The visible surface is narrowed further in the design-time phase and when query execution is disabled (see [Design-time vs run-time tool switching](#design-time-vs-run-time-tool-switching))
 - **5 prompts + 2 resources** for OBML / OBSQL reference, business rules, and usage guidance
 
 <p align="center">
@@ -224,7 +224,7 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 | MCP Tool                        | Description                                                      |
 | ------------------------------- | ---------------------------------------------------------------- |
 | `get_obml_reference()`          | Returns the full OBML format specification                       |
-| `load_model(model? \| osi_yaml?, dedup=True)` | Parse, validate, and store a model (returns health + model_load). Pass `model` (OBML JSON) **or** `osi_yaml` (OSI YAML, converted to OBML server-side) |
+| `load_model(model? \| osi_yaml?, dedup=True, datasource?)` | Parse, validate, and store a model (returns health + model_load). Pass `model` (OBML JSON) **or** `osi_yaml` (OSI YAML, converted to OBML server-side). `datasource` (OBML only) runs the model's queries on a configured data source, replacing its `settings.defaultDataSource` |
 | `validate_model(model? \| model_yaml?, extends?, inherits?, online=False, dialect?)` | Validate a model **without loading it**. `online=True` additionally probes the configured datasource for every declared table and column, reporting drift a structural check cannot see (`DATASOURCE_*`). `extends` / `inherits` are multi-model only — the stateless route single-model mode uses ignores both, so they are refused there rather than silently dropped |
 | `describe_model(model_id)`      | Inspect data objects, dimensions, measures, metrics              |
 | `remove_model(model_id)`        | Remove a model from the current session                          |
@@ -286,9 +286,10 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 
 ### Utilities
 
-| MCP Tool          | Description                                  |
-| ----------------- | -------------------------------------------- |
-| `list_dialects()` | List available SQL dialects and capabilities |
+| MCP Tool             | Description                                  |
+| -------------------- | -------------------------------------------- |
+| `list_dialects()`    | List available SQL dialects and capabilities |
+| `list_datasources()` | List the configured data sources a model can run on (name, dialect, what it reads — never credentials), for `settings.defaultDataSource`, a data object's `dataSource`, or `load_model(datasource=...)` |
 
 ## Design-time vs run-time tool switching
 
@@ -297,7 +298,7 @@ all tools at once, it shows only the tools that make sense for where you are in
 the model lifecycle. About half the tools are meaningless until a model is
 loaded (`execute_query`, `describe_model`, `find_artefacts`, …) and the rest are
 about authoring or reference (`get_obml_reference`, `get_function_catalog`,
-`get_json_schema`, `validate_model`, `list_dialects`). Splitting them keeps the surface small and prevents a
+`get_json_schema`, `validate_model`, `list_dialects`, `list_datasources`). Splitting them keeps the surface small and prevents a
 whole class of error — calling a query tool with no model loaded.
 
 ### Three buckets, swapped by phase
@@ -309,7 +310,7 @@ design/reference tools:
 | Bucket          | Listed when                 | Tools                                                                                                                                                                                                                                                                                             |
 | --------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Always**      | always (both phases)        | `load_model`, `remove_model` (transition verbs — stay available in the run phase so a second model can be loaded mid-session, up to `max_models_per_session`); `run_batch` and `validate_model` (self-contained — each takes its model inline, so neither needs prior session state); `get_json_schema` (QueryObject/OBML schemas — needed in both phases) |
-| **Design-only** | only when no model loaded   | `get_obml_reference`, `get_function_catalog`, `list_dialects`                                                                                                          |
+| **Design-only** | only when no model loaded   | `get_obml_reference`, `get_function_catalog`, `list_dialects`, `list_datasources`                                                                                      |
 | **Run-only**    | only when a model is loaded | `describe_model`, `get_model_diagram`, `find_artefacts`, `explain_artefact`, `search_values`, `get_lineage`, `execute_query`, `list_examples`, `get_example`, `get_model_graph`, `get_join_graph`, `find_composables`, `query_model_graph_by_sparql`, `list_rules`, `explain_rule`, `evaluate_rule`, `evaluate_rules`, `find_concept_mappings`, `list_concept_namespaces`, `list_unmapped_artefacts`, `list_models`, `export_model_to_osi` |
 
 ```

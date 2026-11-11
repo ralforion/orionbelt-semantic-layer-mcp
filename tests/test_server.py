@@ -385,6 +385,7 @@ def test_describe_model_with_data_types_and_settings(mock_api: respx.MockRouter)
             {
                 "name": "Orders",
                 "code": "ORDERS",
+                "data_source": "shop-eu",
                 "columns": [{"name": "Amount"}],
                 "join_targets": [],
                 "synonyms": [],
@@ -419,6 +420,7 @@ def test_describe_model_with_data_types_and_settings(mock_api: respx.MockRouter)
             200,
             json={
                 "model_settings": {
+                    "defaultDataSource": "warehouse",
                     "defaultNumericDataType": "decimal(18, 2)",
                     "defaultTimezone": "Europe/Zagreb",
                     "defaultLocale": "de-DE",
@@ -436,6 +438,9 @@ def test_describe_model_with_data_types_and_settings(mock_api: respx.MockRouter)
     assert "dataType: decimal(18, 4)" in result
     assert "dataType: decimal(18, 6)" in result
     assert "SETTINGS:" in result
+    # API 3.0: the object's own data source, and the model's default one.
+    assert "  Orders  (code: ORDERS)\n    data source: shop-eu\n" in result
+    assert "defaultDataSource: warehouse" in result
     assert "defaultNumericDataType: decimal(18, 2)" in result
     assert "defaultTimezone: Europe/Zagreb" in result
     assert "defaultLocale: de-DE" in result
@@ -795,6 +800,61 @@ def test_list_dialects(mock_api: respx.MockRouter):
     mysql_block = result.split(mysql_line, 1)[1]
     assert "supported aggregations: sum" in mysql_block
     assert "median" not in mysql_block
+
+
+# ---------------------------------------------------------------------------
+# list_datasources (API 3.0)
+# ---------------------------------------------------------------------------
+
+
+def test_list_datasources(mock_api: respx.MockRouter):
+    """list_datasources renders name, dialect, description and target."""
+    mock_api.get("/v1/datasources").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "datasources": [
+                    {
+                        "name": "shop-eu",
+                        "dialect": "mysql",
+                        "description": "EU web shop",
+                        "target": {"database": "shop_eu"},
+                    },
+                    {
+                        "name": "postgres",
+                        "dialect": "postgres",
+                        "description": None,
+                        "target": {"dbname": "analytics", "schema": "public"},
+                    },
+                    {"name": "duckdb", "dialect": "duckdb", "description": None, "target": {}},
+                ]
+            },
+        )
+    )
+
+    assert server.list_datasources() == (
+        "Configured data sources:\n"
+        "\n"
+        "  shop-eu (mysql) — EU web shop\n"
+        "      reads: database=shop_eu\n"
+        "  postgres (postgres)\n"
+        "      reads: dbname=analytics, schema=public\n"
+        "  duckdb (duckdb)"
+    )
+
+
+def test_list_datasources_none_configured(mock_api: respx.MockRouter):
+    mock_api.get("/v1/datasources").mock(return_value=httpx.Response(200, json={"datasources": []}))
+    assert server.list_datasources() == "No data sources are configured on the API."
+
+
+def test_list_datasources_misconfigured_is_a_tool_error(mock_api: respx.MockRouter):
+    """A 503 (sources not usable as written) surfaces the API's reason."""
+    mock_api.get("/v1/datasources").mock(
+        return_value=httpx.Response(503, json={"detail": "DB_SHOP_TYPE is missing"})
+    )
+    with pytest.raises(_ToolError, match=r"API error \(503\): DB_SHOP_TYPE is missing"):
+        server.list_datasources()
 
 
 def test_get_json_schema(mock_api: respx.MockRouter):
@@ -2111,9 +2171,11 @@ def test_resolution_error_appends_inner_errors():
     }
     resp = httpx.Response(422, json=body)
     detail = server._parse_error_detail(resp)
-    assert "Query resolution failed" in detail
-    assert "UNKNOWN_DIMENSION: No such dimension 'Foo'" in detail
-    assert "UNKNOWN_MEASURE: No such measure 'Bar'" in detail
+    assert detail == (
+        "Query resolution failed\n"
+        "  [error:UNKNOWN_DIMENSION] No such dimension 'Foo'\n"
+        "  [error:UNKNOWN_MEASURE] No such measure 'Bar'"
+    )
 
 
 def test_unknown_property_top_level_envelope():
@@ -2131,8 +2193,98 @@ def test_unknown_property_top_level_envelope():
     }
     resp = httpx.Response(422, json=body)
     detail = server._parse_error_detail(resp)
-    assert "Request contains unknown properties" in detail
-    assert "UNKNOWN_PROPERTY: Unknown property 'filtter' at where.0" in detail
+    assert detail.startswith("Request contains unknown properties\n")
+    assert "[error:UNKNOWN_PROPERTY] Unknown property 'filtter' at where.0 (at where.0)" in detail
+
+
+def test_resolution_error_keeps_each_errors_repair():
+    """API 3.0: hint, did-you-mean suggestions, context and path reach the agent."""
+    body = {
+        "detail": {
+            "error": "Query resolution failed",
+            "errors": [
+                {
+                    "code": "UNKNOWN_MEASURE",
+                    "message": "Unknown measure 'Customer Country'",
+                    "path": "select.measures",
+                    "severity": "error",
+                    "hint": "'Customer Country' is a dimension: list it under select.dimensions.",
+                    "context": {"measure": "Customer Country"},
+                    "suggestions": [],
+                },
+                {
+                    "code": "UNKNOWN_DIMENSION",
+                    "message": "Unknown dimension 'Regoin'",
+                    "path": "select.dimensions",
+                    "severity": "error",
+                    "suggestions": ["Region"],
+                },
+            ],
+        }
+    }
+    with pytest.raises(_ToolError) as exc_info:
+        server._raise_api_error(httpx.Response(422, json=body))
+    assert str(exc_info.value) == (
+        "API error (422): Query resolution failed\n"
+        "  [error:UNKNOWN_MEASURE] Unknown measure 'Customer Country' (at select.measures)"
+        " [measure=Customer Country]"
+        " — hint: 'Customer Country' is a dimension: list it under select.dimensions.\n"
+        "  [error:UNKNOWN_DIMENSION] Unknown dimension 'Regoin' (at select.dimensions)"
+        " — did you mean: Region?"
+    )
+
+
+def test_model_load_error_is_not_repeated_from_its_one_line_message():
+    """A model-load 422 repeats each error on ``message``; it is rendered once."""
+    body = {
+        "detail": {
+            "message": (
+                "Invalid OBML model: [UNKNOWN_DATA_OBJECT] Dimension 'Customer Country' "
+                "references unknown data object 'Customer' (at dimensions.Customer Country) "
+                "Did you mean 'Customers'?"
+            ),
+            "errors": [
+                {
+                    "code": "UNKNOWN_DATA_OBJECT",
+                    "message": "Dimension 'Customer Country' references unknown data object "
+                    "'Customer'",
+                    "path": "dimensions.Customer Country",
+                    "severity": "error",
+                    "suggestions": ["Customers"],
+                }
+            ],
+            "warnings": [],
+        }
+    }
+    detail = server._parse_error_detail(httpx.Response(422, json=body))
+    assert detail == (
+        "Invalid OBML model\n"
+        "  [error:UNKNOWN_DATA_OBJECT] Dimension 'Customer Country' references unknown data "
+        "object 'Customer' (at dimensions.Customer Country) — did you mean: Customers?"
+    )
+
+
+def test_fanout_refusal_renders_its_errors():
+    """API 3.0 fanout 422s carry a stable code and context beside ``message``."""
+    body = {
+        "detail": {
+            "error": "Query fanout detected",
+            "message": "Measure 'Revenue' would be repeated by the join to Items",
+            "errors": [
+                {
+                    "code": "FANOUT",
+                    "message": "Measure 'Revenue' would be repeated by the join to Items",
+                    "severity": "error",
+                    "context": {"measure": "Revenue", "dimensions": ["Item SKU"]},
+                }
+            ],
+        }
+    }
+    detail = server._parse_error_detail(httpx.Response(422, json=body))
+    assert detail.startswith("Query fanout detected\n  [error:FANOUT] Measure 'Revenue'")
+    assert "[measure=Revenue, dimensions=['Item SKU']]" in detail
+    # The message is the error's own: rendered once, from the list.
+    assert detail.count("would be repeated") == 1
 
 
 def test_connect_error_raises_tool_error(monkeypatch):
@@ -2949,7 +3101,7 @@ def test_tool_phase_buckets_are_disjoint():
     # Spot-check canonical assignments from the spec.
     # run_batch and get_json_schema are always-on (both phases).
     assert {"load_model", "remove_model", "run_batch", "get_json_schema"} <= b1
-    assert {"get_obml_reference", "get_function_catalog", "list_dialects"} <= b2
+    assert {"get_obml_reference", "get_function_catalog", "list_dialects", "list_datasources"} <= b2
     assert {"describe_model", "execute_query", "find_artefacts"} <= b3
 
 
@@ -3524,6 +3676,74 @@ def test_load_model_rejects_osi_combined_with_obml_args():
         load_model(osi_yaml="name: m\n", model={"version": "1.0"})
 
 
+def test_load_model_rejects_osi_combined_with_datasource():
+    """The OSI upload takes no data source (API 3.0 added it to the OBML load only)."""
+    load_model = _registered_tool("load_model")
+    with pytest.raises(_ToolError, match="'datasource'"):
+        load_model(osi_yaml="name: m\n", datasource="shop-eu")
+
+
+def test_load_model_sends_datasource(mock_api: respx.MockRouter):
+    """``datasource`` reaches the API (API 3.0) and is omitted when unset."""
+    _mock_create_session(mock_api)
+    route = mock_api.post("/v1/sessions/test-session-1/models").mock(
+        return_value=httpx.Response(
+            201,
+            json={
+                "model_id": "m003",
+                "data_objects": 1,
+                "dimensions": 0,
+                "measures": 0,
+                "metrics": 0,
+                "warnings": [],
+                "model_load": "fresh",
+            },
+        )
+    )
+
+    _registered_tool("load_model")(model={"version": 1.0, "dataObjects": {}}, datasource="shop-eu")
+    _registered_tool("load_model")(model={"version": 1.0, "dataObjects": {}})
+
+    assert json.loads(route.calls[0].request.read())["datasource"] == "shop-eu"
+    assert "datasource" not in json.loads(route.calls[1].request.read())
+
+
+def test_load_model_unknown_datasource_surfaces_suggestions(mock_api: respx.MockRouter):
+    """DATA_SOURCE_UNAVAILABLE's reason and did-you-mean reach the agent."""
+    _mock_create_session(mock_api)
+    mock_api.post("/v1/sessions/test-session-1/models").mock(
+        return_value=httpx.Response(
+            422,
+            json={
+                "detail": {
+                    "message": "Invalid OBML model: [DATA_SOURCE_UNAVAILABLE] Data source "
+                    "'shop-ue' is not configured (at settings.defaultDataSource) "
+                    "Did you mean 'shop-eu'?",
+                    "errors": [
+                        {
+                            "code": "DATA_SOURCE_UNAVAILABLE",
+                            "message": "Data source 'shop-ue' is not configured",
+                            "path": "settings.defaultDataSource",
+                            "severity": "error",
+                            "context": {"reason": "unknownSource"},
+                            "suggestions": ["shop-eu"],
+                        }
+                    ],
+                    "warnings": [],
+                }
+            },
+        )
+    )
+    with pytest.raises(_ToolError) as exc_info:
+        _registered_tool("load_model")(
+            model={"version": 1.0, "dataObjects": {}}, datasource="shop-ue"
+        )
+    msg = str(exc_info.value)
+    assert msg.startswith("API error (422): Invalid OBML model\n")
+    assert "[reason=unknownSource]" in msg
+    assert msg.endswith("— did you mean: shop-eu?")
+
+
 # ---------------------------------------------------------------------------
 # export_model_to_osi
 # ---------------------------------------------------------------------------
@@ -4044,14 +4264,14 @@ def _tools_in_fresh_module(single: bool) -> list:
 
 
 def test_registered_tool_counts_are_what_the_readme_claims():
-    """26 single-model / 30 multi-model / 31 distinct / 25 shared."""
+    """27 single-model / 31 multi-model / 32 distinct / 26 shared."""
     single = _tool_names_in_fresh_module(True)
     multi = _tool_names_in_fresh_module(False)
 
-    assert len(single) == 26
-    assert len(multi) == 30
-    assert len(single | multi) == 31
-    assert len(single & multi) == 25
+    assert len(single) == 27
+    assert len(multi) == 31
+    assert len(single | multi) == 32
+    assert len(single & multi) == 26
     assert single - multi == {"get_model"}
     assert "validate_model" in single & multi
 
@@ -5074,6 +5294,45 @@ def test_get_lineage_with_kind_renders_nodes_and_edges(mock_api: respx.MockRoute
     assert "column:Orders.Amount -> measure:Total Revenue  [expression]" in out
     # Measures come before columns, columns before tables.
     assert out.index("Measures:") < out.index("Columns:") < out.index("Data objects")
+
+
+def test_get_lineage_names_each_data_objects_source(mock_api: respx.MockRouter):
+    """API 3.0: a data object node names its data source; other nodes have none."""
+    _mock_create_session(mock_api)
+    lineage = {
+        "root": "query",
+        "nodes": [
+            {
+                "id": "data_object:Orders",
+                "kind": "data_object",
+                "name": "Orders",
+                "detail": "SHOP.ORDERS",
+                "data_source": "shop",
+            },
+            {
+                "id": "data_object:Customers",
+                "kind": "data_object",
+                "name": "Customers",
+                "detail": "CRM.CUSTOMERS",
+                "data_source": "crm",
+            },
+            {
+                "id": "measure:Revenue",
+                "kind": "measure",
+                "name": "Revenue",
+                "detail": "sum",
+                "data_source": None,
+            },
+        ],
+        "edges": [],
+    }
+    mock_api.get(f"{_SESSION_MODEL}/measures/Revenue/lineage").mock(
+        return_value=httpx.Response(200, json=lineage)
+    )
+    out = server._impl_get_lineage("m001", "Revenue", "measure", None, None, "text")
+    assert "  Orders  (SHOP.ORDERS)  [source: shop]" in out
+    assert "  Customers  (CRM.CUSTOMERS)  [source: crm]" in out
+    assert "  Revenue  (sum)\n" in out
 
 
 def test_get_lineage_probes_kinds_and_reports_every_match(mock_api: respx.MockRouter):
