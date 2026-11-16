@@ -1,5 +1,5 @@
 # --- Build stage: install dependencies ---
-FROM python:3.14-slim AS builder
+FROM python:3.15-slim AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1
 
@@ -23,7 +23,7 @@ RUN uv sync --no-dev --no-editable --frozen
 COPY THIRD_PARTY_NOTICES.md /app/THIRD_PARTY_NOTICES.md
 
 # --- Runtime stage: minimal image ---
-FROM python:3.14-slim
+FROM python:3.15-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
