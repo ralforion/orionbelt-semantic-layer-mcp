@@ -37,7 +37,7 @@ import threading
 import zlib
 from collections.abc import Callable
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone
 from datetime import time as dt_time
 from decimal import Decimal
 from pathlib import Path
@@ -1824,18 +1824,174 @@ def _nanosecond_cells(column: Any, tz: ZoneInfo | None) -> list[Any]:
     return cells
 
 
+def _is_nano_temporal(arrow_type: Any) -> bool:
+    """A timestamp, time or duration counted in nanoseconds."""
+    import pyarrow as pa
+
+    types = pa.types
+    return (
+        types.is_timestamp(arrow_type)
+        or types.is_time64(arrow_type)
+        or types.is_duration(arrow_type)
+    ) and arrow_type.unit == "ns"
+
+
+def _nanos_as_int64(arrow_type: Any) -> Any:
+    """``arrow_type`` with every nanosecond temporal in it read as ``int64``.
+
+    ``None`` when a nested type (list, struct, map) holds none, so the plain
+    ``to_pylist()`` path applies.
+    """
+    import pyarrow as pa
+
+    types = pa.types
+    if _is_nano_temporal(arrow_type):
+        return pa.int64()
+    if types.is_map(arrow_type):
+        key, item = _nanos_as_int64(arrow_type.key_type), _nanos_as_int64(arrow_type.item_type)
+        if key is None and item is None:
+            return None
+        return pa.map_(
+            arrow_type.key_field.with_type(key or arrow_type.key_type),
+            arrow_type.item_field.with_type(item or arrow_type.item_type),
+            arrow_type.keys_sorted,
+        )
+    if types.is_list(arrow_type) or types.is_large_list(arrow_type):
+        child = _nanos_as_int64(arrow_type.value_type)
+        if child is None:
+            return None
+        field = arrow_type.value_field.with_type(child)
+        return pa.large_list(field) if types.is_large_list(arrow_type) else pa.list_(field)
+    if types.is_fixed_size_list(arrow_type):
+        child = _nanos_as_int64(arrow_type.value_type)
+        if child is None:
+            return None
+        return pa.list_(arrow_type.value_field.with_type(child), arrow_type.list_size)
+    if types.is_struct(arrow_type):
+        fields = [arrow_type.field(i) for i in range(arrow_type.num_fields)]
+        children = [_nanos_as_int64(f.type) for f in fields]
+        if all(c is None for c in children):
+            return None
+        return pa.struct(
+            [f if c is None else f.with_type(c) for f, c in zip(fields, children, strict=True)]
+        )
+    return None
+
+
+class _PandasRepr:
+    """A nested cell's value that prints as the pandas object the API printed.
+
+    A list or struct cell reaches the API's JSON as Python's ``str`` of the
+    value, and with pandas installed pyarrow hands a nanosecond timestamp or
+    duration inside it over as ``pandas.Timestamp`` / ``Timedelta``. This
+    stands in for one so ``str()`` of the cell reads the same, every digit kept.
+    """
+
+    __slots__ = ("_text",)
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def __repr__(self) -> str:
+        return self._text
+
+
+_UTC_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+_FIXED_OFFSET_RE = re.compile(r"^([+-])(\d\d):(\d\d)$")
+
+
+def _nested_nano_value(raw: int, arrow_type: Any) -> Any:
+    """One nanosecond temporal inside a nested cell, from its ``int64``.
+
+    As pandas writes it: ``Timestamp('2025-01-02 03:04:05.123456789')``
+    (zone-aware ``...+0100', tz='Europe/Berlin')``, a fixed offset labelled
+    ``pytz.FixedOffset(60)``), ``Timedelta('-1 days +23:59:59.999999999')``;
+    a time is a ``datetime.time`` cut to the microsecond, as pyarrow gives it.
+    """
+    import pyarrow as pa
+
+    if pa.types.is_time64(arrow_type):
+        micros = raw // 1000
+        hours, micros = divmod(micros, 3_600_000_000)
+        minutes, micros = divmod(micros, 60_000_000)
+        seconds, micros = divmod(micros, 1_000_000)
+        return dt_time(hours, minutes, seconds, micros)
+    if pa.types.is_duration(arrow_type):
+        days, rest = divmod(raw, 86_400_000_000_000)
+        hours, rest = divmod(rest, 3_600_000_000_000)
+        minutes, rest = divmod(rest, 60_000_000_000)
+        seconds, rest = divmod(rest, 1_000_000_000)
+        text = f"{days} days{' +' if raw < 0 else ' '}{hours:02}:{minutes:02}:{seconds:02}"
+        if rest:
+            micro, nanos = divmod(rest, 1000)
+            text += f".{micro:06d}" + (f"{nanos:03d}" if nanos else "")
+        return _PandasRepr(f"Timedelta('{text}')")
+
+    micros, nanos = divmod(raw, 1000)
+    moment = _UTC_EPOCH + timedelta(microseconds=micros)
+    label = ""
+    if arrow_type.tz:
+        fixed = _FIXED_OFFSET_RE.match(arrow_type.tz)
+        if fixed:
+            sign, hh, mm = fixed.groups()
+            offset = (int(hh) * 60 + int(mm)) * (-1 if sign == "-" else 1)
+            moment = moment.astimezone(timezone(timedelta(minutes=offset)))
+            label = "UTC" if offset == 0 else f"pytz.FixedOffset({offset})"
+        else:
+            with contextlib.suppress(ZoneInfoNotFoundError, ValueError):
+                moment = moment.astimezone(ZoneInfo(arrow_type.tz))
+            label = arrow_type.tz
+    stamp = f"{moment.year}-{moment:%m-%d %H:%M:%S}"
+    if nanos:
+        stamp += f".{moment.microsecond:06d}{nanos:03d}"
+    elif moment.microsecond:
+        stamp += f".{moment.microsecond:06d}"
+    if not arrow_type.tz:
+        return _PandasRepr(f"Timestamp('{stamp}')")
+    return _PandasRepr(f"Timestamp('{stamp}{moment:%z}', tz='{label}')")
+
+
+def _nested_nanos(value: Any, arrow_type: Any) -> Any:
+    """Rebuild a nested cell read through :func:`_nanos_as_int64`."""
+    import pyarrow as pa
+
+    types = pa.types
+    if value is None:
+        return None
+    if _is_nano_temporal(arrow_type):
+        return _nested_nano_value(value, arrow_type)
+    if types.is_map(arrow_type):
+        return [
+            (_nested_nanos(k, arrow_type.key_type), _nested_nanos(v, arrow_type.item_type))
+            for k, v in value
+        ]
+    if types.is_list(arrow_type) or types.is_large_list(arrow_type):
+        return [_nested_nanos(v, arrow_type.value_type) for v in value]
+    if types.is_fixed_size_list(arrow_type):
+        return [_nested_nanos(v, arrow_type.value_type) for v in value]
+    if types.is_struct(arrow_type):
+        fields = [arrow_type.field(i) for i in range(arrow_type.num_fields)]
+        return {f.name: _nested_nanos(value.get(f.name), f.type) for f in fields}
+    return value
+
+
 def _arrow_column_cells(column: Any, tz: ZoneInfo | None) -> list[Any]:
     """Convert one Arrow column to JSON cells."""
     import pyarrow as pa
 
     types = pa.types
     arrow_type = column.type
-    if (
-        types.is_timestamp(arrow_type)
-        or types.is_time64(arrow_type)
-        or types.is_duration(arrow_type)
-    ) and arrow_type.unit == "ns":
+    if _is_nano_temporal(arrow_type):
         return _nanosecond_cells(column, tz)
+    if types.is_nested(arrow_type):
+        # A nanosecond temporal anywhere inside makes to_pylist() raise
+        # without pandas: read those leaves as int64 and rebuild them.
+        as_int64 = _nanos_as_int64(arrow_type)
+        if as_int64 is not None:
+            return [
+                _arrow_cell(_nested_nanos(value, arrow_type), tz)
+                for value in column.cast(as_int64).to_pylist()
+            ]
     values = column.to_pylist()
     if (
         types.is_integer(arrow_type)

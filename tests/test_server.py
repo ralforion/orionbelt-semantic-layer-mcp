@@ -919,6 +919,75 @@ def test_decode_arrow_result_nanoseconds_keep_every_digit():
     assert zoned["rows"] == [["2025-01-02T03:04:05.123456789+01:00"]]
 
 
+@pytest.mark.parametrize(
+    ("arrow_type", "values", "expected"),
+    [
+        pytest.param(
+            "list_ts_berlin",
+            [1735787045123456789, 1735787045123456000, 1735787045000000000],
+            "[Timestamp('2025-01-02 04:04:05.123456789+0100', tz='Europe/Berlin'), "
+            "Timestamp('2025-01-02 04:04:05.123456+0100', tz='Europe/Berlin'), "
+            "Timestamp('2025-01-02 04:04:05+0100', tz='Europe/Berlin')]",
+            id="zoned",
+        ),
+        pytest.param(
+            "list_ts_minus0530",
+            [1735787045123456789],
+            "[Timestamp('2025-01-01 21:34:05.123456789-0530', tz='pytz.FixedOffset(-330)')]",
+            id="fixed-offset",
+        ),
+        pytest.param(
+            "list_ts_plus0000",
+            [0],
+            "[Timestamp('1970-01-01 00:00:00+0000', tz='UTC')]",
+            id="zero-offset",
+        ),
+        pytest.param(
+            "list_duration",
+            [93_600_000_000_123, -1, -93_600_000_000_123, 1_500_000_000, 0],
+            "[Timedelta('1 days 02:00:00.000000123'), Timedelta('-1 days +23:59:59.999999999'), "
+            "Timedelta('-2 days +21:59:59.999999877'), Timedelta('0 days 00:00:01.500000'), "
+            "Timedelta('0 days 00:00:00')]",
+            id="durations",
+        ),
+        pytest.param(
+            "map_ts",
+            [("k", 1735787045123456789)],
+            "[('k', Timestamp('2025-01-02 03:04:05.123456789'))]",
+            id="map",
+        ),
+        pytest.param(
+            "fixed_list_time",
+            [3_723_123_456_789, 0],
+            "[datetime.time(1, 2, 3, 123456), datetime.time(0, 0)]",
+            id="time-cut-to-microsecond",
+        ),
+    ],
+)
+def test_decode_arrow_result_nested_nanoseconds(arrow_type: str, values: list, expected: str):
+    """A list, struct or map holding a nanosecond temporal made ``to_pylist()``
+    raise without pandas, failing the whole query. Such a cell reaches the
+    API's JSON as ``str()`` of the value pyarrow builds with pandas installed;
+    each expected text here is that output, taken from pandas itself.
+    ``nested_raw`` holds the same for real DuckDB list and struct columns."""
+    import pyarrow as pa
+
+    ns = pa.timestamp("ns")
+    types = {
+        "list_ts_berlin": pa.list_(pa.timestamp("ns", tz="Europe/Berlin")),
+        "list_ts_minus0530": pa.list_(pa.timestamp("ns", tz="-05:30")),
+        "list_ts_plus0000": pa.list_(pa.timestamp("ns", tz="+00:00")),
+        "list_duration": pa.large_list(pa.duration("ns")),
+        "map_ts": pa.map_(pa.string(), ns),
+        "fixed_list_time": pa.list_(pa.time64("ns"), 2),
+    }
+    table = pa.table({"c": pa.array([values, None], types[arrow_type])})
+
+    out = server._decode_arrow_result(_arrow_frame({}, table))
+
+    assert out["rows"] == [[expected], [None]]
+
+
 # ---------------------------------------------------------------------------
 # list_models (multi-model mode)
 # ---------------------------------------------------------------------------

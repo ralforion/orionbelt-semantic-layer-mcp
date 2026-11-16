@@ -1,0 +1,86 @@
+{
+  "sql": "SELECT\n  \"Nested\".\"id\" AS \"Nested.Id\",\n  \"Nested\".\"list_ns\" AS \"Nested.List Ns\",\n  \"Nested\".\"struct_ns\" AS \"Nested.Struct Ns\",\n  \"Nested\".\"list_us\" AS \"Nested.List Us\",\n  \"Nested\".\"struct_us\" AS \"Nested.Struct Us\",\n  \"Nested\".\"list_time_ns\" AS \"Nested.List Time Ns\"\nFROM \"t\".\"nested\" AS \"Nested\"\nORDER BY\n  \"Nested\".\"id\" ASC\nLIMIT 1000",
+  "dialect": "duckdb",
+  "columns": [
+    {
+      "name": "Nested.Id",
+      "type": "number",
+      "format": null
+    },
+    {
+      "name": "Nested.List Ns",
+      "type": "string",
+      "format": null
+    },
+    {
+      "name": "Nested.Struct Ns",
+      "type": "string",
+      "format": null
+    },
+    {
+      "name": "Nested.List Us",
+      "type": "string",
+      "format": null
+    },
+    {
+      "name": "Nested.Struct Us",
+      "type": "string",
+      "format": null
+    },
+    {
+      "name": "Nested.List Time Ns",
+      "type": "string",
+      "format": null
+    }
+  ],
+  "rows": [
+    [
+      1,
+      "[Timestamp('2025-01-02 03:04:05.123456789'), None, Timestamp('1969-12-31 23:59:58.999999999')]",
+      "{'at': Timestamp('2025-01-02 03:04:05.000000123'), 'n': 7}",
+      "[datetime.datetime(2025, 1, 2, 3, 4, 5, 123456)]",
+      "{'at': datetime.datetime(2025, 1, 2, 4, 4, 5, tzinfo=zoneinfo.ZoneInfo(key='Europe/Berlin')), 'd': Decimal('1.50')}",
+      "[datetime.time(1, 2, 3, 123456)]"
+    ],
+    [
+      2,
+      "[Timestamp('2025-01-02 03:04:05.123456')]",
+      null,
+      "[]",
+      null,
+      null
+    ]
+  ],
+  "row_count": 2,
+  "execution_time_ms": 10.74,
+  "timezone": "Europe/Zagreb",
+  "resolved": {
+    "fact_tables": [
+      "Nested"
+    ],
+    "dimensions": [],
+    "measures": []
+  },
+  "warnings": [],
+  "sql_valid": true,
+  "explain": {
+    "planner": "Raw",
+    "planner_reason": "Raw-mode projection of physical columns \u2014 no aggregation, no GROUP BY",
+    "base_object": "Nested",
+    "base_object_reason": "\"Nested\" selected as base for single-object query",
+    "joins": [],
+    "where_filter_count": 0,
+    "having_filter_count": 0,
+    "has_totals": false,
+    "cfl_legs": []
+  },
+  "physical_tables": [
+    "t.nested"
+  ],
+  "cached": false,
+  "cached_at": null,
+  "ttl_seconds": 300,
+  "ttl_source": "default_unknown",
+  "ttl_limiting_table": "t.nested",
+  "federation": null
+}

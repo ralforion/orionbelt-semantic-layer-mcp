@@ -19,6 +19,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Nanosecond timestamps, times and durations keep all nine fraction digits
   (`2025-01-02T03:04:05.123456789`). A timestamp reads as the API's JSON writes
   it; a time or duration keeps Python's text plus the digits below the microsecond.
+  Inside a list, struct or map they read as the API's JSON writes the cell
+  (`[Timestamp('2025-01-02 03:04:05.123456789')]`).
 - New runtime dependencies `pyarrow` and `tzdata` (both Apache-2.0); the
   Docker image grows by about 150 MB.
 
