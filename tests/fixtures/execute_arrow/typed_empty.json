@@ -1,0 +1,49 @@
+{
+  "sql": "SELECT\n  \"Typed\".\"dec\" AS \"Typed.Dec\",\n  \"Typed\".\"ts\" AS \"Typed.Ts\"\nFROM \"t\".\"typed\" AS \"Typed\"\nWHERE\n  \"Typed\".\"id\" = 99\nORDER BY\n  \"Typed.Dec\" ASC,\n  \"Typed.Ts\" ASC\nLIMIT 1000",
+  "dialect": "duckdb",
+  "columns": [
+    {
+      "name": "Typed.Dec",
+      "type": "number",
+      "format": "#,##0.00"
+    },
+    {
+      "name": "Typed.Ts",
+      "type": "datetime",
+      "format": null
+    }
+  ],
+  "rows": [],
+  "row_count": 0,
+  "execution_time_ms": 10.16,
+  "timezone": "Europe/Zagreb",
+  "resolved": {
+    "fact_tables": [
+      "Typed"
+    ],
+    "dimensions": [],
+    "measures": []
+  },
+  "warnings": [],
+  "sql_valid": true,
+  "explain": {
+    "planner": "Raw",
+    "planner_reason": "Raw-mode projection of physical columns \u2014 no aggregation, no GROUP BY",
+    "base_object": "Typed",
+    "base_object_reason": "\"Typed\" selected as base for single-object query",
+    "joins": [],
+    "where_filter_count": 1,
+    "having_filter_count": 0,
+    "has_totals": false,
+    "cfl_legs": []
+  },
+  "physical_tables": [
+    "t.typed"
+  ],
+  "cached": false,
+  "cached_at": null,
+  "ttl_seconds": 300,
+  "ttl_source": "default_unknown",
+  "ttl_limiting_table": "t.typed",
+  "federation": null
+}

@@ -1,0 +1,134 @@
+{
+  "sql": "SELECT\n  \"Typed\".\"id\" AS \"Typed.Id\",\n  \"Typed\".\"label\" AS \"Typed.Label\",\n  \"Typed\".\"dbl\" AS \"Typed.Dbl\",\n  \"Typed\".\"dec\" AS \"Typed.Dec\",\n  \"Typed\".\"d\" AS \"Typed.D\",\n  \"Typed\".\"ts\" AS \"Typed.Ts\",\n  \"Typed\".\"tstz\" AS \"Typed.Tstz\",\n  \"Typed\".\"tm\" AS \"Typed.Tm\",\n  \"Typed\".\"iv\" AS \"Typed.Iv\",\n  \"Typed\".\"bl\" AS \"Typed.Bl\",\n  \"Typed\".\"flag\" AS \"Typed.Flag\"\nFROM \"t\".\"typed\" AS \"Typed\"\nORDER BY\n  \"Typed\".\"id\" ASC\nLIMIT 1000",
+  "dialect": "duckdb",
+  "columns": [
+    {
+      "name": "Typed.Id",
+      "type": "number",
+      "format": null
+    },
+    {
+      "name": "Typed.Label",
+      "type": "string",
+      "format": null
+    },
+    {
+      "name": "Typed.Dbl",
+      "type": "number",
+      "format": "#,##0.00"
+    },
+    {
+      "name": "Typed.Dec",
+      "type": "number",
+      "format": "#,##0.00"
+    },
+    {
+      "name": "Typed.D",
+      "type": "datetime",
+      "format": null
+    },
+    {
+      "name": "Typed.Ts",
+      "type": "datetime",
+      "format": null
+    },
+    {
+      "name": "Typed.Tstz",
+      "type": "datetime",
+      "format": null
+    },
+    {
+      "name": "Typed.Tm",
+      "type": "datetime",
+      "format": null
+    },
+    {
+      "name": "Typed.Iv",
+      "type": "datetime",
+      "format": null
+    },
+    {
+      "name": "Typed.Bl",
+      "type": "binary",
+      "format": null
+    },
+    {
+      "name": "Typed.Flag",
+      "type": "boolean",
+      "format": null
+    }
+  ],
+  "rows": [
+    [
+      1,
+      "Z\u00fcrich \u2713",
+      3.5,
+      "1234567890123.45",
+      "2025-03-01",
+      "2025-03-01T12:30:00+01:00",
+      "2025-03-01T13:30:00+01:00",
+      "08:15:00",
+      "90 days, 0:00:00",
+      "3q0=",
+      true
+    ],
+    [
+      2,
+      null,
+      null,
+      null,
+      null,
+      "2025-07-01T00:00:00.123456+02:00",
+      null,
+      null,
+      "1 day, 2:00:00",
+      null,
+      null
+    ],
+    [
+      3,
+      "tab\there \"q\"",
+      null,
+      "-0.01",
+      "1999-12-31",
+      null,
+      "2025-12-31T23:59:59.500000+01:00",
+      "23:59:59.250000",
+      null,
+      "",
+      false
+    ]
+  ],
+  "row_count": 3,
+  "execution_time_ms": 36.75,
+  "timezone": "Europe/Zagreb",
+  "resolved": {
+    "fact_tables": [
+      "Typed"
+    ],
+    "dimensions": [],
+    "measures": []
+  },
+  "warnings": [],
+  "sql_valid": true,
+  "explain": {
+    "planner": "Raw",
+    "planner_reason": "Raw-mode projection of physical columns \u2014 no aggregation, no GROUP BY",
+    "base_object": "Typed",
+    "base_object_reason": "\"Typed\" selected as base for single-object query",
+    "joins": [],
+    "where_filter_count": 0,
+    "having_filter_count": 0,
+    "has_totals": false,
+    "cfl_legs": []
+  },
+  "physical_tables": [
+    "t.typed"
+  ],
+  "cached": true,
+  "cached_at": "2026-11-16T22:03:27.056634+01:00",
+  "ttl_seconds": 300,
+  "ttl_source": "default_unknown",
+  "ttl_limiting_table": "t.typed",
+  "federation": null
+}

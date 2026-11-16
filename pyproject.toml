@@ -23,7 +23,9 @@ classifiers = [
 dependencies = [
     "fastmcp>=4.0,<5",
     "httpx>=0.28,<1",
+    "pyarrow>=16.0,<27.0",
     "pydantic-settings>=2.12,<3",
+    "tzdata>=2025.1",
 ]
 
 [project.urls]

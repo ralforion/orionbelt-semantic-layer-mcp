@@ -22,20 +22,28 @@ Entrypoint for Prefect Horizon: ``server.py:mcp``
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import gzip
 import importlib.metadata
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 import ssl
 import threading
+import zlib
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+from datetime import date, datetime, timedelta
+from datetime import time as dt_time
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal, NoReturn
 from urllib.parse import quote, urlencode, urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from fastmcp import FastMCP
@@ -1657,6 +1665,191 @@ def _impl_describe_model(model_id: str | None = None) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Query results: fetched as the API's Arrow frame, returned as its JSON
+# ---------------------------------------------------------------------------
+#
+# ``execute_query`` asks the API for ``format=arrow`` and builds the JSON
+# response here, so turning rows into JSON is this server's work, not the
+# shared API's. On a result-cache hit the API then sends the stored bytes
+# without decoding them, where the JSON shape costs it a gunzip, an Arrow
+# decode and a per-cell conversion; the frame is also several times smaller
+# on the wire. Value-formatted and TSV results are still rendered by the API,
+# which needs the Python rows for those anyway.
+#
+# The frame is ``[u32 big-endian json_len][JSON envelope][gzip'd Arrow IPC
+# stream]``. The envelope is the JSON response minus ``rows``; the cells are
+# converted exactly as the API's JSON surface converts them
+# (``orionbelt.service.db_executor.arrow_to_rows`` + ``_serialize_value``,
+# then Pydantic's JSON encoding), so the tool returns what ``format=json``
+# would. ``tests/fixtures/execute_arrow`` holds frames recorded from a real
+# API beside its JSON for the same query, and the tests hold the two equal.
+
+_ARROW_RESULT_MEDIA_TYPE = "application/vnd.orionbelt.result+arrow"
+
+# Field order of the API's JSON ``QueryExecuteResponse``, so the output reads
+# the same as before (``sql`` first, ``rows`` after ``columns``). An envelope
+# field not listed here follows in the envelope's own order.
+_EXECUTE_RESPONSE_FIELDS = (
+    "sql",
+    "dialect",
+    "columns",
+    "rows",
+    "row_count",
+    "execution_time_ms",
+    "timezone",
+    "resolved",
+    "warnings",
+    "sql_valid",
+    "explain",
+    "physical_tables",
+    "cached",
+    "cached_at",
+    "ttl_seconds",
+    "ttl_source",
+    "ttl_limiting_table",
+    "federation",
+)
+
+# A numeric type name an Arrow extension type stores as text (ADBC's
+# PostgreSQL ``NUMERIC``), as the API's ``is_numeric_type_hint`` matches it.
+_NUMERIC_TYPE_TOKENS = ("number", "int", "float", "decimal", "numeric", "double", "real")
+
+
+def _arrow_text_numeric(arrow_type: Any) -> bool:
+    """An Arrow extension type wrapping a numeric SQL type as a string.
+
+    ADBC's PostgreSQL driver keeps ``NUMERIC`` beyond ``decimal128`` as
+    ``arrow.opaque[storage_type=string, type_name=numeric]``; the API parses
+    those cells to ``Decimal`` before serializing them, so this does too.
+    """
+    import pyarrow as pa
+
+    storage = getattr(arrow_type, "storage_type", None)
+    type_name = getattr(arrow_type, "type_name", None)
+    if storage is None or type_name is None or not pa.types.is_string(storage):
+        return False
+    if isinstance(type_name, bytes):
+        type_name = type_name.decode("utf-8", "ignore")
+    name = str(type_name).lower()
+    return any(token in name for token in _NUMERIC_TYPE_TOKENS)
+
+
+def _arrow_cell(value: Any, tz: ZoneInfo | None) -> Any:
+    """One cell as the API's JSON response carries it.
+
+    ``_serialize_value`` followed by Pydantic's JSON encoding: a naive
+    timestamp takes the result's zone, UTC is written ``Z``, a ``Decimal`` is
+    an exact string, bytes are base64, NaN and infinity are ``null``, and
+    anything else (intervals, lists, structs) is its ``str``.
+    """
+    if value is None or isinstance(value, str | int):  # bool is an int
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, datetime):
+        if value.tzinfo is None and tz is not None:
+            value = value.replace(tzinfo=tz)
+        text = value.isoformat()
+        return text[:-6] + "Z" if text.endswith("+00:00") else text
+    if isinstance(value, dt_time):
+        text = value.isoformat()
+        return text[:-7] if text.endswith(".000000") else text
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, bytes):
+        return base64.b64encode(value).decode("ascii")
+    return str(value)  # Decimal, timedelta, list, dict, …
+
+
+def _arrow_column_cells(arrow_type: Any, values: list[Any], tz: ZoneInfo | None) -> list[Any]:
+    """Convert one column's Python values (``to_pylist()``) to JSON cells."""
+    import pyarrow as pa
+
+    types = pa.types
+    if (
+        types.is_integer(arrow_type)
+        or types.is_boolean(arrow_type)
+        or types.is_string(arrow_type)
+        or types.is_large_string(arrow_type)
+        or types.is_null(arrow_type)
+    ):
+        return values  # already what JSON carries
+    if _arrow_text_numeric(arrow_type):
+        parsed: list[Any] = []
+        for value in values:
+            if isinstance(value, str):
+                with contextlib.suppress(ArithmeticError, ValueError):
+                    value = Decimal(value)
+            parsed.append(value)
+        values = parsed
+    elif types.is_interval(arrow_type) or types.is_duration(arrow_type):
+        # A month-day-nano interval reads as a ``MonthDayNano`` tuple; the API
+        # turns it into a timedelta counting a month as 30 days, as DuckDB does.
+        values = [
+            timedelta(days=v.months * 30 + v.days, microseconds=v.nanoseconds // 1000)
+            if getattr(v, "months", None) is not None
+            else v
+            for v in values
+        ]
+    return [_arrow_cell(value, tz) for value in values]
+
+
+def _decode_arrow_result(body: bytes) -> dict[str, Any]:
+    """Decode the API's ``format=arrow`` execute frame into its JSON response."""
+    import pyarrow as pa
+    import pyarrow.ipc
+
+    if len(body) < 4:
+        raise ToolError("API returned a malformed Arrow result: the frame is truncated")
+    meta_len = int.from_bytes(body[:4], "big")
+    if 4 + meta_len > len(body):
+        raise ToolError("API returned a malformed Arrow result: the envelope is truncated")
+    try:
+        envelope = json.loads(body[4 : 4 + meta_len])
+        with pyarrow.ipc.open_stream(pa.BufferReader(gzip.decompress(body[4 + meta_len :]))) as r:
+            table = r.read_all()
+    except (ValueError, OSError, EOFError, zlib.error, pa.ArrowException) as exc:
+        raise ToolError(f"API returned a malformed Arrow result: {exc}") from None
+    if not isinstance(envelope, dict):
+        raise ToolError("API returned a malformed Arrow result: the envelope is not an object")
+
+    tz: ZoneInfo | None = None
+    if envelope.get("timezone"):
+        try:
+            tz = ZoneInfo(str(envelope["timezone"]))
+        except (ZoneInfoNotFoundError, ValueError):
+            logger.warning(
+                "Unknown result timezone %r; timestamps stay unlabelled", envelope["timezone"]
+            )
+
+    columns = [
+        _arrow_column_cells(field.type, column.to_pylist(), tz)
+        for field, column in zip(table.schema, table.columns, strict=True)
+    ]
+    rows = [list(row) for row in zip(*columns, strict=True)] if columns else []
+    if not envelope.get("columns"):
+        envelope["columns"] = [{"name": name} for name in table.column_names]
+
+    response: dict[str, Any] = {}
+    for field in _EXECUTE_RESPONSE_FIELDS:
+        if field == "rows":
+            response["rows"] = rows
+        elif field in envelope:
+            response[field] = envelope[field]
+    for field, value in envelope.items():
+        response.setdefault(field, value)
+    return response
+
+
+def _execute_response(resp: httpx.Response) -> Any:
+    """An execute response as JSON data, decoding the Arrow frame when sent one."""
+    media_type = resp.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if media_type == _ARROW_RESULT_MEDIA_TYPE:
+        return _decode_arrow_result(resp.content)
+    return _parse_json(resp)
+
+
 def _impl_execute_query(
     model_id: str | None,
     query_json: str,
@@ -1677,7 +1870,12 @@ def _impl_execute_query(
             "get_json_schema('query') and worked examples via get_example."
         ) from exc
 
-    extra_params: dict[str, str] = {"format": output_format}
+    if output_format not in ("json", "tsv"):
+        raise ToolError(f"output_format must be 'json' or 'tsv'; got {output_format!r}")
+    # Raw JSON comes over as the Arrow frame and is converted here (see
+    # _decode_arrow_result); formatted values and TSV are rendered by the API.
+    api_format = "arrow" if output_format == "json" and not format_values else output_format
+    extra_params: dict[str, str] = {"format": api_format}
     if format_values is not None:
         extra_params["format_values"] = str(format_values).lower()
     if locale is not None:
@@ -1698,7 +1896,7 @@ def _impl_execute_query(
 
     if output_format == "tsv":
         return resp.text
-    return json.dumps(_parse_json(resp), indent=2)
+    return json.dumps(_execute_response(resp), indent=2)
 
 
 def _impl_search_values(

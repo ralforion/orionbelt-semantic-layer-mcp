@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import importlib
 import inspect
 import json
@@ -11,6 +12,7 @@ import re
 import ssl
 import sys
 import types
+from pathlib import Path
 
 import httpx
 import pytest
@@ -695,6 +697,175 @@ def test_execute_query_multi_model_mode(mock_api: respx.MockRouter):
     assert body["model_id"] == "m001"
     assert body["dialect"] == "postgres"
     assert "select" in body["query"]
+
+
+# ---------------------------------------------------------------------------
+# execute_query: results fetched as the API's Arrow frame, returned as JSON
+# ---------------------------------------------------------------------------
+
+_ARROW_FIXTURES = Path(__file__).parent / "fixtures" / "execute_arrow"
+_ARROW_HEADERS = {"content-type": "application/vnd.orionbelt.result+arrow"}
+# Per request, so a frame and a JSON body fetched apart differ in them.
+_PER_REQUEST_FIELDS = {"execution_time_ms", "cached", "cached_at"}
+
+
+def _arrow_frame(envelope: dict, table) -> bytes:
+    """Build the API's ``[u32 len][JSON envelope][gzip'd Arrow IPC]`` frame."""
+    import pyarrow as pa
+    import pyarrow.ipc
+
+    sink = pa.BufferOutputStream()
+    with pyarrow.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    meta = json.dumps(envelope).encode()
+    return len(meta).to_bytes(4, "big") + meta + gzip.compress(sink.getvalue().to_pybytes())
+
+
+@pytest.mark.parametrize(
+    "fixture", sorted(p.stem for p in _ARROW_FIXTURES.glob("*.arrow")), ids=str
+)
+def test_execute_query_arrow_frame_returns_the_apis_json(mock_api: respx.MockRouter, fixture: str):
+    """A frame recorded from a real API converts to the JSON that API returned
+    for the same query: every cell (decimals, NaN/infinity, zoned and naive
+    timestamps, times, intervals, blobs, NULLs, empty results) and the field
+    order. See tests/fixtures/execute_arrow/README.md for how they were made."""
+    server._single_model_mode = True
+    route = mock_api.post("/v1/query/execute").mock(
+        return_value=httpx.Response(
+            200,
+            content=(_ARROW_FIXTURES / f"{fixture}.arrow").read_bytes(),
+            headers=_ARROW_HEADERS,
+        )
+    )
+    expected = json.loads((_ARROW_FIXTURES / f"{fixture}.json").read_text())
+
+    result = json.loads(server._impl_execute_query(None, '{"select": {"fields": ["X.Y"]}}'))
+
+    assert route.calls.last.request.url.params["format"] == "arrow"
+    assert list(result) == [k for k in expected if k in result]
+    for key in result.keys() - _PER_REQUEST_FIELDS:
+        assert result[key] == expected[key], key
+    # The 3.0 API's envelope carries neither the cache TTL nor ``federation``;
+    # everything else the JSON response has, the converted frame has too.
+    assert expected.keys() - result.keys() <= {
+        "ttl_seconds",
+        "ttl_source",
+        "ttl_limiting_table",
+        "federation",
+    }
+
+
+def test_execute_query_arrow_multi_model_session_route(mock_api: respx.MockRouter):
+    """Multi-model mode asks the session route for the frame too."""
+    import pyarrow as pa
+
+    _mock_create_session(mock_api)
+    frame = _arrow_frame(
+        {"sql": "SELECT 1", "dialect": "duckdb", "columns": [{"name": "n"}], "row_count": 1},
+        pa.table({"n": pa.array([1], pa.int64())}),
+    )
+    route = mock_api.post("/v1/sessions/test-session-1/query/execute").mock(
+        return_value=httpx.Response(200, content=frame, headers=_ARROW_HEADERS)
+    )
+
+    result = json.loads(server._impl_execute_query("m001", '{"select": {"measures": ["N"]}}'))
+
+    assert route.calls.last.request.url.params["format"] == "arrow"
+    assert result == {
+        "sql": "SELECT 1",
+        "dialect": "duckdb",
+        "columns": [{"name": "n"}],
+        "rows": [[1]],
+        "row_count": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "api_format"),
+    [
+        ({"format_values": True}, "json"),
+        ({"output_format": "tsv"}, "tsv"),
+        ({"format_values": False}, "arrow"),
+    ],
+)
+def test_execute_query_api_renders_formatted_values_and_tsv(
+    mock_api: respx.MockRouter, kwargs: dict, api_format: str
+):
+    """Formatted values and TSV need the API's own rendering, so only raw JSON
+    is fetched as Arrow; a JSON reply is still read as JSON."""
+    server._single_model_mode = True
+    route = mock_api.post("/v1/query/execute").mock(
+        return_value=httpx.Response(200, json={"sql": "SELECT 1", "rows": [["1,0"]]})
+    )
+
+    server._impl_execute_query(None, '{"select": {"measures": ["N"]}}', **kwargs)
+
+    assert route.calls.last.request.url.params["format"] == api_format
+
+
+def test_execute_query_rejects_unknown_output_format(mock_api: respx.MockRouter):
+    """``arrow`` is how this server talks to the API, not a tool output."""
+    server._single_model_mode = True
+
+    with pytest.raises(_ToolError, match="output_format must be 'json' or 'tsv'"):
+        server._impl_execute_query(None, '{"select": {}}', output_format="arrow")
+    assert not mock_api.calls
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"\x00\x00",
+        b"\x00\x00\x00\x09{}",
+        b"\x00\x00\x00\x02{}not gzip",
+        b"\x00\x00\x00\x02[]" + gzip.compress(b"not arrow"),
+    ],
+    ids=["no-length", "short-envelope", "bad-gzip", "bad-arrow"],
+)
+def test_execute_query_malformed_arrow_frame_is_a_tool_error(
+    mock_api: respx.MockRouter, body: bytes
+):
+    server._single_model_mode = True
+    mock_api.post("/v1/query/execute").mock(
+        return_value=httpx.Response(200, content=body, headers=_ARROW_HEADERS)
+    )
+
+    with pytest.raises(_ToolError, match="malformed Arrow result"):
+        server._impl_execute_query(None, '{"select": {}}')
+
+
+def test_decode_arrow_result_cells():
+    """The cells the recorded fixtures cannot reach: text-stored numerics
+    (ADBC PostgreSQL ``NUMERIC``), UTC as ``Z``, an unknown result zone,
+    and envelope fields the server does not know yet."""
+    import datetime as dt
+
+    import pyarrow as pa
+
+    table = pa.table(
+        {
+            "utc": pa.array([dt.datetime(2025, 1, 2, 3, 4, 5)], pa.timestamp("us", tz="UTC")),
+            "naive": pa.array([dt.datetime(2025, 1, 2, 3, 4, 5)], pa.timestamp("us")),
+            "f": pa.array([-0.0], pa.float64()),
+            "lst": pa.array([[1, 2]], pa.list_(pa.int64())),
+        }
+    )
+    frame = _arrow_frame({"timezone": "Not/AZone", "future_field": 1}, table)
+
+    out = server._decode_arrow_result(frame)
+
+    assert out["rows"] == [["2025-01-02T03:04:05Z", "2025-01-02T03:04:05", -0.0, "[1, 2]"]]
+    assert out["columns"] == [{"name": n} for n in ("utc", "naive", "f", "lst")]
+    assert list(out) == ["columns", "rows", "timezone", "future_field"]
+
+    opaque = getattr(pa, "opaque", None)
+    if opaque is None:  # pragma: no cover - pyarrow < 17
+        pytest.skip("pyarrow without the canonical opaque extension type")
+    numeric = pa.ExtensionArray.from_storage(
+        opaque(pa.string(), "numeric", "postgresql"), pa.array(["1.50", "1e3", None, "x"])
+    )
+    out = server._decode_arrow_result(_arrow_frame({}, pa.table({"n": numeric})))
+    assert out["rows"] == [["1.50"], ["1E+3"], [None], ["x"]]
 
 
 # ---------------------------------------------------------------------------

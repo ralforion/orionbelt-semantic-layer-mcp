@@ -29,6 +29,8 @@ Tests mock the API with `respx` (httpx interception) and `pytest-asyncio` in aut
 **Delegation layer.** Tools call thin request helpers, never httpx directly:
 `_api_request` (base, with one-shot retry on session expiry) → `_session_request` (multi-model, prefixes `/v1/sessions/{id}/models/{mid}`) and `_shortcut_request` (single-model, top-level `/v1/...`). `_parse_json` / `_raise_api_error` normalize responses and surface API error detail as `ToolError`.
 
+**Query results arrive as Arrow.** `execute_query` requests `format=arrow` (raw JSON output only; `format_values` and TSV stay on the API) and `_decode_arrow_result` rebuilds the API's JSON response, which moves row serialization off the shared API. The cell conversion mirrors the API's `db_executor.arrow_to_rows` + `_serialize_value` + Pydantic JSON encoding. `tests/fixtures/execute_arrow/` holds frames recorded from a real API with its JSON for the same query: re-record them (see the README there) when the API changes how it serializes cells, its response fields, or the frame.
+
 **Two API modes, detected once at startup** via `GET /v1/settings` (`_detect_api_mode`), then frozen:
 - **single-model** — the API has one pre-loaded model; tools hit shortcut routes (`/v1/schema`, `/v1/query/execute`, …) and `model_id` is implicit.
 - **multi-model** — tools operate on session-scoped routes and take a `model_id`; sessions are auto-created (`_ensure_session`) and deleted on shutdown.

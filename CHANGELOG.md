@@ -6,6 +6,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- `execute_query` fetches results from the API as its Arrow frame
+  (`format=arrow`) and builds the JSON response itself, so turning rows into
+  JSON is this server's work instead of the shared API's. On a result-cache
+  hit the API sends the stored bytes without decoding them, and the frame is
+  several times smaller than the JSON on the wire. The tool's output does not
+  change: cells are converted exactly as the API's JSON converts them, and
+  frames recorded from a real API are tested against its JSON for the same
+  query. `format_values` and `output_format="tsv"` are still rendered by the API.
+- New runtime dependencies `pyarrow` and `tzdata` (both Apache-2.0); the
+  Docker image grows by about 150 MB.
+
+### Fixed
+
+- `execute_query` rejects an `output_format` other than `json` or `tsv`.
+  Before, it was forwarded to the API and an unexpected reply failed as invalid JSON.
+
 ## [3.0.0] - 2026-11-11
 
 Tracks OrionBelt Semantic Layer API **v3.0.x**, which brings federated queries:

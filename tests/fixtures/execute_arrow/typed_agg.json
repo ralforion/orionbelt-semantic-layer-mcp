@@ -1,0 +1,75 @@
+{
+  "sql": "SELECT\n  \"Typed\".\"grp\" AS \"Group\",\n  CAST(SUM(\"Typed\".\"dec\") AS DECIMAL(18, 2)) AS \"Total Dec\",\n  CAST(AVG(\"Typed\".\"dbl\") AS DOUBLE) AS \"Avg Dbl\"\nFROM \"t\".\"typed\" AS \"Typed\"\nGROUP BY ALL\nORDER BY\n  \"Typed\".\"grp\" ASC\nLIMIT 1000",
+  "dialect": "duckdb",
+  "columns": [
+    {
+      "name": "Group",
+      "type": "string",
+      "format": null
+    },
+    {
+      "name": "Total Dec",
+      "type": "decimal(18, 2)",
+      "format": "#,##0.00"
+    },
+    {
+      "name": "Avg Dbl",
+      "type": "number",
+      "format": "#,##0.00"
+    }
+  ],
+  "rows": [
+    [
+      "a",
+      "1234567890123.45",
+      3.5
+    ],
+    [
+      "b",
+      null,
+      null
+    ],
+    [
+      "c",
+      "-0.01",
+      null
+    ]
+  ],
+  "row_count": 3,
+  "execution_time_ms": 15.89,
+  "timezone": "Europe/Zagreb",
+  "resolved": {
+    "fact_tables": [
+      "Typed"
+    ],
+    "dimensions": [
+      "Group"
+    ],
+    "measures": [
+      "Total Dec",
+      "Avg Dbl"
+    ]
+  },
+  "warnings": [],
+  "sql_valid": true,
+  "explain": {
+    "planner": "Star Schema",
+    "planner_reason": "All requested objects are reachable from a single base via directed joins",
+    "base_object": "Typed",
+    "base_object_reason": "\"Typed\" selected as base \u2014 sole measure source object",
+    "joins": [],
+    "where_filter_count": 0,
+    "having_filter_count": 0,
+    "has_totals": false,
+    "cfl_legs": []
+  },
+  "physical_tables": [
+    "t.typed"
+  ],
+  "cached": false,
+  "cached_at": null,
+  "ttl_seconds": 300,
+  "ttl_source": "default_unknown",
+  "ttl_limiting_table": "t.typed",
+  "federation": null
+}
