@@ -1748,10 +1748,7 @@ def _arrow_cell(value: Any, tz: ZoneInfo | None) -> Any:
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if isinstance(value, datetime):
-        if value.tzinfo is None and tz is not None:
-            value = value.replace(tzinfo=tz)
-        text = value.isoformat()
-        return text[:-6] + "Z" if text.endswith("+00:00") else text
+        return _timestamp_text(value, tz)
     if isinstance(value, dt_time):
         text = value.isoformat()
         return text[:-7] if text.endswith(".000000") else text
@@ -1762,11 +1759,84 @@ def _arrow_cell(value: Any, tz: ZoneInfo | None) -> Any:
     return str(value)  # Decimal, timedelta, list, dict, …
 
 
-def _arrow_column_cells(arrow_type: Any, values: list[Any], tz: ZoneInfo | None) -> list[Any]:
-    """Convert one column's Python values (``to_pylist()``) to JSON cells."""
+def _timestamp_text(value: datetime, tz: ZoneInfo | None, nanos: int = 0) -> str:
+    """A timestamp's ISO text: a naive one takes the result's zone, UTC is ``Z``.
+
+    ``nanos`` (0-999) are the digits below the microsecond, which a Python
+    ``datetime`` cannot hold; they follow its fraction, nine digits in all.
+    """
+    if value.tzinfo is None and tz is not None:
+        value = value.replace(tzinfo=tz)
+    text = value.isoformat()
+    if nanos:
+        cut = len(value.replace(tzinfo=None).isoformat())  # the offset follows
+        text = text[:cut] + _nano_digits(value.microsecond, nanos) + text[cut:]
+    return text[:-6] + "Z" if text.endswith("+00:00") else text
+
+
+def _nano_digits(microsecond: int, nanos: int) -> str:
+    """The text to append to a fraction for 1-999 nanoseconds below ``microsecond``.
+
+    Python writes no fraction at all for a whole second, so then the whole
+    nine-digit fraction is added - as ``pandas.Timestamp.isoformat`` writes it.
+    """
+    return f"{nanos:03d}" if microsecond else f".{nanos:09d}"
+
+
+def _nanosecond_cells(column: Any, tz: ZoneInfo | None) -> list[Any]:
+    """JSON cells of a nanosecond timestamp, time or duration column.
+
+    ``to_pylist()`` turns such values into ``datetime`` / ``time`` /
+    ``timedelta`` only when no digit falls below the microsecond, and raises
+    otherwise unless pandas is installed (it is not here). So each value is
+    split into whole microseconds - floored, so 1969 and negative durations
+    keep a positive remainder - and the nanoseconds left over, which are
+    appended to the text. A timestamp then reads exactly as the API's JSON
+    writes it from a ``pandas.Timestamp`` (``2025-01-02T03:04:05.123456789``).
+    A time or duration keeps Python's own text plus the extra digits: the
+    API's JSON depends on its environment there (with pandas a time is cut to
+    the microsecond and a duration reads ``1 days 02:00:00``, without it the
+    API cannot serialize the value at all), and no digit is dropped here.
+    """
+    import pyarrow as pa
+
+    arrow_type = column.type
+    if pa.types.is_timestamp(arrow_type):
+        micro_type = pa.timestamp("us", tz=arrow_type.tz)
+    elif pa.types.is_time64(arrow_type):
+        micro_type = pa.time64("us")
+    else:
+        micro_type = pa.duration("us")
+    split = [None if v is None else divmod(v, 1000) for v in column.cast(pa.int64()).to_pylist()]
+    micros = pa.array([None if s is None else s[0] for s in split], micro_type).to_pylist()
+
+    cells: list[Any] = []
+    for value, parts in zip(micros, split, strict=True):
+        nanos = 0 if parts is None else parts[1]
+        if not nanos:
+            cells.append(_arrow_cell(value, tz))
+        elif isinstance(value, datetime):
+            cells.append(_timestamp_text(value, tz, nanos))
+        elif isinstance(value, dt_time):
+            cells.append(value.isoformat() + _nano_digits(value.microsecond, nanos))
+        else:  # timedelta
+            cells.append(str(value) + _nano_digits(value.microseconds, nanos))
+    return cells
+
+
+def _arrow_column_cells(column: Any, tz: ZoneInfo | None) -> list[Any]:
+    """Convert one Arrow column to JSON cells."""
     import pyarrow as pa
 
     types = pa.types
+    arrow_type = column.type
+    if (
+        types.is_timestamp(arrow_type)
+        or types.is_time64(arrow_type)
+        or types.is_duration(arrow_type)
+    ) and arrow_type.unit == "ns":
+        return _nanosecond_cells(column, tz)
+    values = column.to_pylist()
     if (
         types.is_integer(arrow_type)
         or types.is_boolean(arrow_type)
@@ -1823,10 +1893,7 @@ def _decode_arrow_result(body: bytes) -> dict[str, Any]:
                 "Unknown result timezone %r; timestamps stay unlabelled", envelope["timezone"]
             )
 
-    columns = [
-        _arrow_column_cells(field.type, column.to_pylist(), tz)
-        for field, column in zip(table.schema, table.columns, strict=True)
-    ]
+    columns = [_arrow_column_cells(column, tz) for column in table.columns]
     rows = [list(row) for row in zip(*columns, strict=True)] if columns else []
     if not envelope.get("columns"):
         envelope["columns"] = [{"name": name} for name in table.column_names]

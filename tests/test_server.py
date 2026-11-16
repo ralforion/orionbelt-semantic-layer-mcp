@@ -868,6 +868,57 @@ def test_decode_arrow_result_cells():
     assert out["rows"] == [["1.50"], ["1E+3"], [None], ["x"]]
 
 
+def test_decode_arrow_result_nanoseconds_keep_every_digit():
+    """Nanosecond values below the microsecond made ``to_pylist()`` raise
+    without pandas, failing the whole query. Timestamps read as the API's JSON
+    writes them through ``pandas.Timestamp.isoformat`` (the expected texts are
+    pandas' own); times and durations keep Python's text plus the digits.
+    ``nanos_raw`` holds the same for a real DuckDB ``TIMESTAMP_NS`` result."""
+    import pyarrow as pa
+
+    ns = 1735787045123456789  # 2025-01-02T03:04:05.123456789Z
+    table = pa.table(
+        {
+            "naive": pa.array([ns, -1_000_000_001, 1735787045000000123, None], pa.timestamp("ns")),
+            "berlin": pa.array([ns, ns, ns, None], pa.timestamp("ns", tz="Europe/Berlin")),
+            "utc": pa.array([1735787045000000123, None, None, None], pa.timestamp("ns", tz="UTC")),
+            "time": pa.array(
+                [3_723_000_000_123, 3_723_123_456_789, 3_723_000_000_000, None], pa.time64("ns")
+            ),
+            "duration": pa.array(
+                [93_600_000_000_123, 93_600_000_000_000, -1, 500_000], pa.duration("ns")
+            ),
+        }
+    )
+
+    out = server._decode_arrow_result(_arrow_frame({}, table))
+
+    assert [list(col) for col in zip(*out["rows"], strict=True)] == [
+        [
+            "2025-01-02T03:04:05.123456789",
+            "1969-12-31T23:59:58.999999999",  # floored: the remainder stays positive
+            "2025-01-02T03:04:05.000000123",
+            None,
+        ],
+        ["2025-01-02T04:04:05.123456789+01:00"] * 3 + [None],
+        ["2025-01-02T03:04:05.000000123Z", None, None, None],
+        ["01:02:03.000000123", "01:02:03.123456789", "01:02:03", None],
+        [
+            "1 day, 2:00:00.000000123",
+            "1 day, 2:00:00",
+            "-1 day, 23:59:59.999999999",
+            "0:00:00.000500",
+        ],
+    ]
+    # A naive one takes the result's zone, the nanoseconds before the offset.
+    zoned = server._decode_arrow_result(
+        _arrow_frame(
+            {"timezone": "Europe/Zagreb"}, pa.table({"t": pa.array([ns], pa.timestamp("ns"))})
+        )
+    )
+    assert zoned["rows"] == [["2025-01-02T03:04:05.123456789+01:00"]]
+
+
 # ---------------------------------------------------------------------------
 # list_models (multi-model mode)
 # ---------------------------------------------------------------------------

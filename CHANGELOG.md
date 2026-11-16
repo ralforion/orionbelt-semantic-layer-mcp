@@ -16,6 +16,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   change: cells are converted exactly as the API's JSON converts them, and
   frames recorded from a real API are tested against its JSON for the same
   query. `format_values` and `output_format="tsv"` are still rendered by the API.
+- Nanosecond timestamps, times and durations keep all nine fraction digits
+  (`2025-01-02T03:04:05.123456789`). A timestamp reads as the API's JSON writes
+  it; a time or duration keeps Python's text plus the digits below the microsecond.
 - New runtime dependencies `pyarrow` and `tzdata` (both Apache-2.0); the
   Docker image grows by about 150 MB.
 

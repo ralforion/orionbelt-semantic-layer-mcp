@@ -12,12 +12,20 @@ the conversion in `server.py` cannot drift from the API's own.
 | `typed_agg` | `typed` | `Group` × `Total Dec` (sum), `Avg Dbl` (avg) |
 | `typed_empty` | `typed` | `fields`: `Dec`, `Ts`, where `Id = 99` (no rows) |
 | `commerce_agg` | the API repo's `examples/orionbelt_1_commerce.yaml` | `Country Name` × `Total Sales`, `Distinct Clients`, top 25 |
+| `nanos_raw` | `typed` | `fields`: `Nanos.Id`, `Nanos.Tsns`, ordered by `Id` |
 
-`typed` is one DuckDB table `t.typed`, defaultTimezone `Europe/Zagreb` with
-`overrideDatabaseTimezone: true`, three rows covering: `INTEGER`, `VARCHAR`
+`typed` is DuckDB 2.0 with defaultTimezone `Europe/Zagreb` and
+`overrideDatabaseTimezone: true`. Table `t.typed` has three rows covering: `INTEGER`, `VARCHAR`
 (non-ASCII, tab, quotes, NULL), `DOUBLE` (3.5, NaN, Infinity),
 `DECIMAL(18,2)`, `DATE`, `TIMESTAMP` (with microseconds), `TIMESTAMPTZ`,
 `TIME`, `INTERVAL` (months, days + hours), `BLOB` (bytes, empty), `BOOLEAN`.
+Table `t.nanos` has `TIMESTAMP_NS` (Arrow `timestamp[ns]`): sub-microsecond
+digits with and without microseconds, one before 1970, one whole microsecond, NULL.
+
+The API's JSON for nanosecond values needs pandas in the API's environment
+(`pandas.Timestamp`); `nanos_raw` was recorded from one that has it. Its default
+image (`flight-duckdb-only`) does not, and there `format=json` fails on such a
+value while the Arrow frame still carries it.
 
 Re-record when the API changes how it serializes a cell, its JSON response's
 fields, or the frame.
