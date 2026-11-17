@@ -50,7 +50,7 @@ Phase is derived from explicit loaded-model state (`_loaded_model_ids`, flipped 
 - **stdio** (default) — eager: health check + mode detection + tool registration up front, fail-fast.
 - **HTTP/SSE** — `LazyInitMiddleware` defers mode detection and registration to the first request, so the container starts instantly (Cloud Run cold starts). `PORT` env (injected by Cloud Run) overrides `MCP_SERVER_PORT`.
 
-**Version compatibility gate.** At startup the server compares its own version to the API's `/health` version and **exits** unless `major.minor` match (`server.py` ~line 2700). This is why every API minor bump *requires* a matching MCP release even when no tool changes.
+**Version compatibility gate.** The server serves only an API of its own `major.minor` (MCP 3.1 ↔ API 3.1.x; patches may differ), checked against the API's `/health` (`_verify_api`). On stdio it checks at startup and **exits** on a mismatch. On HTTP, which starts before it reaches the API, `ApiVersionGateMiddleware` refuses every request but the handshake with an MCP error saying why, until the API matches; on both transports a request checks again once the last pass is over a minute old, so an API redeployed to another minor under a running server is refused too. This is why every API minor bump *requires* a matching MCP release even when no tool changes.
 
 ## Version tracking & release discipline
 

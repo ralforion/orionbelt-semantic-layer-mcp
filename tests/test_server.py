@@ -17,6 +17,7 @@ from pathlib import Path
 import httpx
 import pytest
 import respx
+from fastmcp.exceptions import McpError
 from fastmcp.exceptions import ToolError as _ToolError
 
 import server
@@ -37,6 +38,7 @@ def _reset_state():
     server._single_model_mode = False
     server._query_execute_enabled = False
     server._loaded_model_ids.clear()
+    server._api_verified_at = None
     yield
     if server._http_client is not None:
         server._http_client.close()
@@ -3018,6 +3020,118 @@ def test_version_check_major_mismatch_errors(mock_api, monkeypatch):
     _mock_health_with_version(mock_api, "3.0.0")
     with pytest.raises(SystemExit, match="1"):
         server._check_api_health()
+
+
+def test_version_check_times_a_pass_and_clears_it_on_a_failure(mock_api, monkeypatch):
+    """The stdio startup check starts the clock the serving gate re-checks by."""
+    monkeypatch.setattr("importlib.metadata.version", lambda _n: "3.1.0")
+    _mock_health_with_version(mock_api, "3.1.4")
+    server._check_api_health()
+    assert server._api_verified_at is not None
+
+    _mock_health_with_version(mock_api, "3.0.0")
+    with pytest.raises(SystemExit, match="1"):
+        server._check_api_health()
+    assert server._api_verified_at is None
+
+
+# ---------------------------------------------------------------------------
+# Version gate while serving (HTTP lazy init, and any long-running server)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def http_server(monkeypatch):
+    """A fresh ``server`` wired as ``main()`` wires the HTTP transport.
+
+    Its own FastMCP instance and module state, so the middleware and the tools
+    it registers stay out of the module every other test uses.
+    """
+    monkeypatch.setattr("importlib.metadata.version", lambda _n: "3.1.0")
+    original = sys.modules["server"]
+    del sys.modules["server"]
+    try:
+        fresh = importlib.import_module("server")
+    finally:
+        sys.modules["server"] = original
+    fresh.mcp.add_middleware(fresh.ApiVersionGateMiddleware())
+    fresh.mcp.add_middleware(fresh.LazyInitMiddleware())
+    fresh.mcp.add_middleware(fresh.PhaseMiddleware())
+    yield fresh
+    if fresh._http_client is not None:
+        fresh._http_client.close()
+
+
+def _mock_api_version(mock_api: respx.MockRouter, versions: dict) -> tuple:
+    """/health answering ``versions["api"]``, /v1/settings in multi-model mode."""
+    health = mock_api.get("/health").mock(
+        side_effect=lambda _r: httpx.Response(
+            200, json={"status": "ok", "version": versions["api"]}
+        )
+    )
+    settings = mock_api.get("/v1/settings").mock(
+        return_value=httpx.Response(200, json={"single_model_mode": False, "query_execute": True})
+    )
+    return health, settings
+
+
+async def test_http_serves_nothing_on_another_api_minor(http_server, mock_api):
+    """MCP 3.1 against API 3.0: the client connects (the handshake never
+    reaches the API) and its first listing reads why it is refused. Nothing
+    is detected or registered, and an API upgraded meanwhile is served
+    without a restart."""
+    from fastmcp import Client
+
+    versions = {"api": "3.0.0"}
+    health, settings = _mock_api_version(mock_api, versions)
+
+    async with Client(http_server.mcp) as client:
+        with pytest.raises(McpError, match=r"requires API v3\.1\.x — found v3\.0\.0"):
+            await client.list_tools()
+        assert not http_server._tools_registered
+        assert not settings.called
+
+        versions["api"] = "3.1.2"  # a patch release of the same minor
+        tools = await client.list_tools()
+
+    assert "list_datasource_schemas" in {t.name for t in tools}
+    assert http_server._tools_registered
+    assert health.call_count == 2
+
+
+async def test_http_checks_the_api_again_after_the_interval(http_server, mock_api):
+    """A redeploy to another minor under a running server is refused once the
+    last passed check is older than the interval, and served again after."""
+    from fastmcp import Client
+
+    versions = {"api": "3.1.0"}
+    health, _ = _mock_api_version(mock_api, versions)
+
+    async with Client(http_server.mcp) as client:
+        await client.list_tools()
+        versions["api"] = "3.2.0"
+        await client.list_tools()  # within the interval: not checked again
+        assert health.call_count == 1
+
+        http_server._api_verified_at -= http_server._API_RECHECK_SECONDS
+        with pytest.raises(McpError, match=r"found v3\.2\.0"):
+            await client.call_tool("list_datasources", {})
+        versions["api"] = "3.1.1"
+        await client.list_tools()
+
+    assert health.call_count == 3
+
+
+async def test_http_unreachable_api_is_refused_not_guessed(http_server, mock_api):
+    """An API that does not answer is a refusal saying so, not a mode guessed
+    without it and kept for the life of the server."""
+    from fastmcp import Client
+
+    mock_api.get("/health").mock(side_effect=httpx.ConnectError("refused"))
+    async with Client(http_server.mcp) as client:
+        with pytest.raises(McpError, match="API health check failed"):
+            await client.list_tools()
+    assert not http_server._tools_registered
 
 
 # ---------------------------------------------------------------------------
