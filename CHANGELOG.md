@@ -4,7 +4,60 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [3.1.0] - 2026-11-17
+
+Tracks OrionBelt Semantic Layer API **v3.1.x**, which inspects a data source's
+catalog, reads a sample of the rows in online validation, and carries
+`federation` and the cache TTL fields in its Arrow results. The MCP starts only
+against a 3.1 API.
+
+### Upgrading from 3.0
+
+The API changes some answers a 3.0 client got, and the MCP passes them through
+unchanged:
+
+- A measure over two facts, such as `SUM(orders.amount - returns.amount)`,
+  counts a fact with no rows as 0, so a customer with orders and no returns
+  adds its orders. `AVG`, `MIN` and `MAX` include anchor rows with only one of
+  the facts.
+- On Databricks, `date_diff` over timestamps counts the boundaries crossed, as
+  on the other engines (23:00 to 01:00 the next morning is 1 day, not 0).
+- `export_model_to_osi` writes Apache Ossie `version: "0.3.0.dev0"`, with
+  `nonportable_extensions` (whose `data` is an object) where it wrote
+  `custom_extensions`.
+- A DuckDB data source reads only its own database unless the API lists more
+  in `DUCKDB_ALLOWED_PATHS`, and its memory limit is half the memory.
+
+### Added
+
+- **`list_datasource_schemas`** (wraps `GET /v1/datasources/{name}/schemas`,
+  API 3.1): the schemas a data source holds, read from its catalog, without the
+  engine's own (a database on MySQL and ClickHouse, a dataset on BigQuery).
+- **`inspect_datasource_schema`** (wraps
+  `GET /v1/datasources/{name}/schemas/{schema}/tables`, API 3.1): a schema's
+  tables and views, each with its columns (engine type, position, nullability,
+  comment), primary key and foreign keys, and with `view_definitions=True` each
+  view's SQL; `tables` narrows it, `views=False` leaves views out, and
+  `names_only=True` lists names and column counts for a first look at a large
+  schema. A table name asked for and not returned is reported as not found.
+  Both are design-only tools beside `list_datasources`, for writing a model's
+  data objects and joins from an existing database. They connect to the
+  database, so like `execute_query` they are hidden when the API runs without
+  `QUERY_EXECUTE=true`, and are marked open-world. Tool counts: 29
+  single-model / 33 multi-model.
+- `validate_model(sample=...)`: also reads a sample of each data object's rows
+  (`1000` rows, or `"1%"` of them, at most 1000), for what only a value shows:
+  `DATASOURCE_SAMPLE_FAILED` and `DATASOURCE_SAMPLE_ALL_NULL` (warnings). It
+  implies `online`.
+- The `debug_validation` prompt lists the new online-check codes,
+  `DATASOURCE_EXPRESSION_FAILED` (a computed column's expression the database
+  rejects) and `DATASOURCE_UNNEST_FAILED` (a `nestedIn` column that is no
+  array), the two sample codes, and the `DIMENSION_NOT_APPLIED` query warning
+  (a fact that cannot reach a query dimension). The `write_query` prompt says
+  `current_timestamp()` and `current_time()` count "now" in the model's
+  `queryTimezone`.
+- Test fixture `federated_agg`: a query across two DuckDB data sources,
+  recorded from a 3.1 API, whose `federation` lists both legs.
 
 ### Changed
 
@@ -25,11 +78,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   at any depth.
 - New runtime dependencies `pyarrow` and `tzdata` (both Apache-2.0); the
   Docker image grows by about 150 MB.
+- `execute_query` output again carries `federation` and `ttl_seconds` /
+  `ttl_source` / `ttl_limiting_table`: the 3.1 API's Arrow envelope has them.
+  The recorded frames come from a 3.1 API, and the tests now require every
+  field of the API's JSON response, in its order.
+- The online check reads each data object as a compiled query reads it (API
+  3.1): computed columns' expressions and nested data objects' fields are now
+  checked too, where only plain columns were.
 
 ### Fixed
 
 - `execute_query` rejects an `output_format` other than `json` or `tsv`.
   Before, it was forwarded to the API and an unexpected reply failed as invalid JSON.
+- A validation finding prints a long driver error once. API 3.1's
+  `DATASOURCE_*` codes carry it in the message and again in `context.error`,
+  which doubled the report's length.
 
 ## [3.0.0] - 2026-11-11
 

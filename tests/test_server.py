@@ -742,17 +742,11 @@ def test_execute_query_arrow_frame_returns_the_apis_json(mock_api: respx.MockRou
     result = json.loads(server._impl_execute_query(None, '{"select": {"fields": ["X.Y"]}}'))
 
     assert route.calls.last.request.url.params["format"] == "arrow"
-    assert list(result) == [k for k in expected if k in result]
+    # Every field, in the JSON response's order: since API 3.1 the envelope
+    # carries ``federation`` and the cache TTL fields too.
+    assert list(result) == list(expected)
     for key in result.keys() - _PER_REQUEST_FIELDS:
         assert result[key] == expected[key], key
-    # The 3.0 API's envelope carries neither the cache TTL nor ``federation``;
-    # everything else the JSON response has, the converted frame has too.
-    assert expected.keys() - result.keys() <= {
-        "ttl_seconds",
-        "ttl_source",
-        "ttl_limiting_table",
-        "federation",
-    }
 
 
 def test_execute_query_arrow_multi_model_session_route(mock_api: respx.MockRouter):
@@ -1283,6 +1277,212 @@ def test_list_datasources_misconfigured_is_a_tool_error(mock_api: respx.MockRout
     )
     with pytest.raises(_ToolError, match=r"API error \(503\): DB_SHOP_TYPE is missing"):
         server.list_datasources()
+
+
+# ---------------------------------------------------------------------------
+# Schema inspection: list_datasource_schemas, inspect_datasource_schema (API 3.1)
+# ---------------------------------------------------------------------------
+
+
+def test_list_datasource_schemas(mock_api: respx.MockRouter):
+    """The source name is one path segment, however it is spelt."""
+    route = mock_api.get("/v1/datasources/shop%20eu%2F1/schemas").mock(
+        return_value=httpx.Response(
+            200,
+            json={"datasource": "shop-eu", "dialect": "mysql", "schemas": ["shop_eu", "staging"]},
+        )
+    )
+
+    out = server.list_datasource_schemas("shop eu/1")
+
+    assert route.called
+    assert out == "Schemas of data source shop-eu (mysql):\n\n  shop_eu\n  staging"
+
+
+def test_list_datasource_schemas_none(mock_api: respx.MockRouter):
+    mock_api.get("/v1/datasources/pg/schemas").mock(
+        return_value=httpx.Response(
+            200, json={"datasource": "pg", "dialect": "postgres", "schemas": []}
+        )
+    )
+    assert server.list_datasource_schemas("pg") == (
+        "Data source pg (postgres) has no schemas this user can see."
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "detail"),
+    [
+        (404, "No data source named 'nope'. Configured data sources: a, b"),
+        (503, "Schema inspection connects to the database. Set QUERY_EXECUTE=true"),
+    ],
+)
+def test_list_datasource_schemas_api_errors(mock_api: respx.MockRouter, status, detail):
+    mock_api.get("/v1/datasources/nope/schemas").mock(
+        return_value=httpx.Response(status, json={"detail": detail})
+    )
+    with pytest.raises(_ToolError, match=rf"API error \({status}\): {re.escape(detail)}"):
+        server.list_datasource_schemas("nope")
+
+
+_INSPECTION = {
+    "datasource": "shop-eu",
+    "dialect": "postgres",
+    "schema": "sales",
+    "tables": [
+        {
+            "name": "order_line",
+            "kind": "table",
+            "comment": "One row per item",
+            "columns": [
+                {
+                    "name": "order_id",
+                    "dataType": "integer",
+                    "ordinal": 1,
+                    "nullable": False,
+                    "comment": None,
+                    "primaryKey": True,
+                },
+                {
+                    "name": "line_no",
+                    "dataType": "smallint",
+                    "ordinal": 2,
+                    "nullable": False,
+                    "comment": None,
+                    "primaryKey": True,
+                },
+                {
+                    "name": "sku",
+                    "dataType": "text",
+                    "ordinal": 3,
+                    "nullable": None,
+                    "comment": "Stock keeping unit",
+                    "primaryKey": False,
+                },
+            ],
+            "primaryKey": ["order_id", "line_no"],
+            "foreignKeys": [
+                {
+                    "name": "line_order_fk",
+                    "columns": ["order_id"],
+                    "referredSchema": "sales",
+                    "referredTable": "orders",
+                    "referredColumns": ["id"],
+                },
+                {
+                    "name": None,
+                    "columns": ["sku", "region"],
+                    "referredSchema": None,
+                    "referredTable": "product",
+                    "referredColumns": ["sku", "region"],
+                },
+            ],
+            "viewDefinition": None,
+        },
+        {
+            "name": "v_open",
+            "kind": "view",
+            "comment": None,
+            "columns": [
+                {
+                    "name": "id",
+                    "dataType": "integer",
+                    "ordinal": 1,
+                    "nullable": True,
+                    "comment": None,
+                    "primaryKey": False,
+                },
+            ],
+            "primaryKey": [],
+            "foreignKeys": [],
+            "viewDefinition": "SELECT id\nFROM orders\nWHERE open",
+        },
+    ],
+    "warnings": ["Foreign keys of sales could not be read: permission denied"],
+}
+
+
+def test_inspect_datasource_schema_renders_tables_keys_and_views(mock_api: respx.MockRouter):
+    route = mock_api.get("/v1/datasources/shop-eu/schemas/sales/tables").mock(
+        return_value=httpx.Response(200, json=_INSPECTION)
+    )
+
+    out = server.inspect_datasource_schema("shop-eu", "sales", view_definitions=True)
+
+    params = route.calls.last.request.url.params
+    assert params["views"] == "true"
+    assert params["view_definitions"] == "true"
+    assert "table" not in params
+    assert out == (
+        "2 table(s) and view(s) in schema sales of data source shop-eu (postgres):\n"
+        "\n"
+        "order_line (table) — One row per item\n"
+        "  1. order_id: integer, not null, PK\n"
+        "  2. line_no: smallint, not null, PK\n"
+        "  3. sku: text — Stock keeping unit\n"
+        "  primary key: (order_id, line_no)\n"
+        "  foreign key: (order_id) → sales.orders (id) [line_order_fk]\n"
+        "  foreign key: (sku, region) → product (sku, region)\n"
+        "\n"
+        "v_open (view)\n"
+        "  1. id: integer\n"
+        "  definition:\n"
+        "    SELECT id\n"
+        "    FROM orders\n"
+        "    WHERE open\n"
+        "\n"
+        "Warnings:\n"
+        "  - Foreign keys of sales could not be read: permission denied"
+    )
+
+
+def test_inspect_datasource_schema_filters_and_names_only(mock_api: respx.MockRouter):
+    """``tables`` repeats ``table``; a name the API did not return is reported."""
+    route = mock_api.get("/v1/datasources/shop-eu/schemas/my%20schema/tables").mock(
+        return_value=httpx.Response(
+            200, json={**_INSPECTION, "schema": "my schema", "tables": _INSPECTION["tables"][:1]}
+        )
+    )
+
+    out = server.inspect_datasource_schema(
+        "shop-eu", "my schema", tables=["order_line", "gone"], views=False, names_only=True
+    )
+
+    params = route.calls.last.request.url.params
+    assert params.get_list("table") == ["order_line", "gone"]
+    assert params["views"] == "false"
+    assert "view_definitions" not in params
+    assert out == (
+        "1 table(s) and view(s) in schema my schema of data source shop-eu (postgres):\n"
+        "Not found: gone\n"
+        "\n"
+        "  order_line (table, 3 columns) — One row per item\n"
+        "\n"
+        "Warnings:\n"
+        "  - Foreign keys of sales could not be read: permission denied"
+    )
+
+
+def test_inspect_datasource_schema_empty(mock_api: respx.MockRouter):
+    mock_api.get("/v1/datasources/duck/schemas/main/tables").mock(
+        return_value=httpx.Response(
+            200,
+            json={"datasource": "duck", "dialect": "duckdb", "schema": "main", "tables": []},
+        )
+    )
+    assert server.inspect_datasource_schema("duck", "main") == (
+        "Nothing in schema main of data source duck (duckdb)."
+    )
+
+
+def test_schema_inspection_tools_are_design_phase_and_need_query_execute():
+    for name in ("list_datasource_schemas", "inspect_datasource_schema"):
+        assert name in server._DESIGN_TOOLS
+        assert server._TOOL_CAPABILITY[name] == server.CAP_QUERY_EXECUTE
+        server._query_execute_enabled = False
+        assert not server._tool_capability_ok(name)
+        server._query_execute_enabled = True
+        assert server._tool_capability_ok(name)
 
 
 def test_get_json_schema(mock_api: respx.MockRouter):
@@ -3530,6 +3730,7 @@ def test_tool_phase_buckets_are_disjoint():
     # run_batch and get_json_schema are always-on (both phases).
     assert {"load_model", "remove_model", "run_batch", "get_json_schema"} <= b1
     assert {"get_obml_reference", "get_function_catalog", "list_dialects", "list_datasources"} <= b2
+    assert {"list_datasource_schemas", "inspect_datasource_schema"} <= b2
     assert {"describe_model", "execute_query", "find_artefacts"} <= b3
 
 
@@ -4467,6 +4668,79 @@ def test_validate_model_dialect_ignored_when_offline(mock_api: respx.MockRouter)
     assert "dialect" not in route.calls.last.request.url.params
 
 
+@pytest.mark.parametrize(
+    ("sample", "sent", "scope"), [(1000, "1000", "1000 rows"), (" 1% ", "1%", "1%")]
+)
+def test_validate_model_sample_implies_online(mock_api: respx.MockRouter, sample, sent, scope):
+    """``sample`` reaches the API as a query param and turns the online check
+    on, ``dialect`` with it; its warnings render (API 3.1)."""
+    _mock_create_session(mock_api)
+    route = _mock_validate(
+        mock_api,
+        "/v1/sessions/test-session-1/validate",
+        {
+            "valid": True,
+            "errors": [],
+            "warnings": [
+                {
+                    "code": "DATASOURCE_SAMPLE_ALL_NULL",
+                    "message": "Field 'Valu' is NULL on all 40 sampled elements of Orders.items",
+                    "path": "dataObjects.Items.columns.Value.code",
+                    "severity": "warning",
+                }
+            ],
+        },
+    )
+
+    out = server._impl_validate_model(
+        {"version": "1.0"}, None, None, None, online=False, dialect="duckdb", sample=sample
+    )
+
+    params = route.calls.last.request.url.params
+    assert params["online"] == "true"
+    assert params["sample"] == sent
+    assert params["dialect"] == "duckdb"
+    assert f"Model is valid (offline + datasource + sample of {scope})." in out
+    assert "[warning:DATASOURCE_SAMPLE_ALL_NULL]" in out
+    assert "Pass online=true" not in out
+
+
+def test_validate_model_blank_sample_is_no_sample(mock_api: respx.MockRouter):
+    _mock_create_session(mock_api)
+    route = _mock_validate(
+        mock_api,
+        "/v1/sessions/test-session-1/validate",
+        {"valid": True, "errors": [], "warnings": []},
+    )
+
+    server._impl_validate_model({"version": "1.0"}, None, None, None, False, None, sample="  ")
+
+    assert route.calls.last.request.url.params == httpx.QueryParams()
+
+
+def test_validate_model_tools_take_sample():
+    """Both modes' validate_model offer ``sample`` and pass it through."""
+    for single in (True, False):
+        tool = next(t for t in _tools_in_fresh_module(single) if t.name == "validate_model")
+        assert "sample" in tool.parameters["properties"]
+
+
+def test_format_warning_prints_a_long_driver_error_once():
+    """API 3.1's DATASOURCE_* codes carry the driver's error in the message
+    and in ``context.error``: the long copy is left out, the names are not."""
+    error = "Binder Error: No function matches '*(VARCHAR, INTEGER_LITERAL)'. " * 3
+    out = server._format_warning(
+        {
+            "code": "DATASOURCE_EXPRESSION_FAILED",
+            "severity": "error",
+            "message": f"Computed column 'Twice' could not be evaluated: {error}",
+            "context": {"dataObject": "Typed", "column": "Twice", "error": error},
+        }
+    )
+    assert out.count("Binder Error") == 3
+    assert out.endswith("[dataObject=Typed, column=Twice]")
+
+
 def test_validate_model_single_model_uses_shortcut(mock_api: respx.MockRouter):
     """Single-model mode has no session to scope to — the stateless route is used."""
     server._single_model_mode = True
@@ -4718,14 +4992,14 @@ def _tools_in_fresh_module(single: bool) -> list:
 
 
 def test_registered_tool_counts_are_what_the_readme_claims():
-    """27 single-model / 31 multi-model / 32 distinct / 26 shared."""
+    """29 single-model / 33 multi-model / 34 distinct / 28 shared."""
     single = _tool_names_in_fresh_module(True)
     multi = _tool_names_in_fresh_module(False)
 
-    assert len(single) == 27
-    assert len(multi) == 31
-    assert len(single | multi) == 32
-    assert len(single & multi) == 26
+    assert len(single) == 29
+    assert len(multi) == 33
+    assert len(single | multi) == 34
+    assert len(single & multi) == 28
     assert single - multi == {"get_model"}
     assert "validate_model" in single & multi
 
@@ -4758,6 +5032,8 @@ def test_tool_annotations_classify_writes_and_warehouse_access():
         "execute_query",
         "evaluate_rule",
         "evaluate_rules",
+        "inspect_datasource_schema",
+        "list_datasource_schemas",
         "run_batch",
         "search_values",
         "validate_model",

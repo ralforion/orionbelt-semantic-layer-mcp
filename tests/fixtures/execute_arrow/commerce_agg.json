@@ -146,7 +146,7 @@
     ]
   ],
   "row_count": 25,
-  "execution_time_ms": 21.57,
+  "execution_time_ms": 12.89,
   "timezone": "Europe/Zagreb",
   "resolved": {
     "fact_tables": [
@@ -195,8 +195,8 @@
     "orionbelt_1.countries",
     "orionbelt_1.sales"
   ],
-  "cached": false,
-  "cached_at": null,
+  "cached": true,
+  "cached_at": "2026-11-17T10:39:01.389607+01:00",
   "ttl_seconds": 86400,
   "ttl_source": "all_static",
   "ttl_limiting_table": null,

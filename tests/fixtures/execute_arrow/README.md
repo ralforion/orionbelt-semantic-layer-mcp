@@ -1,10 +1,12 @@
 # Recorded `format=arrow` execute frames
 
 Each `<name>.arrow` is the body of a real `POST /v1/query/execute?format=arrow`
-(OrionBelt Semantic Layer API 3.0.0, DuckDB, file result cache). `<name>.json` is the
+(OrionBelt Semantic Layer API 3.1.0, DuckDB, file result cache). `<name>.json` is the
 body the same API returned for the same query without `format`. The
 `execute_query` tests decode the frame and require the JSON, cell for cell, so
-the conversion in `server.py` cannot drift from the API's own.
+the conversion in `server.py` cannot drift from the API's own. Every field is
+required, in the JSON's order: since 3.1 the frame's envelope carries
+`federation` and the cache TTL fields too.
 
 | Fixture | Model | Query |
 |---|---|---|
@@ -15,6 +17,7 @@ the conversion in `server.py` cannot drift from the API's own.
 | `nanos_raw` | `typed` | `fields`: `Nanos.Id`, `Nanos.Tsns`, ordered by `Id` |
 | `nested_raw` | `typed` | `fields`: every `Nested` column, ordered by `Id` |
 | `union_raw` | `typed` | `fields`: every `Unions` column, ordered by `Id` |
+| `federated_agg` | `fed` (below) | `Customer` × `Total Amount`, ordered by `Customer` |
 
 `typed` is DuckDB 2.0 with defaultTimezone `Europe/Zagreb` and
 `overrideDatabaseTimezone: true`. Table `t.typed` has three rows covering: `INTEGER`, `VARCHAR`
@@ -42,6 +45,10 @@ DuckDB writes no dictionary-encoded timestamps, dense unions or list views;
 `test_decode_arrow_result_dictionaries_unions_list_views` covers those with
 pyarrow-built arrays, its expected cells taken from the API's `arrow_to_rows`
 with pandas.
+
+`fed` reads two DuckDB data sources (`OBSL_DATABASES=fed-a,fed-b`): `Orders`
+(`t.orders`) on `fed-a` joins `Customers` (`t.customers`) on `fed-b`, so the
+query is federated and the response's `federation` lists both legs.
 
 Re-record when the API changes how it serializes a cell, its JSON response's
 fields, or the frame.
