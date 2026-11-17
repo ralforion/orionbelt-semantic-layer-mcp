@@ -45,10 +45,12 @@ unchanged:
   database, so like `execute_query` they are hidden when the API runs without
   `QUERY_EXECUTE=true`, and are marked open-world. Tool counts: 29
   single-model / 33 multi-model.
-- `validate_model(sample=...)`: also reads a sample of each data object's rows
-  (`1000` rows, or `"1%"` of them, at most 1000), for what only a value shows:
-  `DATASOURCE_SAMPLE_FAILED` and `DATASOURCE_SAMPLE_ALL_NULL` (warnings). It
-  implies `online`.
+- `validate_model(sample=...)`: also reads a sample of each data object's rows,
+  for what only a value shows: `DATASOURCE_SAMPLE_FAILED` and
+  `DATASOURCE_SAMPLE_ALL_NULL` (warnings). It implies `online`. A row count
+  (`1000`) reads that many rows and has no upper bound; a percent (`"1%"`)
+  returns at most 1000 rows but may scan many more to find them, up to the
+  whole table.
 - The `debug_validation` prompt lists the new online-check codes,
   `DATASOURCE_EXPRESSION_FAILED` (a computed column's expression the database
   rejects) and `DATASOURCE_UNNEST_FAILED` (a `nestedIn` column that is no

@@ -4668,8 +4668,10 @@ def test_validate_model_dialect_ignored_when_offline(mock_api: respx.MockRouter)
     assert "dialect" not in route.calls.last.request.url.params
 
 
+# A count goes through as given: the API caps a percent sample's rows only.
 @pytest.mark.parametrize(
-    ("sample", "sent", "scope"), [(1000, "1000", "1000 rows"), (" 1% ", "1%", "1%")]
+    ("sample", "sent", "scope"),
+    [(1000, "1000", "1000 rows"), (100000, "100000", "100000 rows"), (" 1% ", "1%", "1%")],
 )
 def test_validate_model_sample_implies_online(mock_api: respx.MockRouter, sample, sent, scope):
     """``sample`` reaches the API as a query param and turns the online check

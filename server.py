@@ -4190,13 +4190,18 @@ def _register_model_tools() -> None:
                     generate, so unlike the ``dialect`` on the query tools it
                     does not fall back to the model's ``settings.defaultDialect``.
                     Ignored when ``online`` is false and no ``sample`` is given.
-                sample: Also read a sample of each data object's rows: a count
-                    (``1000``) reads the first that many, a percent (``"1%"``)
-                    draws about that share, at most 1000 rows either way. A
-                    computed column or nested field failing on a value is
-                    ``DATASOURCE_SAMPLE_FAILED``, a nested field NULL on every
-                    sampled element ``DATASOURCE_SAMPLE_ALL_NULL`` (warnings).
-                    Implies ``online``. Costs a scan of up to that many rows.
+                sample: Also read a sample of each data object's rows. A count
+                    (``1000``) reads the first that many rows; the API sets no
+                    upper bound, so keep it small. A percent (``"1%"``) draws
+                    about that share row by row and returns at most 1000 rows,
+                    but may scan many more to find them, up to the whole
+                    table. On BigQuery a count is billed for the whole columns
+                    it reads, while a percent of a table reads about that
+                    share of its storage. A computed column or nested field
+                    failing on a value is ``DATASOURCE_SAMPLE_FAILED``, a
+                    nested field NULL on every sampled element
+                    ``DATASOURCE_SAMPLE_ALL_NULL`` (warnings). Implies
+                    ``online``.
 
             ``extends`` / ``inherits`` are absent by design: the stateless
             /validate route this mode uses ignores both, so offering them would
@@ -4253,13 +4258,18 @@ def _register_model_tools() -> None:
                     generate, so unlike the ``dialect`` on the query tools it
                     does not fall back to the model's ``settings.defaultDialect``.
                     Ignored when ``online`` is false and no ``sample`` is given.
-                sample: Also read a sample of each data object's rows: a count
-                    (``1000``) reads the first that many, a percent (``"1%"``)
-                    draws about that share, at most 1000 rows either way. A
-                    computed column or nested field failing on a value is
-                    ``DATASOURCE_SAMPLE_FAILED``, a nested field NULL on every
-                    sampled element ``DATASOURCE_SAMPLE_ALL_NULL`` (warnings).
-                    Implies ``online``. Costs a scan of up to that many rows.
+                sample: Also read a sample of each data object's rows. A count
+                    (``1000``) reads the first that many rows; the API sets no
+                    upper bound, so keep it small. A percent (``"1%"``) draws
+                    about that share row by row and returns at most 1000 rows,
+                    but may scan many more to find them, up to the whole
+                    table. On BigQuery a count is billed for the whole columns
+                    it reads, while a percent of a table reads about that
+                    share of its storage. A computed column or nested field
+                    failing on a value is ``DATASOURCE_SAMPLE_FAILED``, a
+                    nested field NULL on every sampled element
+                    ``DATASOURCE_SAMPLE_ALL_NULL`` (warnings). Implies
+                    ``online``.
             """
             return _impl_validate_model(
                 model, model_yaml, extends, inherits, online, dialect, sample
@@ -5160,9 +5170,11 @@ and still name a table that was dropped.
   neither a missing table nor a missing column (permissions, a timeout).
   Fix: Read the message — it carries the engine's own error.
 
-With `validate_model(sample=...)` (OBSL 3.1+; `1000` rows or `"1%"` of them,
-at most 1000) each data object's rows are read too, for what only a value
-shows. These are warnings: the model stays valid.
+With `validate_model(sample=...)` (OBSL 3.1+) each data object's rows are
+read too, for what only a value shows. A count (`1000`) reads the first that
+many rows, with no upper bound; a percent (`"1%"`) returns at most 1000 rows
+but may scan many more to find them, up to the whole table. These are
+warnings: the model stays valid.
 
 - `DATASOURCE_SAMPLE_FAILED` (warning): The SQL plans, but a value in the
   sample does not fit it — e.g. `{Name} * 2` over text, which Snowflake,
