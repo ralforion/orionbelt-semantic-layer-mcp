@@ -284,6 +284,9 @@ _DESIGN_TOOLS: frozenset[str] = frozenset(
         "list_dialects",
         # configured data sources, for defaultDataSource / dataSource (API 3.0)
         "list_datasources",
+        # what a data source holds, from its catalog, to write a model from (API 3.1)
+        "list_datasource_schemas",
+        "inspect_datasource_schema",
     }
 )
 
@@ -336,7 +339,8 @@ _RUN_TIME_TOOLS: frozenset[str] = frozenset(
 # Reference data and model introspection — answered by the API alone.
 _READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=False)
 # Reaches past the API: compiled SQL against the live warehouse (execute_query,
-# evaluate_rule(s)) or a datasource probe (validate_model with ``online``). SPARQL
+# evaluate_rule(s)), a datasource probe (validate_model with ``online``) or the
+# warehouse's catalog (list_datasource_schemas, inspect_datasource_schema). SPARQL
 # is closed-world: since OBSL 2.33.1 the API rejects ``SERVICE`` / ``FROM``.
 _READ_ONLY_OPEN_WORLD = ToolAnnotations(read_only_hint=True, open_world_hint=True)
 # Adds a model to the session; never replaces or drops an existing one.
@@ -426,6 +430,10 @@ _TOOL_CAPABILITY: dict[str, str] = {
     "evaluate_rule": CAP_QUERY_EXECUTE,
     # Each value-search step is an executed dimension-only query (API 2.36).
     "search_values": CAP_QUERY_EXECUTE,
+    # Schema inspection reads the database's catalog; the API answers 503
+    # without QUERY_EXECUTE=true (API 3.1).
+    "list_datasource_schemas": CAP_QUERY_EXECUTE,
+    "inspect_datasource_schema": CAP_QUERY_EXECUTE,
 }
 
 # Capability flag → a resolver reading the current (startup-detected) config.
@@ -1219,6 +1227,137 @@ def list_datasources() -> str:
     return "\n".join(lines)
 
 
+@mcp.tool(title="List Data Source Schemas", annotations=_READ_ONLY_OPEN_WORLD)
+def list_datasource_schemas(datasource: str) -> str:
+    """List the schemas a data source holds, read from its catalog (API 3.1).
+
+    The first step in writing a model from an existing database: pick the
+    schema its tables are in, then read them with
+    ``inspect_datasource_schema``. A schema is a database on MySQL and
+    ClickHouse and a dataset on BigQuery; the engine's own
+    (``information_schema``, ``pg_catalog``, ``system``, …) are left out.
+
+    Connects to the database, so it needs query execution enabled on the API.
+
+    Args:
+        datasource: A data source name from ``list_datasources``.
+    """
+    resp = _api_request(
+        "GET",
+        f"{_API_V1}/datasources/{quote(datasource, safe='')}/schemas",
+        retry_on_expired=False,
+    )
+    data = _parse_json(resp)
+    schemas = data.get("schemas") or []
+    source = f"{data.get('datasource') or datasource} ({data.get('dialect') or '?'})"
+    if not schemas:
+        return f"Data source {source} has no schemas this user can see."
+    return "\n".join([f"Schemas of data source {source}:", "", *(f"  {s}" for s in schemas)])
+
+
+@mcp.tool(title="Inspect Data Source Schema", annotations=_READ_ONLY_OPEN_WORLD)
+def inspect_datasource_schema(
+    datasource: str,
+    schema: str,
+    tables: list[str] | None = None,
+    views: bool = True,
+    view_definitions: bool = False,
+    names_only: bool = False,
+) -> str:
+    """Describe the tables and views of a data source's schema, from its catalog (API 3.1).
+
+    What a model's data objects are written from: each table's columns with
+    the engine's own type, position, nullability and comment, its primary
+    key, and its foreign keys. A table becomes a data object (its name the
+    ``code``, the schema its ``schema``), its columns the data object's
+    ``columns``, and a foreign key a ``joins`` entry (``columnsFrom`` →
+    ``columnsTo``, composite keys paired by position).
+
+    Keys come from declared constraints only: none on Dremio, the primary
+    key alone on ClickHouse. Keys or view bodies the catalog will not show
+    this user are left out and reported as warnings.
+
+    Connects to the database, so it needs query execution enabled on the API.
+
+    Args:
+        datasource: A data source name from ``list_datasources``.
+        schema: A schema from ``list_datasource_schemas``.
+        tables: Only these tables or views, by exact name. Omit for all.
+        views: Include views and materialized views. Default true.
+        view_definitions: Include each view's SQL. Default false.
+        names_only: List each table's name, kind and column count only: a
+            first look at a large schema before inspecting some of its tables.
+    """
+    params: dict[str, Any] = {"views": str(views).lower()}
+    if tables:
+        params["table"] = list(tables)
+    if view_definitions:
+        params["view_definitions"] = "true"
+    resp = _api_request(
+        "GET",
+        f"{_API_V1}/datasources/{quote(datasource, safe='')}/schemas/"
+        f"{quote(schema, safe='')}/tables",
+        params=params,
+        retry_on_expired=False,
+    )
+    return _render_schema_inspection(_parse_json(resp), tables, names_only=names_only)
+
+
+def _render_schema_inspection(data: dict, requested: list[str] | None, *, names_only: bool) -> str:
+    """Render a ``SchemaInspectionResponse``: one block per table, then warnings."""
+    found = data.get("tables") or []
+    where = (
+        f"schema {data.get('schema') or '?'} of data source "
+        f"{data.get('datasource') or '?'} ({data.get('dialect') or '?'})"
+    )
+    lines = [f"{len(found)} table(s) and view(s) in {where}:" if found else f"Nothing in {where}."]
+    missing = sorted(set(requested or ()) - {t.get("name") for t in found})
+    if missing:
+        lines.append(f"Not found: {', '.join(missing)}")
+    if names_only and found:
+        lines.append("")
+    for table in found:
+        columns = table.get("columns") or []
+        head = f"{table.get('name')} ({table.get('kind') or 'table'}"
+        head += f", {len(columns)} columns)" if names_only else ")"
+        if table.get("comment"):
+            head += f" — {table['comment']}"
+        if names_only:
+            lines.append(f"  {head}")
+            continue
+        lines.append("")
+        lines.append(head)
+        for col in columns:
+            line = f"  {col.get('ordinal')}. {col.get('name')}: {col.get('dataType')}"
+            if col.get("nullable") is False:
+                line += ", not null"
+            if col.get("primaryKey"):
+                line += ", PK"
+            if col.get("comment"):
+                line += f" — {col['comment']}"
+            lines.append(line)
+        if table.get("primaryKey"):
+            lines.append(f"  primary key: ({', '.join(table['primaryKey'])})")
+        for fk in table.get("foreignKeys") or []:
+            target = ".".join(p for p in (fk.get("referredSchema"), fk.get("referredTable")) if p)
+            line = (
+                f"  foreign key: ({', '.join(fk.get('columns') or [])}) → "
+                f"{target} ({', '.join(fk.get('referredColumns') or [])})"
+            )
+            if fk.get("name"):
+                line += f" [{fk['name']}]"
+            lines.append(line)
+        if table.get("viewDefinition"):
+            lines.append("  definition:")
+            lines.extend(f"    {sql}" for sql in str(table["viewDefinition"]).splitlines())
+    warnings = data.get("warnings") or []
+    if warnings:
+        lines.append("")
+        lines.append("Warnings:")
+        lines.extend(f"  - {w}" for w in warnings)
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Implementation functions (shared logic for both modes)
 # ---------------------------------------------------------------------------
@@ -1256,6 +1395,10 @@ def _default_value_tag(rec: dict) -> str:
     return f"  defaultValue: {json.dumps(val)}"
 
 
+# A context value at least this long that the message already holds is not repeated.
+_CONTEXT_REPEAT_MIN = 80
+
+
 def _format_warning(w: Any) -> str:
     """Render a single warning. Accepts the structured ``StructuredWarning``
     shape introduced in API v2.2 (object with ``code``/``severity``/
@@ -1287,9 +1430,16 @@ def _format_warning(w: Any) -> str:
     if w.get("path"):
         parts.append(f"(at {w['path']})")
     context = w.get("context")
-    if isinstance(context, dict) and context:
-        rendered = ", ".join(f"{k}={v}" for k, v in context.items())
-        parts.append(f"[{rendered}]")
+    if isinstance(context, dict):
+        # A driver's error rides in both the message and ``context.error``
+        # (API 3.1's DATASOURCE_* codes); print a long one once.
+        shown = {
+            k: v
+            for k, v in context.items()
+            if not (isinstance(v, str) and len(v) > _CONTEXT_REPEAT_MIN and v in message)
+        }
+        if shown:
+            parts.append(f"[{', '.join(f'{k}={v}' for k, v in shown.items())}]")
     if w.get("hint"):
         parts.append(f"— hint: {w['hint']}")
     suggestions = w.get("suggestions")
@@ -2746,6 +2896,7 @@ def _impl_validate_model(
     inherits: str | None,
     online: bool,
     dialect: str | None,
+    sample: int | str | None = None,
 ) -> str:
     """Validate a model without loading it, and render the report.
 
@@ -2797,25 +2948,30 @@ def _impl_validate_model(
     if inherits:
         body["inherits"] = inherits
 
-    # ``online`` and ``dialect`` are query parameters, not body fields. Send
-    # ``dialect`` only alongside ``online``: offline validation opens no
-    # connection, so naming one there would read as if it selected the SQL to
-    # generate, which this dialect does not do (it names a datasource to probe).
+    # ``online``, ``dialect`` and ``sample`` are query parameters, not body
+    # fields. ``sample`` implies the online check (API 3.1). Send ``dialect``
+    # only alongside it: offline validation opens no connection, so naming one
+    # there would read as if it selected the SQL to generate, which this
+    # dialect does not do (it names a datasource to probe).
+    sample = str(sample).strip() if sample is not None and str(sample).strip() else None
+    online = online or sample is not None
     params: dict[str, Any] = {}
     if online:
         params["online"] = "true"
         if dialect:
             params["dialect"] = dialect
+    if sample is not None:
+        params["sample"] = sample
 
-    logger.info("validate_model called (online=%s)", online)
+    logger.info("validate_model called (online=%s, sample=%s)", online, sample)
     if _single_model_mode:
         resp = _shortcut_request("POST", "/validate", json_body=body, params=params or None)
     else:
         resp = _session_request("POST", "/validate", json_body=body, params=params or None)
-    return _render_validate_result(_parse_json(resp), online=online)
+    return _render_validate_result(_parse_json(resp), online=online, sample=sample)
 
 
-def _render_validate_result(data: dict, *, online: bool) -> str:
+def _render_validate_result(data: dict, *, online: bool, sample: str | None = None) -> str:
     """Render a ``ValidateResponse`` as a report.
 
     Errors and warnings share the ``StructuredWarning`` shape, so both go
@@ -2824,6 +2980,8 @@ def _render_validate_result(data: dict, *, online: bool) -> str:
     errors = data.get("errors") or []
     warnings = data.get("warnings") or []
     scope = "offline + datasource" if online else "offline only"
+    if sample is not None:
+        scope += f" + sample of {sample}{'' if sample.endswith('%') else ' rows'}"
     if data.get("valid"):
         header = f"Model is valid ({scope})."
     else:
@@ -3997,6 +4155,7 @@ def _register_model_tools() -> None:
             model_yaml: str | None = None,
             online: bool = False,
             dialect: str | None = None,
+            sample: int | str | None = None,
         ) -> str:
             """Validate an OBML model without loading it.
 
@@ -4006,12 +4165,15 @@ def _register_model_tools() -> None:
             committing it with ``load_model``.
 
             With ``online=true`` the model is additionally checked against the
-            live datasource: each data object is probed for its table and its
-            declared columns, and drift a purely structural check cannot see —
-            a dropped table, a renamed column, a column whose type no longer
-            matches its ``abstractType`` — is reported as an error
-            (``DATASOURCE_*`` codes). The probe costs one ``SELECT … LIMIT 0``
-            per data object: a plan, no scan.
+            live datasource: each data object is read as a compiled query reads
+            it (its table, its columns, each computed column's expression, a
+            nested data object's fields), and drift a purely structural check
+            cannot see — a dropped table, a renamed column, a column whose type
+            no longer matches its ``abstractType``, an expression the database
+            rejects — is reported as an error (``DATASOURCE_*`` codes). The
+            probe costs one ``SELECT … LIMIT 0`` per data object: a plan, no
+            scan. ``sample`` also reads some rows of each, for what only a
+            value shows (API 3.1), reported as warnings.
 
             Args:
                 model: OBML model as a JSON object (camelCase keys, joins inside
@@ -4027,13 +4189,25 @@ def _register_model_tools() -> None:
                     ``DB_VENDOR``. This names a *connection to open*, not SQL to
                     generate, so unlike the ``dialect`` on the query tools it
                     does not fall back to the model's ``settings.defaultDialect``.
-                    Ignored when ``online`` is false.
+                    Ignored when ``online`` is false and no ``sample`` is given.
+                sample: Also read a sample of each data object's rows. A count
+                    (``1000``) reads the first that many rows; the API sets no
+                    upper bound, so keep it small. A percent (``"1%"``) draws
+                    about that share row by row and returns at most 1000 rows,
+                    but may scan many more to find them, up to the whole
+                    table. On BigQuery a count is billed for the whole columns
+                    it reads, while a percent of a table reads about that
+                    share of its storage. A computed column or nested field
+                    failing on a value is ``DATASOURCE_SAMPLE_FAILED``, a
+                    nested field NULL on every sampled element
+                    ``DATASOURCE_SAMPLE_ALL_NULL`` (warnings). Implies
+                    ``online``.
 
             ``extends`` / ``inherits`` are absent by design: the stateless
             /validate route this mode uses ignores both, so offering them would
             promise a merge that never happens. Validate the merged document.
             """
-            return _impl_validate_model(model, model_yaml, None, None, online, dialect)
+            return _impl_validate_model(model, model_yaml, None, None, online, dialect, sample)
 
     else:
 
@@ -4045,6 +4219,7 @@ def _register_model_tools() -> None:
             inherits: str | None = None,
             online: bool = False,
             dialect: str | None = None,
+            sample: int | str | None = None,
         ) -> str:
             """Validate an OBML model without loading it.
 
@@ -4054,12 +4229,15 @@ def _register_model_tools() -> None:
             committing it with ``load_model``.
 
             With ``online=true`` the model is additionally checked against the
-            live datasource: each data object is probed for its table and its
-            declared columns, and drift a purely structural check cannot see —
-            a dropped table, a renamed column, a column whose type no longer
-            matches its ``abstractType`` — is reported as an error
-            (``DATASOURCE_*`` codes). The probe costs one ``SELECT … LIMIT 0``
-            per data object: a plan, no scan.
+            live datasource: each data object is read as a compiled query reads
+            it (its table, its columns, each computed column's expression, a
+            nested data object's fields), and drift a purely structural check
+            cannot see — a dropped table, a renamed column, a column whose type
+            no longer matches its ``abstractType``, an expression the database
+            rejects — is reported as an error (``DATASOURCE_*`` codes). The
+            probe costs one ``SELECT … LIMIT 0`` per data object: a plan, no
+            scan. ``sample`` also reads some rows of each, for what only a
+            value shows (API 3.1), reported as warnings.
 
             Args:
                 model: OBML model as a JSON object (camelCase keys, joins inside
@@ -4079,9 +4257,23 @@ def _register_model_tools() -> None:
                     ``DB_VENDOR``. This names a *connection to open*, not SQL to
                     generate, so unlike the ``dialect`` on the query tools it
                     does not fall back to the model's ``settings.defaultDialect``.
-                    Ignored when ``online`` is false.
+                    Ignored when ``online`` is false and no ``sample`` is given.
+                sample: Also read a sample of each data object's rows. A count
+                    (``1000``) reads the first that many rows; the API sets no
+                    upper bound, so keep it small. A percent (``"1%"``) draws
+                    about that share row by row and returns at most 1000 rows,
+                    but may scan many more to find them, up to the whole
+                    table. On BigQuery a count is billed for the whole columns
+                    it reads, while a percent of a table reads about that
+                    share of its storage. A computed column or nested field
+                    failing on a value is ``DATASOURCE_SAMPLE_FAILED``, a
+                    nested field NULL on every sampled element
+                    ``DATASOURCE_SAMPLE_ALL_NULL`` (warnings). Implies
+                    ``online``.
             """
-            return _impl_validate_model(model, model_yaml, extends, inherits, online, dialect)
+            return _impl_validate_model(
+                model, model_yaml, extends, inherits, online, dialect, sample
+            )
 
     # ----- single-model only: the pre-loaded model's source -----
 
@@ -4676,7 +4868,8 @@ Raw mode (``select.fields``) is **mutually exclusive** with
 - ``timezone``: IANA timezone (e.g. ``"Europe/Berlin"``) labelling timestamps
   that carry none.  A model's ``settings.queryTimezone`` wins over it (OBSL
   3.0+): its timestamps are wall-clock times there, and "today" — for
-  ``current_date()`` and every ``relative`` filter — is counted in that zone.
+  ``current_date()`` and every ``relative`` filter — is counted in that zone,
+  as is "now" for ``current_timestamp()`` and ``current_time()`` (OBSL 3.1+).
 
 ## Queries across data sources (OBSL 3.0+)
 
@@ -4934,16 +5127,19 @@ A `type: reaggregate` metric computes `measure` at the query's dimensions plus
 
 ## Datasource Errors (online validation only)
 
-Raised only by `validate_model(online=true)`, which probes the configured
-warehouse for the tables and columns the model declares. Offline validation
-resolves a model against *itself* and never sees these — a model can be
-structurally perfect and still name a table that was dropped.
+Raised only by `validate_model(online=true)`, which reads each data object
+from the configured warehouse as a compiled query would: its table, its
+columns, each computed column's expression and a nested data object's fields
+(OBSL 3.1+; before, plain columns only). Offline validation resolves a model
+against *itself* and never sees these — a model can be structurally perfect
+and still name a table that was dropped.
 
 - `DATASOURCE_TABLE_MISSING`: A data object's table is not there under the
   `database` / `schema` / `code` the model declares.
   Fix: Correct the physical binding, or restore/rename the table.
 - `DATASOURCE_COLUMN_MISSING`: The table exists but a declared column `code` is
-  not addressable on it.
+  not addressable on it, or a nested data object's field is not in the array's
+  elements (on Snowflake and MySQL a missing field reads as NULL instead).
   Fix: Correct the column's `code`, or restore the column.
 - `DATASOURCE_COLUMN_CASE`: The column exists under a different identifier case
   than the model spells it. The probe quotes identifiers exactly as codegen
@@ -4952,8 +5148,16 @@ structurally perfect and still name a table that was dropped.
 - `DATASOURCE_TYPE_MISMATCH`: A column's physical type is not in the family its
   `abstractType` declares. The comparison is deliberately coarse (number /
   datetime / string / boolean / binary): `int32` widening to `int64`, or a
-  `timestamp` stored as `TIMESTAMP_NTZ`, is not drift.
+  `timestamp` stored as `TIMESTAMP_NTZ`, is not drift. A computed column is
+  checked against the type it declares too.
   Fix: Correct `abstractType`, or the column.
+- `DATASOURCE_EXPRESSION_FAILED`: The database could not evaluate a computed
+  column's `expression` (OBSL 3.1+). Carries the driver's error.
+  Fix: Correct the expression for this database: the columns it reads, and
+  that the database has every function it calls.
+- `DATASOURCE_UNNEST_FAILED`: The parent's column a `nestedIn` data object
+  names could not be read as an array (OBSL 3.1+).
+  Fix: Correct `nestedIn.column`, or check it is an array column of the parent.
 - `DATASOURCE_UNAVAILABLE`: No datasource is configured or reachable, so nothing
   could be probed.
   Fix: Configure the connection, or validate offline (`online=false`).
@@ -4965,6 +5169,22 @@ structurally perfect and still name a table that was dropped.
 - `DATASOURCE_PROBE_FAILED`: The probe query itself errored for a reason that is
   neither a missing table nor a missing column (permissions, a timeout).
   Fix: Read the message — it carries the engine's own error.
+
+With `validate_model(sample=...)` (OBSL 3.1+) each data object's rows are
+read too, for what only a value shows. A count (`1000`) reads the first that
+many rows, with no upper bound; a percent (`"1%"`) returns at most 1000 rows
+but may scan many more to find them, up to the whole table. These are
+warnings: the model stays valid.
+
+- `DATASOURCE_SAMPLE_FAILED` (warning): The SQL plans, but a value in the
+  sample does not fit it — e.g. `{Name} * 2` over text, which Snowflake,
+  Dremio and Databricks refuse only on a row. Points at the computed column's
+  `expression` or the nested field's `code` that fails on its own.
+  Fix: Correct the expression, or the declared `abstractType`.
+- `DATASOURCE_SAMPLE_ALL_NULL` (warning): A nested field is NULL on every
+  sampled element — on Snowflake and MySQL, what a field the elements lack
+  reads as.
+  Fix: Check the field's `code`.
 
 ## Data Source Errors (load and execution, OBSL 3.0+)
 
@@ -5294,6 +5514,13 @@ result, and `load_model` reports the count.
   names them.
   Fix: Usually nothing: they are what that fact holds. Drop those measures if
   every number must honour the filter.
+- `DIMENSION_NOT_APPLIED`: In a query over several facts, a fact cannot
+  reach a query dimension's data object, so its measures are not split by
+  that dimension: all their values sit in the row where it is NULL, and the
+  other rows show 0 or NULL (OBSL 3.1+; silent before). The warning names the
+  measures and the dimensions. The rows still add up to the total.
+  Fix: Join the fact to the dimension's data object, or query those measures
+  without the dimension.
 - `STATIC_FILTER_NOT_APPLIED`: A static model filter (default
   `enforce: relevant`) was skipped because the query cannot reach its data
   object. Silent before OBSL 2.35.

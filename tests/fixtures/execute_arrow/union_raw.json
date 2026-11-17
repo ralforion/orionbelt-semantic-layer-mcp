@@ -68,7 +68,7 @@
     ]
   ],
   "row_count": 4,
-  "execution_time_ms": 25.28,
+  "execution_time_ms": 1.58,
   "timezone": "Europe/Zagreb",
   "resolved": {
     "fact_tables": [
@@ -93,8 +93,8 @@
   "physical_tables": [
     "t.unions"
   ],
-  "cached": false,
-  "cached_at": null,
+  "cached": true,
+  "cached_at": "2026-11-17T10:39:01.322356+01:00",
   "ttl_seconds": 300,
   "ttl_source": "default_unknown",
   "ttl_limiting_table": "t.unions",
