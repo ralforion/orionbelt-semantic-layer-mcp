@@ -22,20 +22,28 @@ Entrypoint for Prefect Horizon: ``server.py:mcp``
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import gzip
 import importlib.metadata
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 import ssl
 import threading
+import zlib
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, date, datetime, timedelta, timezone
+from datetime import time as dt_time
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal, NoReturn
 from urllib.parse import quote, urlencode, urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from fastmcp import FastMCP
@@ -1657,6 +1665,479 @@ def _impl_describe_model(model_id: str | None = None) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Query results: fetched as the API's Arrow frame, returned as its JSON
+# ---------------------------------------------------------------------------
+#
+# ``execute_query`` asks the API for ``format=arrow`` and builds the JSON
+# response here, so turning rows into JSON is this server's work, not the
+# shared API's. On a result-cache hit the API then sends the stored bytes
+# without decoding them, where the JSON shape costs it a gunzip, an Arrow
+# decode and a per-cell conversion; the frame is also several times smaller
+# on the wire. Value-formatted and TSV results are still rendered by the API,
+# which needs the Python rows for those anyway.
+#
+# The frame is ``[u32 big-endian json_len][JSON envelope][gzip'd Arrow IPC
+# stream]``. The envelope is the JSON response minus ``rows``; the cells are
+# converted exactly as the API's JSON surface converts them
+# (``orionbelt.service.db_executor.arrow_to_rows`` + ``_serialize_value``,
+# then Pydantic's JSON encoding), so the tool returns what ``format=json``
+# would. ``tests/fixtures/execute_arrow`` holds frames recorded from a real
+# API beside its JSON for the same query, and the tests hold the two equal.
+
+_ARROW_RESULT_MEDIA_TYPE = "application/vnd.orionbelt.result+arrow"
+
+# Field order of the API's JSON ``QueryExecuteResponse``, so the output reads
+# the same as before (``sql`` first, ``rows`` after ``columns``). An envelope
+# field not listed here follows in the envelope's own order.
+_EXECUTE_RESPONSE_FIELDS = (
+    "sql",
+    "dialect",
+    "columns",
+    "rows",
+    "row_count",
+    "execution_time_ms",
+    "timezone",
+    "resolved",
+    "warnings",
+    "sql_valid",
+    "explain",
+    "physical_tables",
+    "cached",
+    "cached_at",
+    "ttl_seconds",
+    "ttl_source",
+    "ttl_limiting_table",
+    "federation",
+)
+
+# A numeric type name an Arrow extension type stores as text (ADBC's
+# PostgreSQL ``NUMERIC``), as the API's ``is_numeric_type_hint`` matches it.
+_NUMERIC_TYPE_TOKENS = ("number", "int", "float", "decimal", "numeric", "double", "real")
+
+
+def _arrow_text_numeric(arrow_type: Any) -> bool:
+    """An Arrow extension type wrapping a numeric SQL type as a string.
+
+    ADBC's PostgreSQL driver keeps ``NUMERIC`` beyond ``decimal128`` as
+    ``arrow.opaque[storage_type=string, type_name=numeric]``; the API parses
+    those cells to ``Decimal`` before serializing them, so this does too.
+    """
+    import pyarrow as pa
+
+    storage = getattr(arrow_type, "storage_type", None)
+    type_name = getattr(arrow_type, "type_name", None)
+    if storage is None or type_name is None or not pa.types.is_string(storage):
+        return False
+    if isinstance(type_name, bytes):
+        type_name = type_name.decode("utf-8", "ignore")
+    name = str(type_name).lower()
+    return any(token in name for token in _NUMERIC_TYPE_TOKENS)
+
+
+def _arrow_cell(value: Any, tz: ZoneInfo | None) -> Any:
+    """One cell as the API's JSON response carries it.
+
+    ``_serialize_value`` followed by Pydantic's JSON encoding: a naive
+    timestamp takes the result's zone, UTC is written ``Z``, a ``Decimal`` is
+    an exact string, bytes are base64, NaN and infinity are ``null``, and
+    anything else (intervals, lists, structs) is its ``str``.
+    """
+    if value is None or isinstance(value, str | int):  # bool is an int
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, datetime):
+        return _timestamp_text(value, tz)
+    if isinstance(value, dt_time):
+        text = value.isoformat()
+        return text[:-7] if text.endswith(".000000") else text
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, bytes):
+        return base64.b64encode(value).decode("ascii")
+    return str(value)  # Decimal, timedelta, list, dict, …
+
+
+def _timestamp_text(value: datetime, tz: ZoneInfo | None, nanos: int = 0) -> str:
+    """A timestamp's ISO text: a naive one takes the result's zone, UTC is ``Z``.
+
+    ``nanos`` (0-999) are the digits below the microsecond, which a Python
+    ``datetime`` cannot hold; they follow its fraction, nine digits in all.
+    """
+    if value.tzinfo is None and tz is not None:
+        value = value.replace(tzinfo=tz)
+    text = value.isoformat()
+    if nanos:
+        cut = len(value.replace(tzinfo=None).isoformat())  # the offset follows
+        text = text[:cut] + _nano_digits(value.microsecond, nanos) + text[cut:]
+    return text[:-6] + "Z" if text.endswith("+00:00") else text
+
+
+def _nano_digits(microsecond: int, nanos: int) -> str:
+    """The text to append to a fraction for 1-999 nanoseconds below ``microsecond``.
+
+    Python writes no fraction at all for a whole second, so then the whole
+    nine-digit fraction is added - as ``pandas.Timestamp.isoformat`` writes it.
+    """
+    return f"{nanos:03d}" if microsecond else f".{nanos:09d}"
+
+
+def _nanosecond_cells(column: Any, tz: ZoneInfo | None) -> list[Any]:
+    """JSON cells of a nanosecond timestamp, time or duration column.
+
+    ``to_pylist()`` turns such values into ``datetime`` / ``time`` /
+    ``timedelta`` only when no digit falls below the microsecond, and raises
+    otherwise unless pandas is installed (it is not here). So each value is
+    split into whole microseconds - floored, so 1969 and negative durations
+    keep a positive remainder - and the nanoseconds left over, which are
+    appended to the text. A timestamp then reads exactly as the API's JSON
+    writes it from a ``pandas.Timestamp`` (``2025-01-02T03:04:05.123456789``).
+    A time or duration keeps Python's own text plus the extra digits: the
+    API's JSON depends on its environment there (with pandas a time is cut to
+    the microsecond and a duration reads ``1 days 02:00:00``, without it the
+    API cannot serialize the value at all), and no digit is dropped here.
+    """
+    import pyarrow as pa
+
+    arrow_type = column.type
+    if pa.types.is_timestamp(arrow_type):
+        micro_type = pa.timestamp("us", tz=arrow_type.tz)
+    elif pa.types.is_time64(arrow_type):
+        micro_type = pa.time64("us")
+    else:
+        micro_type = pa.duration("us")
+    split = [None if v is None else divmod(v, 1000) for v in column.cast(pa.int64()).to_pylist()]
+    micros = pa.array([None if s is None else s[0] for s in split], micro_type).to_pylist()
+
+    cells: list[Any] = []
+    for value, parts in zip(micros, split, strict=True):
+        nanos = 0 if parts is None else parts[1]
+        if not nanos:
+            cells.append(_arrow_cell(value, tz))
+        elif isinstance(value, datetime):
+            cells.append(_timestamp_text(value, tz, nanos))
+        elif isinstance(value, dt_time):
+            cells.append(value.isoformat() + _nano_digits(value.microsecond, nanos))
+        else:  # timedelta
+            cells.append(str(value) + _nano_digits(value.microseconds, nanos))
+    return cells
+
+
+def _is_nano_temporal(arrow_type: Any) -> bool:
+    """A timestamp, time or duration counted in nanoseconds."""
+    import pyarrow as pa
+
+    types = pa.types
+    return (
+        types.is_timestamp(arrow_type)
+        or types.is_time64(arrow_type)
+        or types.is_duration(arrow_type)
+    ) and arrow_type.unit == "ns"
+
+
+def _is_list_like(arrow_type: Any) -> bool:
+    """Any of Arrow's list types: list, large, fixed-size, or a list view."""
+    import pyarrow as pa
+
+    types = pa.types
+    return (
+        types.is_list(arrow_type)
+        or types.is_large_list(arrow_type)
+        or types.is_fixed_size_list(arrow_type)
+        or types.is_list_view(arrow_type)
+        or types.is_large_list_view(arrow_type)
+    )
+
+
+def _holds_nanos(arrow_type: Any) -> bool:
+    """A nanosecond temporal, or a type with one anywhere inside it.
+
+    Looks through lists, maps, structs, unions and dictionaries: a value of
+    any of them goes through ``to_pylist()``, which raises on a nanosecond
+    value with digits below the microsecond unless pandas is installed.
+    """
+    import pyarrow as pa
+
+    types = pa.types
+    if _is_nano_temporal(arrow_type):
+        return True
+    if types.is_dictionary(arrow_type):
+        return _holds_nanos(arrow_type.value_type)
+    if (
+        _is_list_like(arrow_type)
+        or types.is_map(arrow_type)  # one field: its key/item struct
+        or types.is_struct(arrow_type)
+        or types.is_union(arrow_type)
+    ):
+        return any(_holds_nanos(arrow_type.field(i).type) for i in range(arrow_type.num_fields))
+    return False
+
+
+class _PandasRepr:
+    """A nested cell's value that prints as the pandas object the API printed.
+
+    A list or struct cell reaches the API's JSON as Python's ``str`` of the
+    value, and with pandas installed pyarrow hands a nanosecond timestamp or
+    duration inside it over as ``pandas.Timestamp`` / ``Timedelta``. This
+    stands in for one so ``str()`` of the cell reads the same, every digit kept.
+    """
+
+    __slots__ = ("_text",)
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def __repr__(self) -> str:
+        return self._text
+
+
+_UTC_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+_FIXED_OFFSET_RE = re.compile(r"^([+-])(\d\d):(\d\d)$")
+
+
+def _nested_nano_value(raw: int, arrow_type: Any) -> Any:
+    """One nanosecond temporal inside a nested cell, from its ``int64``.
+
+    As pandas writes it: ``Timestamp('2025-01-02 03:04:05.123456789')``
+    (zone-aware ``...+0100', tz='Europe/Berlin')``, a fixed offset labelled
+    ``pytz.FixedOffset(60)``), ``Timedelta('-1 days +23:59:59.999999999')``;
+    a time is a ``datetime.time`` cut to the microsecond, as pyarrow gives it.
+    """
+    import pyarrow as pa
+
+    if pa.types.is_time64(arrow_type):
+        micros = raw // 1000
+        hours, micros = divmod(micros, 3_600_000_000)
+        minutes, micros = divmod(micros, 60_000_000)
+        seconds, micros = divmod(micros, 1_000_000)
+        return dt_time(hours, minutes, seconds, micros)
+    if pa.types.is_duration(arrow_type):
+        days, rest = divmod(raw, 86_400_000_000_000)
+        hours, rest = divmod(rest, 3_600_000_000_000)
+        minutes, rest = divmod(rest, 60_000_000_000)
+        seconds, rest = divmod(rest, 1_000_000_000)
+        text = f"{days} days{' +' if raw < 0 else ' '}{hours:02}:{minutes:02}:{seconds:02}"
+        if rest:
+            micro, nanos = divmod(rest, 1000)
+            text += f".{micro:06d}" + (f"{nanos:03d}" if nanos else "")
+        return _PandasRepr(f"Timedelta('{text}')")
+
+    micros, nanos = divmod(raw, 1000)
+    moment = _UTC_EPOCH + timedelta(microseconds=micros)
+    label = ""
+    if arrow_type.tz:
+        fixed = _FIXED_OFFSET_RE.match(arrow_type.tz)
+        if fixed:
+            sign, hh, mm = fixed.groups()
+            offset = (int(hh) * 60 + int(mm)) * (-1 if sign == "-" else 1)
+            moment = moment.astimezone(timezone(timedelta(minutes=offset)))
+            label = "UTC" if offset == 0 else f"pytz.FixedOffset({offset})"
+        else:
+            with contextlib.suppress(ZoneInfoNotFoundError, ValueError):
+                moment = moment.astimezone(ZoneInfo(arrow_type.tz))
+            label = arrow_type.tz
+    stamp = f"{moment.year}-{moment:%m-%d %H:%M:%S}"
+    if nanos:
+        stamp += f".{moment.microsecond:06d}{nanos:03d}"
+    elif moment.microsecond:
+        stamp += f".{moment.microsecond:06d}"
+    if not arrow_type.tz:
+        return _PandasRepr(f"Timestamp('{stamp}')")
+    return _PandasRepr(f"Timestamp('{stamp}{moment:%z}', tz='{label}')")
+
+
+def _union_values(array: Any, members: list[list[Any]]) -> list[Any]:
+    """Each row of a union array: its member's value, taken from ``members``.
+
+    ``members[i]`` holds the values of child ``i``. A sparse union's children
+    run alongside the array; a dense union's are indexed by its offsets. The
+    type ids and offsets are read from the buffers, because pyarrow's
+    ``type_codes`` and ``offsets`` ignore the array's own slice offset.
+    """
+    import pyarrow as pa
+
+    buffers = array.buffers()
+    size, start = len(array), array.offset
+    codes = pa.Array.from_buffers(pa.int8(), size, [None, buffers[1]], offset=start)
+    member = {code: i for i, code in enumerate(array.type.type_codes)}
+    if array.type.mode == "dense":
+        offsets = pa.Array.from_buffers(pa.int32(), size, [None, buffers[2]], offset=start)
+        return [
+            members[member[code]][at]
+            for code, at in zip(codes.to_pylist(), offsets.to_pylist(), strict=True)
+        ]
+    return [members[member[code]][row] for row, code in enumerate(codes.to_pylist())]
+
+
+def _nested_values(array: Any) -> list[Any]:
+    """``array.to_pylist()``, each nanosecond temporal in it as pandas gives it.
+
+    These are the Python values whose ``str()`` the API writes for a nested
+    cell (see :class:`_PandasRepr`). An array holding a nanosecond value is
+    taken apart down to it, since ``to_pylist()`` would raise on it; the rest
+    is left to ``to_pylist()``.
+    """
+    import pyarrow as pa
+
+    types = pa.types
+    arrow_type = array.type
+    if not _holds_nanos(arrow_type):
+        return array.to_pylist()
+    if _is_nano_temporal(arrow_type):
+        return [
+            None if raw is None else _nested_nano_value(raw, arrow_type)
+            for raw in array.cast(pa.int64()).to_pylist()
+        ]
+    if types.is_dictionary(arrow_type):
+        return _nested_values(array.dictionary_decode())
+    if types.is_union(arrow_type):
+        members = [_nested_values(array.field(i)) for i in range(arrow_type.num_fields)]
+        return _union_values(array, members)
+
+    valid = array.is_valid().to_pylist()
+    if types.is_struct(arrow_type):
+        names = [arrow_type.field(i).name for i in range(arrow_type.num_fields)]
+        fields = [_nested_values(array.field(i)) for i in range(arrow_type.num_fields)]
+        return [
+            dict(zip(names, row, strict=True)) if ok else None
+            for ok, row in zip(valid, zip(*fields, strict=True), strict=True)
+        ]
+    if types.is_map(arrow_type):
+        # A map's keys and items span the whole buffer; its offsets are sliced.
+        pairs = list(zip(_nested_values(array.keys), _nested_values(array.items), strict=True))
+        bounds = array.offsets.to_pylist()
+        return [pairs[bounds[i] : bounds[i + 1]] if ok else None for i, ok in enumerate(valid)]
+
+    # A list: flatten() leaves out null rows, even ones backed by values, and
+    # keeps the rest in order. (No list_value_length(): pyarrow 16 has no
+    # list-view kernel for it.)
+    if types.is_fixed_size_list(arrow_type):
+        lengths = [arrow_type.list_size] * len(array)
+    elif types.is_list_view(arrow_type) or types.is_large_list_view(arrow_type):
+        lengths = array.sizes.to_pylist()
+    else:
+        bounds = array.offsets.to_pylist()  # sliced with the array
+        lengths = [bounds[i + 1] - bounds[i] for i in range(len(array))]
+    flat = _nested_values(array.flatten())
+    values: list[Any] = []
+    start = 0
+    for ok, length in zip(valid, lengths, strict=True):
+        values.append(flat[start : start + length] if ok else None)
+        start += length if ok else 0
+    return values
+
+
+def _nanos_cells(array: Any, tz: ZoneInfo | None) -> list[Any]:
+    """JSON cells of one chunk of a column that holds nanosecond temporals.
+
+    A dictionary's or a union's cell is the value it stands for, serialized
+    as the API serializes any cell. The API's column-level steps (intervals,
+    text-stored numerics) key on the column's type, so they do not apply. Any
+    other nested cell is ``str()`` of its Python value.
+    """
+    import pyarrow as pa
+
+    arrow_type = array.type
+    if _is_nano_temporal(arrow_type):
+        return _nanosecond_cells(array, tz)
+    if pa.types.is_dictionary(arrow_type):
+        return _nanos_cells(array.dictionary_decode(), tz)
+    if pa.types.is_union(arrow_type):
+        members = [_nanos_cells(array.field(i), tz) for i in range(arrow_type.num_fields)]
+        return _union_values(array, members)
+    return [_arrow_cell(value, tz) for value in _nested_values(array)]
+
+
+def _arrow_column_cells(column: Any, tz: ZoneInfo | None) -> list[Any]:
+    """Convert one Arrow column to JSON cells."""
+    import pyarrow as pa
+
+    types = pa.types
+    arrow_type = column.type
+    if _holds_nanos(arrow_type):
+        return [cell for chunk in column.chunks for cell in _nanos_cells(chunk, tz)]
+    values = column.to_pylist()
+    if (
+        types.is_integer(arrow_type)
+        or types.is_boolean(arrow_type)
+        or types.is_string(arrow_type)
+        or types.is_large_string(arrow_type)
+        or types.is_null(arrow_type)
+    ):
+        return values  # already what JSON carries
+    if _arrow_text_numeric(arrow_type):
+        parsed: list[Any] = []
+        for value in values:
+            if isinstance(value, str):
+                with contextlib.suppress(ArithmeticError, ValueError):
+                    value = Decimal(value)
+            parsed.append(value)
+        values = parsed
+    elif types.is_interval(arrow_type) or types.is_duration(arrow_type):
+        # A month-day-nano interval reads as a ``MonthDayNano`` tuple; the API
+        # turns it into a timedelta counting a month as 30 days, as DuckDB does.
+        values = [
+            timedelta(days=v.months * 30 + v.days, microseconds=v.nanoseconds // 1000)
+            if getattr(v, "months", None) is not None
+            else v
+            for v in values
+        ]
+    return [_arrow_cell(value, tz) for value in values]
+
+
+def _decode_arrow_result(body: bytes) -> dict[str, Any]:
+    """Decode the API's ``format=arrow`` execute frame into its JSON response."""
+    import pyarrow as pa
+    import pyarrow.ipc
+
+    if len(body) < 4:
+        raise ToolError("API returned a malformed Arrow result: the frame is truncated")
+    meta_len = int.from_bytes(body[:4], "big")
+    if 4 + meta_len > len(body):
+        raise ToolError("API returned a malformed Arrow result: the envelope is truncated")
+    try:
+        envelope = json.loads(body[4 : 4 + meta_len])
+        with pyarrow.ipc.open_stream(pa.BufferReader(gzip.decompress(body[4 + meta_len :]))) as r:
+            table = r.read_all()
+    except (ValueError, OSError, EOFError, zlib.error, pa.ArrowException) as exc:
+        raise ToolError(f"API returned a malformed Arrow result: {exc}") from None
+    if not isinstance(envelope, dict):
+        raise ToolError("API returned a malformed Arrow result: the envelope is not an object")
+
+    tz: ZoneInfo | None = None
+    if envelope.get("timezone"):
+        try:
+            tz = ZoneInfo(str(envelope["timezone"]))
+        except (ZoneInfoNotFoundError, ValueError):
+            logger.warning(
+                "Unknown result timezone %r; timestamps stay unlabelled", envelope["timezone"]
+            )
+
+    columns = [_arrow_column_cells(column, tz) for column in table.columns]
+    rows = [list(row) for row in zip(*columns, strict=True)] if columns else []
+    if not envelope.get("columns"):
+        envelope["columns"] = [{"name": name} for name in table.column_names]
+
+    response: dict[str, Any] = {}
+    for field in _EXECUTE_RESPONSE_FIELDS:
+        if field == "rows":
+            response["rows"] = rows
+        elif field in envelope:
+            response[field] = envelope[field]
+    for field, value in envelope.items():
+        response.setdefault(field, value)
+    return response
+
+
+def _execute_response(resp: httpx.Response) -> Any:
+    """An execute response as JSON data, decoding the Arrow frame when sent one."""
+    media_type = resp.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if media_type == _ARROW_RESULT_MEDIA_TYPE:
+        return _decode_arrow_result(resp.content)
+    return _parse_json(resp)
+
+
 def _impl_execute_query(
     model_id: str | None,
     query_json: str,
@@ -1677,7 +2158,12 @@ def _impl_execute_query(
             "get_json_schema('query') and worked examples via get_example."
         ) from exc
 
-    extra_params: dict[str, str] = {"format": output_format}
+    if output_format not in ("json", "tsv"):
+        raise ToolError(f"output_format must be 'json' or 'tsv'; got {output_format!r}")
+    # Raw JSON comes over as the Arrow frame and is converted here (see
+    # _decode_arrow_result); formatted values and TSV are rendered by the API.
+    api_format = "arrow" if output_format == "json" and not format_values else output_format
+    extra_params: dict[str, str] = {"format": api_format}
     if format_values is not None:
         extra_params["format_values"] = str(format_values).lower()
     if locale is not None:
@@ -1698,7 +2184,7 @@ def _impl_execute_query(
 
     if output_format == "tsv":
         return resp.text
-    return json.dumps(_parse_json(resp), indent=2)
+    return json.dumps(_execute_response(resp), indent=2)
 
 
 def _impl_search_values(

@@ -1,0 +1,204 @@
+{
+  "sql": "SELECT\n  \"Countries\".\"countryname\" AS \"Country Name\",\n  CAST(SUM(\"Sales\".\"salesamount\") AS DECIMAL(18, 2)) AS \"Total Sales\",\n  CAST(COUNT(DISTINCT \"Sales\".\"salesclient\") AS BIGINT) AS \"Distinct Clients\"\nFROM \"orionbelt_1\".\"sales\" AS \"Sales\"\nLEFT JOIN \"orionbelt_1\".\"clients\" AS \"Clients\"\n  ON \"Sales\".\"salesclient\" = \"Clients\".\"clientid\"\nLEFT JOIN \"orionbelt_1\".\"countries\" AS \"Countries\"\n  ON \"Clients\".\"clientcountryid\" = \"Countries\".\"countryid\"\nGROUP BY ALL\nORDER BY\n  SUM(\"Sales\".\"salesamount\") DESC\nLIMIT 25",
+  "dialect": "duckdb",
+  "columns": [
+    {
+      "name": "Country Name",
+      "type": "string",
+      "format": null
+    },
+    {
+      "name": "Total Sales",
+      "type": "decimal(18, 2)",
+      "format": "#,##0.00"
+    },
+    {
+      "name": "Distinct Clients",
+      "type": "bigint",
+      "format": "#,##0"
+    }
+  ],
+  "rows": [
+    [
+      "Singapore",
+      "9284889.34",
+      26
+    ],
+    [
+      "Mexico",
+      "5142120.39",
+      20
+    ],
+    [
+      "Sweden",
+      "3077505.53",
+      17
+    ],
+    [
+      "France",
+      "2942833.39",
+      17
+    ],
+    [
+      "Japan",
+      "2106985.67",
+      15
+    ],
+    [
+      "India",
+      "1936466.31",
+      24
+    ],
+    [
+      "United Arab Emirates",
+      "1543647.19",
+      23
+    ],
+    [
+      "Italy",
+      "1533318.11",
+      19
+    ],
+    [
+      "Argentina",
+      "1511486.43",
+      19
+    ],
+    [
+      "South Africa",
+      "1440453.10",
+      16
+    ],
+    [
+      "Germany",
+      "1318099.79",
+      19
+    ],
+    [
+      "Switzerland",
+      "1247370.03",
+      20
+    ],
+    [
+      "China",
+      "1238892.00",
+      21
+    ],
+    [
+      "United States",
+      "1081773.00",
+      22
+    ],
+    [
+      "Netherlands",
+      "1061394.21",
+      13
+    ],
+    [
+      "Canada",
+      "919955.67",
+      21
+    ],
+    [
+      "Brazil",
+      "887892.21",
+      19
+    ],
+    [
+      "Spain",
+      "823097.98",
+      22
+    ],
+    [
+      "United Kingdom",
+      "631211.21",
+      20
+    ],
+    [
+      "Australia",
+      "598881.84",
+      19
+    ],
+    [
+      "South Korea",
+      "578306.63",
+      18
+    ],
+    [
+      "Croatia",
+      "574728.02",
+      11
+    ],
+    [
+      "Austria",
+      "431720.11",
+      23
+    ],
+    [
+      "Poland",
+      "383543.53",
+      11
+    ],
+    [
+      "Egypt",
+      "161937.92",
+      16
+    ]
+  ],
+  "row_count": 25,
+  "execution_time_ms": 21.57,
+  "timezone": "Europe/Zagreb",
+  "resolved": {
+    "fact_tables": [
+      "Sales"
+    ],
+    "dimensions": [
+      "Country Name"
+    ],
+    "measures": [
+      "Total Sales",
+      "Distinct Clients"
+    ]
+  },
+  "warnings": [],
+  "sql_valid": true,
+  "explain": {
+    "planner": "Star Schema",
+    "planner_reason": "All requested objects are reachable from a single base via directed joins",
+    "base_object": "Sales",
+    "base_object_reason": "\"Sales\" selected as base \u2014 sole measure source object",
+    "joins": [
+      {
+        "from_object": "Sales",
+        "to_object": "Clients",
+        "join_columns": [
+          "Sales Client = Client ID"
+        ],
+        "reason": "Join \"Sales\" \u2192 \"Clients\" to include columns needed by the query"
+      },
+      {
+        "from_object": "Clients",
+        "to_object": "Countries",
+        "join_columns": [
+          "Client Country ID = Country ID"
+        ],
+        "reason": "Join \"Clients\" \u2192 \"Countries\" to include columns needed by the query"
+      }
+    ],
+    "where_filter_count": 0,
+    "having_filter_count": 0,
+    "has_totals": false,
+    "cfl_legs": []
+  },
+  "physical_tables": [
+    "orionbelt_1.clients",
+    "orionbelt_1.countries",
+    "orionbelt_1.sales"
+  ],
+  "cached": false,
+  "cached_at": null,
+  "ttl_seconds": 86400,
+  "ttl_source": "all_static",
+  "ttl_limiting_table": null,
+  "federation": null
+}

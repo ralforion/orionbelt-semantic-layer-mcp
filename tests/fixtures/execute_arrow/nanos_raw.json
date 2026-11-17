@@ -1,0 +1,70 @@
+{
+  "sql": "SELECT\n  \"Nanos\".\"id\" AS \"Nanos.Id\",\n  \"Nanos\".\"tsns\" AS \"Nanos.Tsns\"\nFROM \"t\".\"nanos\" AS \"Nanos\"\nORDER BY\n  \"Nanos\".\"id\" ASC\nLIMIT 1000",
+  "dialect": "duckdb",
+  "columns": [
+    {
+      "name": "Nanos.Id",
+      "type": "number",
+      "format": null
+    },
+    {
+      "name": "Nanos.Tsns",
+      "type": "datetime",
+      "format": null
+    }
+  ],
+  "rows": [
+    [
+      1,
+      "2025-01-02T03:04:05.123456789+01:00"
+    ],
+    [
+      2,
+      "1969-12-31T23:59:58.999999999+01:00"
+    ],
+    [
+      3,
+      "2025-01-02T03:04:05.000000123+01:00"
+    ],
+    [
+      4,
+      "2025-07-01T00:00:00.123456+02:00"
+    ],
+    [
+      5,
+      null
+    ]
+  ],
+  "row_count": 5,
+  "execution_time_ms": 30.18,
+  "timezone": "Europe/Zagreb",
+  "resolved": {
+    "fact_tables": [
+      "Nanos"
+    ],
+    "dimensions": [],
+    "measures": []
+  },
+  "warnings": [],
+  "sql_valid": true,
+  "explain": {
+    "planner": "Raw",
+    "planner_reason": "Raw-mode projection of physical columns \u2014 no aggregation, no GROUP BY",
+    "base_object": "Nanos",
+    "base_object_reason": "\"Nanos\" selected as base for single-object query",
+    "joins": [],
+    "where_filter_count": 0,
+    "having_filter_count": 0,
+    "has_totals": false,
+    "cfl_legs": []
+  },
+  "physical_tables": [
+    "t.nanos"
+  ],
+  "cached": true,
+  "cached_at": "2026-11-16T23:07:33.726744+01:00",
+  "ttl_seconds": 300,
+  "ttl_source": "default_unknown",
+  "ttl_limiting_table": "t.nanos",
+  "federation": null
+}

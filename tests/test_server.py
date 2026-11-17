@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import importlib
 import inspect
 import json
@@ -11,6 +12,7 @@ import re
 import ssl
 import sys
 import types
+from pathlib import Path
 
 import httpx
 import pytest
@@ -695,6 +697,432 @@ def test_execute_query_multi_model_mode(mock_api: respx.MockRouter):
     assert body["model_id"] == "m001"
     assert body["dialect"] == "postgres"
     assert "select" in body["query"]
+
+
+# ---------------------------------------------------------------------------
+# execute_query: results fetched as the API's Arrow frame, returned as JSON
+# ---------------------------------------------------------------------------
+
+_ARROW_FIXTURES = Path(__file__).parent / "fixtures" / "execute_arrow"
+_ARROW_HEADERS = {"content-type": "application/vnd.orionbelt.result+arrow"}
+# Per request, so a frame and a JSON body fetched apart differ in them.
+_PER_REQUEST_FIELDS = {"execution_time_ms", "cached", "cached_at"}
+
+
+def _arrow_frame(envelope: dict, table) -> bytes:
+    """Build the API's ``[u32 len][JSON envelope][gzip'd Arrow IPC]`` frame."""
+    import pyarrow as pa
+    import pyarrow.ipc
+
+    sink = pa.BufferOutputStream()
+    with pyarrow.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    meta = json.dumps(envelope).encode()
+    return len(meta).to_bytes(4, "big") + meta + gzip.compress(sink.getvalue().to_pybytes())
+
+
+@pytest.mark.parametrize(
+    "fixture", sorted(p.stem for p in _ARROW_FIXTURES.glob("*.arrow")), ids=str
+)
+def test_execute_query_arrow_frame_returns_the_apis_json(mock_api: respx.MockRouter, fixture: str):
+    """A frame recorded from a real API converts to the JSON that API returned
+    for the same query: every cell (decimals, NaN/infinity, zoned and naive
+    timestamps, times, intervals, blobs, NULLs, empty results) and the field
+    order. See tests/fixtures/execute_arrow/README.md for how they were made."""
+    server._single_model_mode = True
+    route = mock_api.post("/v1/query/execute").mock(
+        return_value=httpx.Response(
+            200,
+            content=(_ARROW_FIXTURES / f"{fixture}.arrow").read_bytes(),
+            headers=_ARROW_HEADERS,
+        )
+    )
+    expected = json.loads((_ARROW_FIXTURES / f"{fixture}.json").read_text())
+
+    result = json.loads(server._impl_execute_query(None, '{"select": {"fields": ["X.Y"]}}'))
+
+    assert route.calls.last.request.url.params["format"] == "arrow"
+    assert list(result) == [k for k in expected if k in result]
+    for key in result.keys() - _PER_REQUEST_FIELDS:
+        assert result[key] == expected[key], key
+    # The 3.0 API's envelope carries neither the cache TTL nor ``federation``;
+    # everything else the JSON response has, the converted frame has too.
+    assert expected.keys() - result.keys() <= {
+        "ttl_seconds",
+        "ttl_source",
+        "ttl_limiting_table",
+        "federation",
+    }
+
+
+def test_execute_query_arrow_multi_model_session_route(mock_api: respx.MockRouter):
+    """Multi-model mode asks the session route for the frame too."""
+    import pyarrow as pa
+
+    _mock_create_session(mock_api)
+    frame = _arrow_frame(
+        {"sql": "SELECT 1", "dialect": "duckdb", "columns": [{"name": "n"}], "row_count": 1},
+        pa.table({"n": pa.array([1], pa.int64())}),
+    )
+    route = mock_api.post("/v1/sessions/test-session-1/query/execute").mock(
+        return_value=httpx.Response(200, content=frame, headers=_ARROW_HEADERS)
+    )
+
+    result = json.loads(server._impl_execute_query("m001", '{"select": {"measures": ["N"]}}'))
+
+    assert route.calls.last.request.url.params["format"] == "arrow"
+    assert result == {
+        "sql": "SELECT 1",
+        "dialect": "duckdb",
+        "columns": [{"name": "n"}],
+        "rows": [[1]],
+        "row_count": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "api_format"),
+    [
+        ({"format_values": True}, "json"),
+        ({"output_format": "tsv"}, "tsv"),
+        ({"format_values": False}, "arrow"),
+    ],
+)
+def test_execute_query_api_renders_formatted_values_and_tsv(
+    mock_api: respx.MockRouter, kwargs: dict, api_format: str
+):
+    """Formatted values and TSV need the API's own rendering, so only raw JSON
+    is fetched as Arrow; a JSON reply is still read as JSON."""
+    server._single_model_mode = True
+    route = mock_api.post("/v1/query/execute").mock(
+        return_value=httpx.Response(200, json={"sql": "SELECT 1", "rows": [["1,0"]]})
+    )
+
+    server._impl_execute_query(None, '{"select": {"measures": ["N"]}}', **kwargs)
+
+    assert route.calls.last.request.url.params["format"] == api_format
+
+
+def test_execute_query_rejects_unknown_output_format(mock_api: respx.MockRouter):
+    """``arrow`` is how this server talks to the API, not a tool output."""
+    server._single_model_mode = True
+
+    with pytest.raises(_ToolError, match="output_format must be 'json' or 'tsv'"):
+        server._impl_execute_query(None, '{"select": {}}', output_format="arrow")
+    assert not mock_api.calls
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"\x00\x00",
+        b"\x00\x00\x00\x09{}",
+        b"\x00\x00\x00\x02{}not gzip",
+        b"\x00\x00\x00\x02[]" + gzip.compress(b"not arrow"),
+    ],
+    ids=["no-length", "short-envelope", "bad-gzip", "bad-arrow"],
+)
+def test_execute_query_malformed_arrow_frame_is_a_tool_error(
+    mock_api: respx.MockRouter, body: bytes
+):
+    server._single_model_mode = True
+    mock_api.post("/v1/query/execute").mock(
+        return_value=httpx.Response(200, content=body, headers=_ARROW_HEADERS)
+    )
+
+    with pytest.raises(_ToolError, match="malformed Arrow result"):
+        server._impl_execute_query(None, '{"select": {}}')
+
+
+def test_decode_arrow_result_cells():
+    """The cells the recorded fixtures cannot reach: text-stored numerics
+    (ADBC PostgreSQL ``NUMERIC``), UTC as ``Z``, an unknown result zone,
+    and envelope fields the server does not know yet."""
+    import datetime as dt
+
+    import pyarrow as pa
+
+    table = pa.table(
+        {
+            "utc": pa.array([dt.datetime(2025, 1, 2, 3, 4, 5)], pa.timestamp("us", tz="UTC")),
+            "naive": pa.array([dt.datetime(2025, 1, 2, 3, 4, 5)], pa.timestamp("us")),
+            "f": pa.array([-0.0], pa.float64()),
+            "lst": pa.array([[1, 2]], pa.list_(pa.int64())),
+        }
+    )
+    frame = _arrow_frame({"timezone": "Not/AZone", "future_field": 1}, table)
+
+    out = server._decode_arrow_result(frame)
+
+    assert out["rows"] == [["2025-01-02T03:04:05Z", "2025-01-02T03:04:05", -0.0, "[1, 2]"]]
+    assert out["columns"] == [{"name": n} for n in ("utc", "naive", "f", "lst")]
+    assert list(out) == ["columns", "rows", "timezone", "future_field"]
+
+    opaque = getattr(pa, "opaque", None)
+    if opaque is None:  # pragma: no cover - pyarrow < 17
+        pytest.skip("pyarrow without the canonical opaque extension type")
+    numeric = pa.ExtensionArray.from_storage(
+        opaque(pa.string(), "numeric", "postgresql"), pa.array(["1.50", "1e3", None, "x"])
+    )
+    out = server._decode_arrow_result(_arrow_frame({}, pa.table({"n": numeric})))
+    assert out["rows"] == [["1.50"], ["1E+3"], [None], ["x"]]
+
+
+def test_decode_arrow_result_nanoseconds_keep_every_digit():
+    """Nanosecond values below the microsecond made ``to_pylist()`` raise
+    without pandas, failing the whole query. Timestamps read as the API's JSON
+    writes them through ``pandas.Timestamp.isoformat`` (the expected texts are
+    pandas' own); times and durations keep Python's text plus the digits.
+    ``nanos_raw`` holds the same for a real DuckDB ``TIMESTAMP_NS`` result."""
+    import pyarrow as pa
+
+    ns = 1735787045123456789  # 2025-01-02T03:04:05.123456789Z
+    table = pa.table(
+        {
+            "naive": pa.array([ns, -1_000_000_001, 1735787045000000123, None], pa.timestamp("ns")),
+            "berlin": pa.array([ns, ns, ns, None], pa.timestamp("ns", tz="Europe/Berlin")),
+            "utc": pa.array([1735787045000000123, None, None, None], pa.timestamp("ns", tz="UTC")),
+            "time": pa.array(
+                [3_723_000_000_123, 3_723_123_456_789, 3_723_000_000_000, None], pa.time64("ns")
+            ),
+            "duration": pa.array(
+                [93_600_000_000_123, 93_600_000_000_000, -1, 500_000], pa.duration("ns")
+            ),
+        }
+    )
+
+    out = server._decode_arrow_result(_arrow_frame({}, table))
+
+    assert [list(col) for col in zip(*out["rows"], strict=True)] == [
+        [
+            "2025-01-02T03:04:05.123456789",
+            "1969-12-31T23:59:58.999999999",  # floored: the remainder stays positive
+            "2025-01-02T03:04:05.000000123",
+            None,
+        ],
+        ["2025-01-02T04:04:05.123456789+01:00"] * 3 + [None],
+        ["2025-01-02T03:04:05.000000123Z", None, None, None],
+        ["01:02:03.000000123", "01:02:03.123456789", "01:02:03", None],
+        [
+            "1 day, 2:00:00.000000123",
+            "1 day, 2:00:00",
+            "-1 day, 23:59:59.999999999",
+            "0:00:00.000500",
+        ],
+    ]
+    # A naive one takes the result's zone, the nanoseconds before the offset.
+    zoned = server._decode_arrow_result(
+        _arrow_frame(
+            {"timezone": "Europe/Zagreb"}, pa.table({"t": pa.array([ns], pa.timestamp("ns"))})
+        )
+    )
+    assert zoned["rows"] == [["2025-01-02T03:04:05.123456789+01:00"]]
+
+
+@pytest.mark.parametrize(
+    ("arrow_type", "values", "expected"),
+    [
+        pytest.param(
+            "list_ts_berlin",
+            [1735787045123456789, 1735787045123456000, 1735787045000000000],
+            "[Timestamp('2025-01-02 04:04:05.123456789+0100', tz='Europe/Berlin'), "
+            "Timestamp('2025-01-02 04:04:05.123456+0100', tz='Europe/Berlin'), "
+            "Timestamp('2025-01-02 04:04:05+0100', tz='Europe/Berlin')]",
+            id="zoned",
+        ),
+        pytest.param(
+            "list_ts_minus0530",
+            [1735787045123456789],
+            "[Timestamp('2025-01-01 21:34:05.123456789-0530', tz='pytz.FixedOffset(-330)')]",
+            id="fixed-offset",
+        ),
+        pytest.param(
+            "list_ts_plus0000",
+            [0],
+            "[Timestamp('1970-01-01 00:00:00+0000', tz='UTC')]",
+            id="zero-offset",
+        ),
+        pytest.param(
+            "list_duration",
+            [93_600_000_000_123, -1, -93_600_000_000_123, 1_500_000_000, 0],
+            "[Timedelta('1 days 02:00:00.000000123'), Timedelta('-1 days +23:59:59.999999999'), "
+            "Timedelta('-2 days +21:59:59.999999877'), Timedelta('0 days 00:00:01.500000'), "
+            "Timedelta('0 days 00:00:00')]",
+            id="durations",
+        ),
+        pytest.param(
+            "map_ts",
+            [("k", 1735787045123456789)],
+            "[('k', Timestamp('2025-01-02 03:04:05.123456789'))]",
+            id="map",
+        ),
+        pytest.param(
+            "fixed_list_time",
+            [3_723_123_456_789, 0],
+            "[datetime.time(1, 2, 3, 123456), datetime.time(0, 0)]",
+            id="time-cut-to-microsecond",
+        ),
+    ],
+)
+def test_decode_arrow_result_nested_nanoseconds(arrow_type: str, values: list, expected: str):
+    """A list, struct or map holding a nanosecond temporal made ``to_pylist()``
+    raise without pandas, failing the whole query. Such a cell reaches the
+    API's JSON as ``str()`` of the value pyarrow builds with pandas installed;
+    each expected text here is that output, taken from pandas itself.
+    ``nested_raw`` holds the same for real DuckDB list and struct columns."""
+    import pyarrow as pa
+
+    ns = pa.timestamp("ns")
+    types = {
+        "list_ts_berlin": pa.list_(pa.timestamp("ns", tz="Europe/Berlin")),
+        "list_ts_minus0530": pa.list_(pa.timestamp("ns", tz="-05:30")),
+        "list_ts_plus0000": pa.list_(pa.timestamp("ns", tz="+00:00")),
+        "list_duration": pa.large_list(pa.duration("ns")),
+        "map_ts": pa.map_(pa.string(), ns),
+        "fixed_list_time": pa.list_(pa.time64("ns"), 2),
+    }
+    table = pa.table({"c": pa.array([values, None], types[arrow_type])})
+
+    out = server._decode_arrow_result(_arrow_frame({}, table))
+
+    assert out["rows"] == [[expected], [None]]
+
+
+_ZAGREB_NS = "2025-01-02T03:04:05.123456789+01:00"
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        pytest.param(
+            "dictionary",
+            [
+                "2025-01-02T04:04:05.123456789+01:00",
+                None,
+                "1970-01-01T00:59:59.999999999+01:00",
+                "2025-01-02T04:04:05.123456789+01:00",
+            ],
+            id="dictionary",
+        ),
+        pytest.param("dictionary_naive", [_ZAGREB_NS, _ZAGREB_NS, None], id="dictionary-naive"),
+        pytest.param(
+            "dictionary_in_list",
+            [
+                "[Timedelta('0 days 00:00:00.000000123'), None]",
+                None,
+                "[Timedelta('-1 days +23:59:59.999999999')]",
+            ],
+            id="dictionary-in-list",
+        ),
+        pytest.param(
+            "dense_union",
+            [_ZAGREB_NS, "x", None, "1969-12-31T23:59:59.999999999+01:00"],
+            id="dense-union",
+        ),
+        pytest.param(
+            "union_type_codes",
+            [
+                "2025-01-02T04:04:05.123456789+01:00",
+                2,
+                "1970-01-01T01:00:00.000000123+01:00",
+            ],
+            id="union-type-codes",
+        ),
+        pytest.param("union_of_dictionary", [_ZAGREB_NS, 7, _ZAGREB_NS], id="union-of-dictionary"),
+        pytest.param(
+            "list_view",
+            [
+                "[Timestamp('1969-12-31 23:59:59.999999999')]",
+                "[Timestamp('2025-01-02 03:04:05.123456789'), None]",
+                None,
+            ],
+            id="list-view",
+        ),
+        pytest.param(
+            "map_of_unions",
+            ["[('a', Timestamp('2025-01-02 03:04:05.123456789')), ('b', 7)]", "[]"],
+            id="map-of-unions",
+        ),
+    ],
+)
+def test_decode_arrow_result_dictionaries_unions_list_views(case: str, expected: list):
+    """A dictionary, union or list view holding a nanosecond temporal made
+    ``to_pylist()`` raise without pandas, failing the whole query. A
+    dictionary's or union's cell is the value it stands for, written as the
+    API writes any cell; a nested one is ``str()`` of the value. Each
+    expected list is the API's own output (``arrow_to_rows`` with pandas
+    installed) for the same array.
+    ``union_raw`` holds real DuckDB ``UNION`` columns."""
+    from zoneinfo import ZoneInfo
+
+    import pyarrow as pa
+
+    ns = 1735787045123456789  # 2025-01-02T03:04:05.123456789Z
+    naive, berlin = pa.timestamp("ns"), pa.timestamp("ns", tz="Europe/Berlin")
+    build = {
+        "dictionary": lambda: pa.DictionaryArray.from_arrays(
+            pa.array([1, None, 0, 1], pa.int32()), pa.array([-1, ns], berlin)
+        ),
+        "dictionary_naive": lambda: pa.DictionaryArray.from_arrays(
+            pa.array([0, 0, None], pa.int8()), pa.array([ns], naive)
+        ),
+        "dictionary_in_list": lambda: pa.ListArray.from_arrays(
+            pa.array([0, 2, 2, 3], pa.int32()),
+            pa.DictionaryArray.from_arrays(
+                pa.array([0, None, 1], pa.int8()), pa.array([123, -1], pa.duration("ns"))
+            ),
+            mask=pa.array([False, True, False]),
+        ),
+        "dense_union": lambda: pa.UnionArray.from_dense(
+            pa.array([0, 1, 0, 0], pa.int8()),
+            pa.array([0, 0, 1, 2], pa.int32()),
+            [pa.array([ns, None, -1], naive), pa.array(["x"])],
+            ["ts", "s"],
+        ),
+        "union_type_codes": lambda: pa.UnionArray.from_sparse(
+            pa.array([9, 5, 9], pa.int8()),
+            [pa.array([1, 2, 3]), pa.array([ns, ns, 123], berlin)],
+            ["n", "ts"],
+            [5, 9],
+        ),
+        "union_of_dictionary": lambda: pa.UnionArray.from_sparse(
+            pa.array([0, 1, 0], pa.int8()),
+            [
+                pa.DictionaryArray.from_arrays(
+                    pa.array([0, 0, 0], pa.int8()), pa.array([ns], naive)
+                ),
+                pa.array([None, 7, None], pa.int64()),
+            ],
+            ["d", "n"],
+        ),
+        "list_view": lambda: pa.ListViewArray.from_arrays(
+            pa.array([2, 0, 0], pa.int32()),
+            pa.array([1, 2, 3], pa.int32()),  # the null row is backed by values
+            pa.array([ns, None, -1], naive),
+            mask=pa.array([False, False, True]),
+        ),
+        "map_of_unions": lambda: pa.MapArray.from_arrays(
+            pa.array([0, 2, 2], pa.int32()),
+            pa.array(["a", "b"]),
+            pa.UnionArray.from_dense(
+                pa.array([0, 1], pa.int8()),
+                pa.array([0, 0], pa.int32()),
+                [pa.array([ns], naive), pa.array([7])],
+                ["ts", "n"],
+            ),
+        ),
+    }
+    array = build[case]()
+
+    out = server._decode_arrow_result(
+        _arrow_frame({"timezone": "Europe/Zagreb"}, pa.table({"c": array}))
+    )
+
+    assert [row[0] for row in out["rows"]] == expected
+    # A column in chunks, the second a slice: pyarrow's union type_codes and
+    # offsets ignore a slice's offset, so they are read from the buffers.
+    chunked = pa.chunked_array([array.slice(0, 1), array.slice(1)])
+    assert server._arrow_column_cells(chunked, ZoneInfo("Europe/Zagreb")) == expected
 
 
 # ---------------------------------------------------------------------------
