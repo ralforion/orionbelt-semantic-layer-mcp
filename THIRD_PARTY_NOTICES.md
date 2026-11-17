@@ -94,7 +94,7 @@ uv run --no-sync python scripts/third_party_notices.py
 | mcp-types | 2.3.0 | MIT License | yes |
 | mdurl | 0.1.2 | MIT License | yes |
 | openapi-pydantic | 0.6.0 | MIT License | yes |
-| opentelemetry-api | 1.45.1 | Apache-2.0 | yes |
+| opentelemetry-api | 1.45.2 | Apache-2.0 | yes |
 | packaging | 26.0 | Apache-2.0 OR BSD-2-Clause | yes |
 | pathable | 0.5.0 | Apache Software License | yes |
 | platformdirs | 4.9.2 | MIT | yes |
@@ -2125,7 +2125,7 @@ copies or substantial portions of the Software.
 License URL: https://github.com/kuimono/openapi-schema-pydantic/blob/master/LICENSE
 ```
 
-### opentelemetry-api 1.45.1
+### opentelemetry-api 1.45.2
 
 *LICENSE*
 
