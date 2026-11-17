@@ -57,14 +57,14 @@ uv run --no-sync python scripts/third_party_notices.py
 
 | Package | Version | License | In image |
 | --- | --- | --- | --- |
-| aiofile | 3.9.0 | Apache Software License | yes |
+| aiofile | 3.12.3 | Apache-2.0 | yes |
 | annotated-types | 0.7.0 | MIT License | yes |
 | anyio | 4.14.2 | MIT | yes |
 | attrs | 25.4.0 | MIT | yes |
-| authlib | 1.9.1 | BSD License | yes |
+| authlib | 1.9.8 | BSD License | yes |
 | beartype | 0.22.9 | MIT License | yes |
 | cachetools | 7.0.1 | MIT | yes |
-| caio | 0.9.25 | Apache-2.0 | yes |
+| caio | 0.12.10 | Apache-2.0 | yes |
 | certifi | 2026.10.19 | Mozilla Public License 2.0 (MPL 2.0) ⚠️ | yes |
 | cffi | 2.0.0 | MIT | yes |
 | click | 8.3.1 | BSD-3-Clause | yes |
@@ -75,8 +75,8 @@ uv run --no-sync python scripts/third_party_notices.py
 | docutils | 0.22.4 | Public Domain OR BSD License OR GNU General Public License (GPL) ⚠️ | yes |
 | email-validator | 2.3.0 | The Unlicense (Unlicense) | yes |
 | exceptiongroup | 1.3.1 | MIT License | yes |
-| fastmcp | 4.1.6 | Apache-2.0 | yes |
-| fastmcp-slim | 4.1.6 | Apache-2.0 | yes |
+| fastmcp | 4.2.0 | Apache-2.0 | yes |
+| fastmcp-slim | 4.2.0 | Apache-2.0 | yes |
 | griffelib | 2.0.2 | ISC | yes |
 | h11 | 0.16.0 | MIT License | yes |
 | httpcore | 1.0.9 | BSD-3-Clause | yes |
@@ -98,12 +98,12 @@ uv run --no-sync python scripts/third_party_notices.py
 | packaging | 26.0 | Apache-2.0 OR BSD-2-Clause | yes |
 | pathable | 0.5.0 | Apache Software License | yes |
 | platformdirs | 4.9.2 | MIT | yes |
-| py-key-value-aio | 0.4.4 | Apache Software License | yes |
+| py-key-value-aio | 0.4.6 | Apache-2.0 | yes |
 | pyarrow | 26.0.1 | Apache-2.0 | yes |
 | pycparser | 3.0 | BSD-3-Clause | yes |
 | pydantic | 2.12.5 | MIT | yes |
 | pydantic-core | 2.41.5 | MIT | yes |
-| pydantic-settings | 2.16.2 | MIT | yes |
+| pydantic-settings | 2.16.3 | MIT | yes |
 | pygments | 2.21.0 | BSD-2-Clause | yes |
 | pyjwt | 2.15.0 | MIT | yes |
 | pyperclip | 1.11.0 | BSD License | yes |
@@ -120,7 +120,7 @@ uv run --no-sync python scripts/third_party_notices.py
 | typing-extensions | 4.15.0 | PSF-2.0 | yes |
 | typing-inspection | 0.4.2 | MIT | yes |
 | tzdata | 2026.6 | Apache-2.0 | yes |
-| uncalled-for | 0.4.0 | MIT License | yes |
+| uncalled-for | 0.6.1 | MIT | yes |
 | uvicorn | 0.41.0 | BSD-3-Clause | yes |
 | watchfiles | 1.1.1 | MIT License | yes |
 | websockets | 16.0 | BSD-3-Clause | yes |
@@ -195,12 +195,11 @@ instead, because only the project itself can supply its copyright line.
 
 | Package | Version | Declared license |
 | --- | --- | --- |
-| fastmcp-slim | 4.1.6 | Apache-2.0 |
-| py-key-value-aio | 0.4.4 | Apache Software License |
+| fastmcp-slim | 4.2.0 | Apache-2.0 |
 
 ## Full license texts
 
-### aiofile 3.9.0
+### aiofile 3.12.3
 
 *LICENCE*
 
@@ -683,7 +682,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### authlib 1.9.1
+### authlib 1.9.8
 
 *LICENSE*
 
@@ -774,7 +773,7 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-### caio 0.9.25
+### caio 0.12.10
 
 *COPYING*
 
@@ -1533,7 +1532,7 @@ agrees to be bound by the terms and conditions of this License
 Agreement.
 ```
 
-### fastmcp 4.1.6
+### fastmcp 4.2.0
 
 *LICENSE*
 
@@ -1566,7 +1565,7 @@ APPENDIX: How to apply the Apache License to your work.
    limitations under the License.
 ```
 
-### fastmcp-slim 4.1.6
+### fastmcp-slim 4.2.0
 
 Ships no license file. Declares Apache-2.0, whose terms are reproduced in [Appendix A](#appendix-a--apache-license-20).
 
@@ -2262,9 +2261,38 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### py-key-value-aio 0.4.4
+### py-key-value-aio 0.4.6
 
-Ships no license file. Declares Apache Software License, whose terms are reproduced in [Appendix A](#appendix-a--apache-license-20).
+*LICENSE*
+
+Opens with the Apache License 2.0 terms, reproduced verbatim in [Appendix A](#appendix-a--apache-license-20), and continues:
+
+```text
+APPENDIX: How to apply the Apache License to your work.
+
+      To apply the Apache License to your work, attach the following
+      boilerplate notice, with the fields enclosed by brackets "[]"
+      replaced with your own identifying information. (Don't include
+      the brackets!)  The text should be enclosed in the appropriate
+      comment syntax for the file format. We also recommend that a
+      file or class name and description of purpose be included on the
+      same "printed page" as the copyright notice for easier
+      identification within third-party archives.
+
+   Copyright 2025 strawgate
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+```
 
 ### pyarrow 26.0.1
 
@@ -4538,7 +4566,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### pydantic-settings 2.16.2
+### pydantic-settings 2.16.3
 
 *LICENSE*
 
@@ -5700,7 +5728,7 @@ APPENDIX: How to apply the Apache License to your work.
    limitations under the License.
 ```
 
-### uncalled-for 0.4.0
+### uncalled-for 0.6.1
 
 *LICENSE*
 
