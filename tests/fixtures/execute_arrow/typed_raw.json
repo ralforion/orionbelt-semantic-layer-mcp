@@ -100,7 +100,7 @@
     ]
   ],
   "row_count": 3,
-  "execution_time_ms": 36.75,
+  "execution_time_ms": 38.28,
   "timezone": "Europe/Zagreb",
   "resolved": {
     "fact_tables": [
@@ -126,7 +126,7 @@
     "t.typed"
   ],
   "cached": true,
-  "cached_at": "2026-11-16T22:03:27.056634+01:00",
+  "cached_at": "2026-11-17T10:39:00.975809+01:00",
   "ttl_seconds": 300,
   "ttl_source": "default_unknown",
   "ttl_limiting_table": "t.typed",

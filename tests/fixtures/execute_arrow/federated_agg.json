@@ -1,0 +1,79 @@
+{
+  "sql": "SELECT\n  \"leg_1\".\"Customer\" AS \"Customer\",\n  CAST(SUM(\"leg_0\".\"Total Amount\") AS DECIMAL(18, 2)) AS \"Total Amount\"\nFROM \"leg_0\" AS \"leg_0\"\nLEFT JOIN \"leg_1\" AS \"leg_1\"\n  ON \"leg_0\".\"__fk0_0\" = \"leg_1\".\"__fk0_0\"\nGROUP BY ALL\nORDER BY\n  \"leg_1\".\"Customer\" ASC\nLIMIT 1000",
+  "dialect": "duckdb",
+  "columns": [
+    {
+      "name": "Customer",
+      "type": "string",
+      "format": null
+    },
+    {
+      "name": "Total Amount",
+      "type": "decimal(18, 2)",
+      "format": "#,##0.00"
+    }
+  ],
+  "rows": [
+    [
+      "Ana",
+      "10.00"
+    ],
+    [
+      "Bo",
+      "7.25"
+    ],
+    [
+      "Cy",
+      "1.00"
+    ]
+  ],
+  "row_count": 3,
+  "execution_time_ms": 22.52,
+  "timezone": "Europe/Berlin",
+  "resolved": {
+    "fact_tables": [
+      "Orders"
+    ],
+    "dimensions": [
+      "Customer"
+    ],
+    "measures": [
+      "Total Amount"
+    ]
+  },
+  "warnings": [],
+  "sql_valid": true,
+  "explain": null,
+  "physical_tables": [
+    "t.customers",
+    "t.orders"
+  ],
+  "cached": true,
+  "cached_at": "2026-11-17T10:39:46.955821+01:00",
+  "ttl_seconds": 300,
+  "ttl_source": "default_unknown",
+  "ttl_limiting_table": "t.customers",
+  "federation": {
+    "legs": [
+      {
+        "name": "leg_0",
+        "data_source": "fed-a",
+        "dialect": "duckdb",
+        "sql": "SELECT\n  \"Orders\".\"customer_id\" AS \"__fk0_0\",\n  SUM(\"Orders\".\"amount\") AS \"Total Amount\"\nFROM \"t\".\"orders\" AS \"Orders\"\nGROUP BY ALL\nORDER BY\n  \"__fk0_0\" ASC\nLIMIT 5000001",
+        "data_objects": [
+          "Orders"
+        ]
+      },
+      {
+        "name": "leg_1",
+        "data_source": "fed-b",
+        "dialect": "duckdb",
+        "sql": "SELECT\n  \"Customers\".\"name\" AS \"Customer\",\n  \"Customers\".\"id\" AS \"__fk0_0\"\nFROM \"t\".\"customers\" AS \"Customers\"\nGROUP BY ALL\nORDER BY\n  \"Customer\" ASC,\n  \"__fk0_0\" ASC\nLIMIT 5000001",
+        "data_objects": [
+          "Customers"
+        ]
+      }
+    ],
+    "combine_dialect": "duckdb"
+  }
+}

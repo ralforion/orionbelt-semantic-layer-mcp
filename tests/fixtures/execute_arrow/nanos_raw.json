@@ -36,7 +36,7 @@
     ]
   ],
   "row_count": 5,
-  "execution_time_ms": 30.18,
+  "execution_time_ms": 0.81,
   "timezone": "Europe/Zagreb",
   "resolved": {
     "fact_tables": [
@@ -62,7 +62,7 @@
     "t.nanos"
   ],
   "cached": true,
-  "cached_at": "2026-11-16T23:07:33.726744+01:00",
+  "cached_at": "2026-11-17T10:39:01.212974+01:00",
   "ttl_seconds": 300,
   "ttl_source": "default_unknown",
   "ttl_limiting_table": "t.nanos",
