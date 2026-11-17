@@ -3054,6 +3054,9 @@ def http_server(monkeypatch):
         fresh = importlib.import_module("server")
     finally:
         sys.modules["server"] = original
+    # As main() runs it, whatever MCP_TRANSPORT the environment or a local
+    # .env sets: on stdio the lifespan detects the mode before any request.
+    monkeypatch.setattr(fresh.settings, "mcp_transport", "http")
     fresh.mcp.add_middleware(fresh.ApiVersionGateMiddleware())
     fresh.mcp.add_middleware(fresh.LazyInitMiddleware())
     fresh.mcp.add_middleware(fresh.PhaseMiddleware())
