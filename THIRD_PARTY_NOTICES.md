@@ -70,7 +70,7 @@ uv run --no-sync python scripts/third_party_notices.py
 | click | 8.3.1 | BSD-3-Clause | yes |
 | cryptography | 50.0.1 | Apache-2.0 OR BSD-3-Clause | yes |
 | cyclopts | 4.6.0 | Apache-2.0 | yes |
-| dnspython | 2.9.0 | ISC | yes |
+| dnspython | 2.9.2 | ISC | yes |
 | docstring-parser | 0.17.0 | MIT License | yes |
 | docutils | 0.22.4 | Public Domain OR BSD License OR GNU General Public License (GPL) ⚠️ | yes |
 | email-validator | 2.3.0 | The Unlicense (Unlicense) | yes |
@@ -1190,7 +1190,7 @@ APPENDIX: How to apply the Apache License to your work.
    limitations under the License.
 ```
 
-### dnspython 2.9.0
+### dnspython 2.9.2
 
 *dnspython.txt (vendored)*
 
