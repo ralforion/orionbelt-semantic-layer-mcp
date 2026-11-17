@@ -3036,16 +3036,19 @@ def test_version_check_times_a_pass_and_clears_it_on_a_failure(mock_api, monkeyp
 
 
 # ---------------------------------------------------------------------------
-# Version gate while serving (HTTP lazy init, and any long-running server)
+# Version gate while serving (the exported server.py:mcp, HTTP lazy init, and
+# any long-running server)
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture()
-def http_server(monkeypatch):
-    """A fresh ``server`` wired as ``main()`` wires the HTTP transport.
+@pytest.fixture(params=["http", "stdio"])
+def http_server(request, monkeypatch):
+    """The exported ``server.py:mcp`` of a fresh import, served without
+    ``main()`` as Prefect Horizon or an in-memory client serves it.
 
-    Its own FastMCP instance and module state, so the middleware and the tools
-    it registers stay out of the module every other test uses.
+    Its own FastMCP instance and module state, so the tools it registers stay
+    out of the module every other test uses. Both transports: the middleware
+    stack is installed at import, whatever ``MCP_TRANSPORT`` says.
     """
     monkeypatch.setattr("importlib.metadata.version", lambda _n: "3.1.0")
     original = sys.modules["server"]
@@ -3054,12 +3057,7 @@ def http_server(monkeypatch):
         fresh = importlib.import_module("server")
     finally:
         sys.modules["server"] = original
-    # As main() runs it, whatever MCP_TRANSPORT the environment or a local
-    # .env sets: on stdio the lifespan detects the mode before any request.
-    monkeypatch.setattr(fresh.settings, "mcp_transport", "http")
-    fresh.mcp.add_middleware(fresh.ApiVersionGateMiddleware())
-    fresh.mcp.add_middleware(fresh.LazyInitMiddleware())
-    fresh.mcp.add_middleware(fresh.PhaseMiddleware())
+    monkeypatch.setattr(fresh.settings, "mcp_transport", request.param)
     yield fresh
     if fresh._http_client is not None:
         fresh._http_client.close()
@@ -3123,6 +3121,37 @@ async def test_http_checks_the_api_again_after_the_interval(http_server, mock_ap
         await client.list_tools()
 
     assert health.call_count == 3
+
+
+async def test_a_slow_check_holds_up_only_the_requests_waiting_on_it(http_server, mock_api):
+    """The check runs in a worker thread, once for every request that needs
+    it at that moment: the event loop keeps running meanwhile."""
+    import time as _time
+
+    from fastmcp import Client
+
+    def slow_health(_request):
+        _time.sleep(0.4)
+        return httpx.Response(200, json={"status": "ok", "version": "3.1.0"})
+
+    health = mock_api.get("/health").mock(side_effect=slow_health)
+    mock_api.get("/v1/settings").mock(
+        return_value=httpx.Response(200, json={"single_model_mode": False, "query_execute": True})
+    )
+
+    async def timer() -> float:
+        started = _time.monotonic()
+        await asyncio.sleep(0.05)
+        return _time.monotonic() - started
+
+    async with Client(http_server.mcp) as client:
+        elapsed, *listed = await asyncio.gather(
+            timer(), client.list_tools(), client.list_tools(), client.list_tools()
+        )
+
+    assert elapsed < 0.3  # the loop was not held for the 0.4 s check
+    assert all(tools for tools in listed)
+    assert health.call_count == 1  # three requests, one check
 
 
 async def test_http_unreachable_api_is_refused_not_guessed(http_server, mock_api):
@@ -6055,7 +6084,7 @@ def test_write_business_rule_prompt_is_registered():
     assert "RULE_DIMENSION_OUTSIDE_GRAIN" in text and "broadMatch" in text
 
 
-async def test_prompts_list_survives_the_protocol_round_trip():
+async def test_prompts_list_survives_the_protocol_round_trip(mock_api, monkeypatch):
     """`prompts/list` must render every prompt through the MCP SDK model.
 
     `_list_prompts` returns FastMCP objects and never calls `to_mcp_prompt`, so
@@ -6065,6 +6094,12 @@ async def test_prompts_list_survives_the_protocol_round_trip():
     """
     from fastmcp import Client
 
+    # The version gate serves an in-memory client too.
+    monkeypatch.setattr("importlib.metadata.version", lambda _n: "3.1.0")
+    _mock_health_with_version(mock_api, "3.1.0")
+    mock_api.get("/v1/settings").mock(
+        return_value=httpx.Response(200, json={"single_model_mode": False, "query_execute": True})
+    )
     async with Client(server.mcp) as client:
         prompts = await client.list_prompts()
 

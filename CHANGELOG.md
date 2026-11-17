@@ -105,7 +105,13 @@ unchanged:
   multi-model mode for the life of the server. On both transports a request
   checks again once the last pass is over a minute old, so an API redeployed
   to another minor under a running server is refused as well; once it
-  matches again, requests are served without a restart.
+  matches again, requests are served without a restart. The gate holds for
+  the exported `server.py:mcp` (Prefect Horizon, `fastmcp run`) too, which
+  never runs `main()`: the middleware is installed at import, where that
+  entrypoint also lacked the phase filter, and its stdio lifespan detected
+  the mode with no version check. The check and the mode detection run in a
+  worker thread, one for all the requests waiting on it, so a slow API holds
+  up no other request.
 
 ## [3.0.0] - 2026-11-11
 
