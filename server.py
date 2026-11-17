@@ -34,6 +34,7 @@ import os
 import re
 import ssl
 import threading
+import time
 import zlib
 from collections.abc import Callable
 from contextlib import asynccontextmanager
@@ -47,7 +48,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from fastmcp import FastMCP
-from fastmcp.exceptions import ToolError
+from fastmcp.exceptions import INTERNAL_ERROR, McpError, ToolError
 from fastmcp.prompts import Prompt as _BasePrompt
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from mcp.types import ToolAnnotations
@@ -166,19 +167,15 @@ def _configure_logging() -> None:
 
 @asynccontextmanager
 async def _server_lifespan(server):
-    """Register mode-dependent tools when the server starts.
+    """Clean up the API session when the server stops.
 
-    For stdio transport, mode detection runs eagerly here (the connection is
-    established synchronously and tool registration must complete before the
-    first message is processed).
-
-    For HTTP/SSE transport on Cloud Run, mode detection is deferred to the
-    first request via :class:`LazyInitMiddleware` so the container starts
-    instantly — Cloud Run's startup probe shouldn't depend on the API service
-    also being warm.
+    Tools are registered by ``main()`` before a stdio server starts, and
+    otherwise on the first request by :class:`LazyInitMiddleware`, after the
+    version gate: on HTTP so the container starts without waiting for the
+    API (Cloud Run's startup probe shouldn't depend on the API also being
+    warm), and for the exported ``server.py:mcp`` on any transport, which
+    never runs ``main()``.
     """
-    if settings.mcp_transport == "stdio":
-        _setup_mode_tools()
     yield
     # Best-effort session cleanup on shutdown
     global _http_client, _api_session_id
@@ -220,6 +217,8 @@ _http_client: httpx.Client | None = None
 _single_model_mode: bool = False
 _query_execute_enabled: bool = False
 _tools_registered: bool = False
+# When the API last passed the version check (``time.monotonic()``); None: not yet.
+_api_verified_at: float | None = None
 
 # Model ids loaded into the current (multi-model) session. Drives the
 # design-time ↔ run-time tool surface (see "Tool phase model" below).
@@ -467,6 +466,12 @@ class LazyInitMiddleware(Middleware):
     ``initialize`` from the client — triggers mode detection. This absorbs API
     cold-start latency into the first request rather than the container boot,
     so the two services don't have to be warm at the same time.
+
+    Runs after :class:`ApiVersionGateMiddleware`, and like it leaves the
+    handshake alone, so the mode is only ever detected on an API of this
+    server's ``major.minor``. The detection's request runs in a worker thread,
+    one for all the requests waiting on it, so it holds up no other request;
+    the tools are then registered here, on the event loop.
     """
 
     async def on_request(
@@ -474,9 +479,97 @@ class LazyInitMiddleware(Middleware):
         context: MiddlewareContext[Any],
         call_next: CallNext[Any, Any],
     ) -> Any:
-        if not _tools_registered:
-            _setup_mode_tools()
+        if not _tools_registered and context.method not in _HANDSHAKE_METHODS:
+            _setup_mode_tools(await _shared_mode_detection())
         return await call_next(context)
+
+
+class _SharedRun:
+    """A blocking call run in a worker thread, one run at a time.
+
+    Callers arriving while it runs await that run, its result or its error,
+    instead of starting their own. A caller cancelled meanwhile leaves the run
+    to the others (``shield``). A run belongs to the event loop that started
+    it, so a later loop (a test's, a restarted server's) starts its own.
+    """
+
+    def __init__(self, fn: Callable[[], Any]) -> None:
+        self._fn = fn
+        self._task: asyncio.Task[Any] | None = None
+
+    async def __call__(self) -> Any:
+        loop = asyncio.get_running_loop()
+        task = self._task
+        if task is None or task.done() or task.get_loop() is not loop:
+            task = self._task = loop.create_task(asyncio.to_thread(self._fn))
+            # Read the error even when every caller was cancelled, so asyncio
+            # does not report it as never retrieved.
+            task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        return await asyncio.shield(task)
+
+
+# Answered by this server alone, never the API. The gate lets them through: a
+# client refused at ``server/discover`` falls back to ``initialize``, which a
+# 2026-07-28 connection then rejects for its protocol, hiding the reason.
+_HANDSHAKE_METHODS = frozenset({"initialize", "server/discover", "ping"})
+
+
+# How long a passed version check holds before a request checks again.
+_API_RECHECK_SECONDS = 60.0
+
+
+class ApiVersionGateMiddleware(Middleware):
+    """Serve no request unless the API is of this server's ``major.minor``.
+
+    The check of :func:`_verify_api`, on every transport: stdio runs it at
+    startup and exits on a failure, but HTTP starts before it reaches the API
+    (see :class:`LazyInitMiddleware`), and either can outlive the API it
+    checked: a redeploy to another minor under a running server would
+    otherwise be served by tools written for the previous one. So a request
+    checks again once the last passed check is older than
+    ``_API_RECHECK_SECONDS``, whatever the protocol (clients of the
+    2026-07-28 protocol send no ``initialize``). A failed check answers the
+    request with an MCP error saying why rather than exiting, which on Cloud
+    Run would only restart the container into the same answer; the next
+    request checks again, so an API upgraded meanwhile is served without a
+    restart. The handshake (``_HANDSHAKE_METHODS``) is let through, so a
+    client connects and its first listing or call reads why it is refused.
+
+    The check's request runs in a worker thread, one for all the requests
+    that need it at once (:class:`_SharedRun`): a slow API holds up the
+    requests waiting on the check, not the server's pings, cancellations or
+    other sessions' work.
+    """
+
+    async def on_request(
+        self,
+        context: MiddlewareContext[Any],
+        call_next: CallNext[Any, Any],
+    ) -> Any:
+        if context.method not in _HANDSHAKE_METHODS:
+            checked = _api_verified_at
+            if checked is None or time.monotonic() - checked >= _API_RECHECK_SECONDS:
+                try:
+                    await _shared_api_check()
+                except _ApiUnusableError as exc:
+                    raise McpError(INTERNAL_ERROR, str(exc)) from None
+        return await call_next(context)
+
+
+def _verify_api_logged() -> None:
+    """:func:`_verify_api` for a serving server, its outcome logged once per check."""
+    was_verified = _api_verified_at is not None
+    try:
+        _verify_api()
+    except _ApiUnusableError as exc:
+        logger.error("%s", exc)
+        raise
+    if not was_verified:
+        logger.info("API health check passed (%s)", settings.api_base_url)
+
+
+_shared_api_check = _SharedRun(_verify_api_logged)
+_shared_mode_detection = _SharedRun(lambda: _detect_api_mode())
 
 
 class PhaseMiddleware(Middleware):
@@ -535,6 +628,16 @@ class PhaseMiddleware(Middleware):
                 "…) becomes available once a model is loaded."
             )
         return await call_next(context)
+
+
+# One middleware stack for every entrypoint: main() on either transport, and
+# the exported ``server.py:mcp`` that Prefect Horizon, ``fastmcp run`` and
+# in-memory clients serve without main(). In this order: the version gate,
+# so nothing is detected or served on another API minor; tool registration;
+# the phase filter, which needs the registered tools.
+mcp.add_middleware(ApiVersionGateMiddleware())
+mcp.add_middleware(LazyInitMiddleware())
+mcp.add_middleware(PhaseMiddleware())
 
 
 # ---------------------------------------------------------------------------
@@ -4466,12 +4569,16 @@ def _register_model_tools() -> None:
         )
 
 
-def _setup_mode_tools() -> None:
-    """Detect API mode and register the tool surface. Idempotent."""
+def _setup_mode_tools(detected: tuple[bool, bool] | None = None) -> None:
+    """Detect API mode and register the tool surface. Idempotent.
+
+    ``detected`` is a :func:`_detect_api_mode` result already fetched (lazy
+    init fetches it in a worker thread); without it the API is asked here.
+    """
     global _single_model_mode, _query_execute_enabled, _tools_registered
     if _tools_registered:
         return
-    _single_model_mode, _query_execute_enabled = _detect_api_mode()
+    _single_model_mode, _query_execute_enabled = detected or _detect_api_mode()
     logger.info(
         "%s mode detected",
         "Single-model" if _single_model_mode else "Multi-model",
@@ -5644,25 +5751,33 @@ mcp.add_prompt(
 # ---------------------------------------------------------------------------
 
 
-def _check_api_health() -> None:
-    """Check that the OrionBelt Semantic Layer API is reachable at startup."""
+class _ApiUnusableError(Exception):
+    """The configured API cannot be served: unreachable, or another ``major.minor``."""
+
+
+def _verify_api() -> None:
+    """Check the API answers ``/health`` with this server's ``major.minor``.
+
+    Each MCP minor tracks the API minor of the same number (tools, parameters
+    and response fields follow that API), so MCP 3.1 serves API 3.1.x only.
+    Patch releases may differ. Raises :class:`_ApiUnusableError` with the reason;
+    an API or a build without a version is let through. A pass is timed in
+    ``_api_verified_at``, a failure clears it.
+    """
+    global _api_verified_at
+    _api_verified_at = None
     client = _get_client()
     try:
         resp = _do_request(client, "GET", "/health", None)
         resp.raise_for_status()
-        logger.info("API health check passed (%s)", settings.api_base_url)
     except ToolError as exc:
         # The message says why — a stopped service, an untrusted certificate
         # and a refused client certificate need different fixes.
-        logger.error("API health check failed: %s", exc)
-        raise SystemExit(1) from None
+        raise _ApiUnusableError(f"API health check failed: {exc}") from None
     except httpx.HTTPStatusError as exc:
-        logger.error(
-            "API health check failed: %s %s",
-            exc.response.status_code,
-            exc.response.text,
-        )
-        raise SystemExit(1) from None
+        raise _ApiUnusableError(
+            f"API health check failed: {exc.response.status_code} {exc.response.text}"
+        ) from None
 
     mcp_version = _package_version()
     api_version = None
@@ -5670,18 +5785,23 @@ def _check_api_health() -> None:
         api_version = resp.json().get("version")
     if mcp_version and api_version:
         mcp_parts = mcp_version.split(".")
-        api_parts = api_version.split(".")
-        if mcp_parts[:2] != api_parts[:2]:
-            logger.error(
-                "Incompatible API version: MCP server v%s requires API v%s.%s.x — "
-                "found v%s. Patch differences are allowed; major or minor mismatches "
-                "are not supported.",
-                mcp_version,
-                mcp_parts[0],
-                mcp_parts[1],
-                api_version,
+        if mcp_parts[:2] != str(api_version).split(".")[:2]:
+            raise _ApiUnusableError(
+                f"Incompatible API version: MCP server v{mcp_version} requires API "
+                f"v{mcp_parts[0]}.{mcp_parts[1]}.x — found v{api_version}. Patch "
+                "differences are allowed; major or minor mismatches are not supported."
             )
-            raise SystemExit(1)
+    _api_verified_at = time.monotonic()
+
+
+def _check_api_health() -> None:
+    """At stdio startup: exit unless the API is reachable and of this ``major.minor``."""
+    try:
+        _verify_api()
+    except _ApiUnusableError as exc:
+        logger.error("%s", exc)
+        raise SystemExit(1) from None
+    logger.info("API health check passed (%s)", settings.api_base_url)
 
 
 def _registered_tool_count() -> int | None:
@@ -5881,17 +6001,13 @@ def main() -> None:
         mode_label = "single-model" if _single_model_mode else "multi-model"
         stateless = False
     else:
-        # HTTP/SSE: defer mode detection to the first request so the container
+        # HTTP/SSE: mode detection waits for the first request (the version
+        # gate and LazyInitMiddleware, installed at import), so the container
         # starts immediately (good for Cloud Run cold starts).
-        mcp.add_middleware(LazyInitMiddleware())
         tool_count = 0
         mode_label = "deferred (lazy init on first request)"
         # Resolved once — the sse fallback logs a warning on the way.
         stateless = _stateless_http_enabled()
-
-    # Phase-scoped tool surface (design-time ↔ run-time). Added after LazyInit
-    # so its tool-registration on_request runs first on HTTP transports.
-    mcp.add_middleware(PhaseMiddleware())
 
     logger.info("")
     logger.info("Configuration:")

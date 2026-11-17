@@ -46,11 +46,12 @@ Phase is derived from explicit loaded-model state (`_loaded_model_ids`, flipped 
 
 **Capability gating is orthogonal to phase.** A tool is visible only if its phase is active *and* its capability is enabled. Currently only `execute_query` is gated (by `query_execute`, resolved from API config at startup). To add another: register a resolver in `_CAPABILITY_RESOLVERS` and map the tool in `_TOOL_CAPABILITY`.
 
-**Transport-dependent init** (`main`):
-- **stdio** (default) — eager: health check + mode detection + tool registration up front, fail-fast.
-- **HTTP/SSE** — `LazyInitMiddleware` defers mode detection and registration to the first request, so the container starts instantly (Cloud Run cold starts). `PORT` env (injected by Cloud Run) overrides `MCP_SERVER_PORT`.
+**Transport-dependent init.** The middleware stack (`ApiVersionGateMiddleware` → `LazyInitMiddleware` → `PhaseMiddleware`) is installed at import, so `main()` and the exported `server.py:mcp` (Prefect Horizon, `fastmcp run`, in-memory clients) serve through the same one.
+- **stdio via `main()`** — eager: health check + mode detection + tool registration up front, fail-fast.
+- **HTTP/SSE, and `server.py:mcp` on any transport** — `LazyInitMiddleware` defers mode detection and registration to the first request after the version gate, so the container starts instantly (Cloud Run cold starts). `PORT` env (injected by Cloud Run) overrides `MCP_SERVER_PORT`.
+- The middleware's API calls (the version check, mode detection) run in a worker thread shared by the requests waiting on them (`_SharedRun`), never on the event loop.
 
-**Version compatibility gate.** At startup the server compares its own version to the API's `/health` version and **exits** unless `major.minor` match (`server.py` ~line 2700). This is why every API minor bump *requires* a matching MCP release even when no tool changes.
+**Version compatibility gate.** The server serves only an API of its own `major.minor` (MCP 3.1 ↔ API 3.1.x; patches may differ), checked against the API's `/health` (`_verify_api`). On stdio via `main()` it checks at startup and **exits** on a mismatch. Otherwise (HTTP, which starts before it reaches the API, and the exported `server.py:mcp`), `ApiVersionGateMiddleware` refuses every request but the handshake with an MCP error saying why, until the API matches; on both transports a request checks again once the last pass is over a minute old, so an API redeployed to another minor under a running server is refused too. This is why every API minor bump *requires* a matching MCP release even when no tool changes.
 
 ## Version tracking & release discipline
 

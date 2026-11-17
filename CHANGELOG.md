@@ -95,6 +95,23 @@ unchanged:
 - A validation finding prints a long driver error once. API 3.1's
   `DATASOURCE_*` codes carry it in the message and again in `context.error`,
   which doubled the report's length.
+- **The HTTP transport enforces the API version gate.** The server serves only
+  an API of its own `major.minor`, but only stdio checked it, at startup:
+  over HTTP (Cloud Run), which defers its setup to the first request, an MCP
+  3.1 served an API 3.0. Now every request but the handshake is refused with
+  an MCP error naming both versions (`Incompatible API version: MCP server
+  v3.1.0 requires API v3.1.x — found v3.0.0`) until the API matches, and an
+  API that does not answer is refused the same way instead of being taken for
+  multi-model mode for the life of the server. On both transports a request
+  checks again once the last pass is over a minute old, so an API redeployed
+  to another minor under a running server is refused as well; once it
+  matches again, requests are served without a restart. The gate holds for
+  the exported `server.py:mcp` (Prefect Horizon, `fastmcp run`) too, which
+  never runs `main()`: the middleware is installed at import, where that
+  entrypoint also lacked the phase filter, and its stdio lifespan detected
+  the mode with no version check. The check and the mode detection run in a
+  worker thread, one for all the requests waiting on it, so a slow API holds
+  up no other request.
 
 ## [3.0.0] - 2026-11-11
 
