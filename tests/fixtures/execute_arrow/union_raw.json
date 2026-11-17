@@ -1,0 +1,102 @@
+{
+  "sql": "SELECT\n  \"Unions\".\"id\" AS \"Unions.Id\",\n  \"Unions\".\"u_ns\" AS \"Unions.U Ns\",\n  \"Unions\".\"u_mixed\" AS \"Unions.U Mixed\",\n  \"Unions\".\"list_u\" AS \"Unions.List U\",\n  \"Unions\".\"struct_u\" AS \"Unions.Struct U\",\n  \"Unions\".\"u_other\" AS \"Unions.U Other\"\nFROM \"t\".\"unions\" AS \"Unions\"\nORDER BY\n  \"Unions\".\"id\" ASC\nLIMIT 1000",
+  "dialect": "duckdb",
+  "columns": [
+    {
+      "name": "Unions.Id",
+      "type": "number",
+      "format": null
+    },
+    {
+      "name": "Unions.U Ns",
+      "type": "string",
+      "format": null
+    },
+    {
+      "name": "Unions.U Mixed",
+      "type": "string",
+      "format": null
+    },
+    {
+      "name": "Unions.List U",
+      "type": "string",
+      "format": null
+    },
+    {
+      "name": "Unions.Struct U",
+      "type": "string",
+      "format": null
+    },
+    {
+      "name": "Unions.U Other",
+      "type": "string",
+      "format": null
+    }
+  ],
+  "rows": [
+    [
+      1,
+      "2025-01-02T03:04:05.123456789+01:00",
+      "2025-06-30T23:59:59.000000001+02:00",
+      "[Timestamp('2025-01-02 03:04:05.123456789'), 7, None]",
+      "{'u': Timestamp('1969-12-31 23:59:59.999999999'), 'k': 1}",
+      "MonthDayNano(months=1, days=2, nanoseconds=0)"
+    ],
+    [
+      2,
+      7,
+      "2025-01-02T03:04:05.500000+01:00",
+      "[]",
+      "{'u': Decimal('1.50'), 'k': 2}",
+      "12.30"
+    ],
+    [
+      3,
+      "1969-12-31T23:59:59.999999999+01:00",
+      "text",
+      null,
+      null,
+      "2025-01-02T03:04:05.000000123+01:00"
+    ],
+    [
+      4,
+      null,
+      null,
+      "[None]",
+      "{'u': None, 'k': None}",
+      null
+    ]
+  ],
+  "row_count": 4,
+  "execution_time_ms": 25.28,
+  "timezone": "Europe/Zagreb",
+  "resolved": {
+    "fact_tables": [
+      "Unions"
+    ],
+    "dimensions": [],
+    "measures": []
+  },
+  "warnings": [],
+  "sql_valid": true,
+  "explain": {
+    "planner": "Raw",
+    "planner_reason": "Raw-mode projection of physical columns \u2014 no aggregation, no GROUP BY",
+    "base_object": "Unions",
+    "base_object_reason": "\"Unions\" selected as base for single-object query",
+    "joins": [],
+    "where_filter_count": 0,
+    "having_filter_count": 0,
+    "has_totals": false,
+    "cfl_legs": []
+  },
+  "physical_tables": [
+    "t.unions"
+  ],
+  "cached": false,
+  "cached_at": null,
+  "ttl_seconds": 300,
+  "ttl_source": "default_unknown",
+  "ttl_limiting_table": "t.unions",
+  "federation": null
+}

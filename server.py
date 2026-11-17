@@ -1836,46 +1836,42 @@ def _is_nano_temporal(arrow_type: Any) -> bool:
     ) and arrow_type.unit == "ns"
 
 
-def _nanos_as_int64(arrow_type: Any) -> Any:
-    """``arrow_type`` with every nanosecond temporal in it read as ``int64``.
+def _is_list_like(arrow_type: Any) -> bool:
+    """Any of Arrow's list types: list, large, fixed-size, or a list view."""
+    import pyarrow as pa
 
-    ``None`` when a nested type (list, struct, map) holds none, so the plain
-    ``to_pylist()`` path applies.
+    types = pa.types
+    return (
+        types.is_list(arrow_type)
+        or types.is_large_list(arrow_type)
+        or types.is_fixed_size_list(arrow_type)
+        or types.is_list_view(arrow_type)
+        or types.is_large_list_view(arrow_type)
+    )
+
+
+def _holds_nanos(arrow_type: Any) -> bool:
+    """A nanosecond temporal, or a type with one anywhere inside it.
+
+    Looks through lists, maps, structs, unions and dictionaries: a value of
+    any of them goes through ``to_pylist()``, which raises on a nanosecond
+    value with digits below the microsecond unless pandas is installed.
     """
     import pyarrow as pa
 
     types = pa.types
     if _is_nano_temporal(arrow_type):
-        return pa.int64()
-    if types.is_map(arrow_type):
-        key, item = _nanos_as_int64(arrow_type.key_type), _nanos_as_int64(arrow_type.item_type)
-        if key is None and item is None:
-            return None
-        return pa.map_(
-            arrow_type.key_field.with_type(key or arrow_type.key_type),
-            arrow_type.item_field.with_type(item or arrow_type.item_type),
-            arrow_type.keys_sorted,
-        )
-    if types.is_list(arrow_type) or types.is_large_list(arrow_type):
-        child = _nanos_as_int64(arrow_type.value_type)
-        if child is None:
-            return None
-        field = arrow_type.value_field.with_type(child)
-        return pa.large_list(field) if types.is_large_list(arrow_type) else pa.list_(field)
-    if types.is_fixed_size_list(arrow_type):
-        child = _nanos_as_int64(arrow_type.value_type)
-        if child is None:
-            return None
-        return pa.list_(arrow_type.value_field.with_type(child), arrow_type.list_size)
-    if types.is_struct(arrow_type):
-        fields = [arrow_type.field(i) for i in range(arrow_type.num_fields)]
-        children = [_nanos_as_int64(f.type) for f in fields]
-        if all(c is None for c in children):
-            return None
-        return pa.struct(
-            [f if c is None else f.with_type(c) for f, c in zip(fields, children, strict=True)]
-        )
-    return None
+        return True
+    if types.is_dictionary(arrow_type):
+        return _holds_nanos(arrow_type.value_type)
+    if (
+        _is_list_like(arrow_type)
+        or types.is_map(arrow_type)  # one field: its key/item struct
+        or types.is_struct(arrow_type)
+        or types.is_union(arrow_type)
+    ):
+        return any(_holds_nanos(arrow_type.field(i).type) for i in range(arrow_type.num_fields))
+    return False
 
 
 class _PandasRepr:
@@ -1951,28 +1947,106 @@ def _nested_nano_value(raw: int, arrow_type: Any) -> Any:
     return _PandasRepr(f"Timestamp('{stamp}{moment:%z}', tz='{label}')")
 
 
-def _nested_nanos(value: Any, arrow_type: Any) -> Any:
-    """Rebuild a nested cell read through :func:`_nanos_as_int64`."""
+def _union_values(array: Any, members: list[list[Any]]) -> list[Any]:
+    """Each row of a union array: its member's value, taken from ``members``.
+
+    ``members[i]`` holds the values of child ``i``. A sparse union's children
+    run alongside the array; a dense union's are indexed by its offsets. The
+    type ids and offsets are read from the buffers, because pyarrow's
+    ``type_codes`` and ``offsets`` ignore the array's own slice offset.
+    """
+    import pyarrow as pa
+
+    buffers = array.buffers()
+    size, start = len(array), array.offset
+    codes = pa.Array.from_buffers(pa.int8(), size, [None, buffers[1]], offset=start)
+    member = {code: i for i, code in enumerate(array.type.type_codes)}
+    if array.type.mode == "dense":
+        offsets = pa.Array.from_buffers(pa.int32(), size, [None, buffers[2]], offset=start)
+        return [
+            members[member[code]][at]
+            for code, at in zip(codes.to_pylist(), offsets.to_pylist(), strict=True)
+        ]
+    return [members[member[code]][row] for row, code in enumerate(codes.to_pylist())]
+
+
+def _nested_values(array: Any) -> list[Any]:
+    """``array.to_pylist()``, each nanosecond temporal in it as pandas gives it.
+
+    These are the Python values whose ``str()`` the API writes for a nested
+    cell (see :class:`_PandasRepr`). An array holding a nanosecond value is
+    taken apart down to it, since ``to_pylist()`` would raise on it; the rest
+    is left to ``to_pylist()``.
+    """
     import pyarrow as pa
 
     types = pa.types
-    if value is None:
-        return None
+    arrow_type = array.type
+    if not _holds_nanos(arrow_type):
+        return array.to_pylist()
     if _is_nano_temporal(arrow_type):
-        return _nested_nano_value(value, arrow_type)
-    if types.is_map(arrow_type):
         return [
-            (_nested_nanos(k, arrow_type.key_type), _nested_nanos(v, arrow_type.item_type))
-            for k, v in value
+            None if raw is None else _nested_nano_value(raw, arrow_type)
+            for raw in array.cast(pa.int64()).to_pylist()
         ]
-    if types.is_list(arrow_type) or types.is_large_list(arrow_type):
-        return [_nested_nanos(v, arrow_type.value_type) for v in value]
-    if types.is_fixed_size_list(arrow_type):
-        return [_nested_nanos(v, arrow_type.value_type) for v in value]
+    if types.is_dictionary(arrow_type):
+        return _nested_values(array.dictionary_decode())
+    if types.is_union(arrow_type):
+        members = [_nested_values(array.field(i)) for i in range(arrow_type.num_fields)]
+        return _union_values(array, members)
+
+    valid = array.is_valid().to_pylist()
     if types.is_struct(arrow_type):
-        fields = [arrow_type.field(i) for i in range(arrow_type.num_fields)]
-        return {f.name: _nested_nanos(value.get(f.name), f.type) for f in fields}
-    return value
+        names = [arrow_type.field(i).name for i in range(arrow_type.num_fields)]
+        fields = [_nested_values(array.field(i)) for i in range(arrow_type.num_fields)]
+        return [
+            dict(zip(names, row, strict=True)) if ok else None
+            for ok, row in zip(valid, zip(*fields, strict=True), strict=True)
+        ]
+    if types.is_map(arrow_type):
+        # A map's keys and items span the whole buffer; its offsets are sliced.
+        pairs = list(zip(_nested_values(array.keys), _nested_values(array.items), strict=True))
+        bounds = array.offsets.to_pylist()
+        return [pairs[bounds[i] : bounds[i + 1]] if ok else None for i, ok in enumerate(valid)]
+
+    # A list: flatten() leaves out null rows, even ones backed by values, and
+    # keeps the rest in order. (No list_value_length(): pyarrow 16 has no
+    # list-view kernel for it.)
+    if types.is_fixed_size_list(arrow_type):
+        lengths = [arrow_type.list_size] * len(array)
+    elif types.is_list_view(arrow_type) or types.is_large_list_view(arrow_type):
+        lengths = array.sizes.to_pylist()
+    else:
+        bounds = array.offsets.to_pylist()  # sliced with the array
+        lengths = [bounds[i + 1] - bounds[i] for i in range(len(array))]
+    flat = _nested_values(array.flatten())
+    values: list[Any] = []
+    start = 0
+    for ok, length in zip(valid, lengths, strict=True):
+        values.append(flat[start : start + length] if ok else None)
+        start += length if ok else 0
+    return values
+
+
+def _nanos_cells(array: Any, tz: ZoneInfo | None) -> list[Any]:
+    """JSON cells of one chunk of a column that holds nanosecond temporals.
+
+    A dictionary's or a union's cell is the value it stands for, serialized
+    as the API serializes any cell. The API's column-level steps (intervals,
+    text-stored numerics) key on the column's type, so they do not apply. Any
+    other nested cell is ``str()`` of its Python value.
+    """
+    import pyarrow as pa
+
+    arrow_type = array.type
+    if _is_nano_temporal(arrow_type):
+        return _nanosecond_cells(array, tz)
+    if pa.types.is_dictionary(arrow_type):
+        return _nanos_cells(array.dictionary_decode(), tz)
+    if pa.types.is_union(arrow_type):
+        members = [_nanos_cells(array.field(i), tz) for i in range(arrow_type.num_fields)]
+        return _union_values(array, members)
+    return [_arrow_cell(value, tz) for value in _nested_values(array)]
 
 
 def _arrow_column_cells(column: Any, tz: ZoneInfo | None) -> list[Any]:
@@ -1981,17 +2055,8 @@ def _arrow_column_cells(column: Any, tz: ZoneInfo | None) -> list[Any]:
 
     types = pa.types
     arrow_type = column.type
-    if _is_nano_temporal(arrow_type):
-        return _nanosecond_cells(column, tz)
-    if types.is_nested(arrow_type):
-        # A nanosecond temporal anywhere inside makes to_pylist() raise
-        # without pandas: read those leaves as int64 and rebuild them.
-        as_int64 = _nanos_as_int64(arrow_type)
-        if as_int64 is not None:
-            return [
-                _arrow_cell(_nested_nanos(value, arrow_type), tz)
-                for value in column.cast(as_int64).to_pylist()
-            ]
+    if _holds_nanos(arrow_type):
+        return [cell for chunk in column.chunks for cell in _nanos_cells(chunk, tz)]
     values = column.to_pylist()
     if (
         types.is_integer(arrow_type)

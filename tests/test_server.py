@@ -988,6 +988,143 @@ def test_decode_arrow_result_nested_nanoseconds(arrow_type: str, values: list, e
     assert out["rows"] == [[expected], [None]]
 
 
+_ZAGREB_NS = "2025-01-02T03:04:05.123456789+01:00"
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        pytest.param(
+            "dictionary",
+            [
+                "2025-01-02T04:04:05.123456789+01:00",
+                None,
+                "1970-01-01T00:59:59.999999999+01:00",
+                "2025-01-02T04:04:05.123456789+01:00",
+            ],
+            id="dictionary",
+        ),
+        pytest.param("dictionary_naive", [_ZAGREB_NS, _ZAGREB_NS, None], id="dictionary-naive"),
+        pytest.param(
+            "dictionary_in_list",
+            [
+                "[Timedelta('0 days 00:00:00.000000123'), None]",
+                None,
+                "[Timedelta('-1 days +23:59:59.999999999')]",
+            ],
+            id="dictionary-in-list",
+        ),
+        pytest.param(
+            "dense_union",
+            [_ZAGREB_NS, "x", None, "1969-12-31T23:59:59.999999999+01:00"],
+            id="dense-union",
+        ),
+        pytest.param(
+            "union_type_codes",
+            [
+                "2025-01-02T04:04:05.123456789+01:00",
+                2,
+                "1970-01-01T01:00:00.000000123+01:00",
+            ],
+            id="union-type-codes",
+        ),
+        pytest.param("union_of_dictionary", [_ZAGREB_NS, 7, _ZAGREB_NS], id="union-of-dictionary"),
+        pytest.param(
+            "list_view",
+            [
+                "[Timestamp('1969-12-31 23:59:59.999999999')]",
+                "[Timestamp('2025-01-02 03:04:05.123456789'), None]",
+                None,
+            ],
+            id="list-view",
+        ),
+        pytest.param(
+            "map_of_unions",
+            ["[('a', Timestamp('2025-01-02 03:04:05.123456789')), ('b', 7)]", "[]"],
+            id="map-of-unions",
+        ),
+    ],
+)
+def test_decode_arrow_result_dictionaries_unions_list_views(case: str, expected: list):
+    """A dictionary, union or list view holding a nanosecond temporal made
+    ``to_pylist()`` raise without pandas, failing the whole query. A
+    dictionary's or union's cell is the value it stands for, written as the
+    API writes any cell; a nested one is ``str()`` of the value. Each
+    expected list is the API's own output (``arrow_to_rows`` with pandas
+    installed) for the same array.
+    ``union_raw`` holds real DuckDB ``UNION`` columns."""
+    from zoneinfo import ZoneInfo
+
+    import pyarrow as pa
+
+    ns = 1735787045123456789  # 2025-01-02T03:04:05.123456789Z
+    naive, berlin = pa.timestamp("ns"), pa.timestamp("ns", tz="Europe/Berlin")
+    build = {
+        "dictionary": lambda: pa.DictionaryArray.from_arrays(
+            pa.array([1, None, 0, 1], pa.int32()), pa.array([-1, ns], berlin)
+        ),
+        "dictionary_naive": lambda: pa.DictionaryArray.from_arrays(
+            pa.array([0, 0, None], pa.int8()), pa.array([ns], naive)
+        ),
+        "dictionary_in_list": lambda: pa.ListArray.from_arrays(
+            pa.array([0, 2, 2, 3], pa.int32()),
+            pa.DictionaryArray.from_arrays(
+                pa.array([0, None, 1], pa.int8()), pa.array([123, -1], pa.duration("ns"))
+            ),
+            mask=pa.array([False, True, False]),
+        ),
+        "dense_union": lambda: pa.UnionArray.from_dense(
+            pa.array([0, 1, 0, 0], pa.int8()),
+            pa.array([0, 0, 1, 2], pa.int32()),
+            [pa.array([ns, None, -1], naive), pa.array(["x"])],
+            ["ts", "s"],
+        ),
+        "union_type_codes": lambda: pa.UnionArray.from_sparse(
+            pa.array([9, 5, 9], pa.int8()),
+            [pa.array([1, 2, 3]), pa.array([ns, ns, 123], berlin)],
+            ["n", "ts"],
+            [5, 9],
+        ),
+        "union_of_dictionary": lambda: pa.UnionArray.from_sparse(
+            pa.array([0, 1, 0], pa.int8()),
+            [
+                pa.DictionaryArray.from_arrays(
+                    pa.array([0, 0, 0], pa.int8()), pa.array([ns], naive)
+                ),
+                pa.array([None, 7, None], pa.int64()),
+            ],
+            ["d", "n"],
+        ),
+        "list_view": lambda: pa.ListViewArray.from_arrays(
+            pa.array([2, 0, 0], pa.int32()),
+            pa.array([1, 2, 3], pa.int32()),  # the null row is backed by values
+            pa.array([ns, None, -1], naive),
+            mask=pa.array([False, False, True]),
+        ),
+        "map_of_unions": lambda: pa.MapArray.from_arrays(
+            pa.array([0, 2, 2], pa.int32()),
+            pa.array(["a", "b"]),
+            pa.UnionArray.from_dense(
+                pa.array([0, 1], pa.int8()),
+                pa.array([0, 0], pa.int32()),
+                [pa.array([ns], naive), pa.array([7])],
+                ["ts", "n"],
+            ),
+        ),
+    }
+    array = build[case]()
+
+    out = server._decode_arrow_result(
+        _arrow_frame({"timezone": "Europe/Zagreb"}, pa.table({"c": array}))
+    )
+
+    assert [row[0] for row in out["rows"]] == expected
+    # A column in chunks, the second a slice: pyarrow's union type_codes and
+    # offsets ignore a slice's offset, so they are read from the buffers.
+    chunked = pa.chunked_array([array.slice(0, 1), array.slice(1)])
+    assert server._arrow_column_cells(chunked, ZoneInfo("Europe/Zagreb")) == expected
+
+
 # ---------------------------------------------------------------------------
 # list_models (multi-model mode)
 # ---------------------------------------------------------------------------

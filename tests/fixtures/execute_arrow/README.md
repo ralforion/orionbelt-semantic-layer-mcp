@@ -14,6 +14,7 @@ the conversion in `server.py` cannot drift from the API's own.
 | `commerce_agg` | the API repo's `examples/orionbelt_1_commerce.yaml` | `Country Name` × `Total Sales`, `Distinct Clients`, top 25 |
 | `nanos_raw` | `typed` | `fields`: `Nanos.Id`, `Nanos.Tsns`, ordered by `Id` |
 | `nested_raw` | `typed` | `fields`: every `Nested` column, ordered by `Id` |
+| `union_raw` | `typed` | `fields`: every `Unions` column, ordered by `Id` |
 
 `typed` is DuckDB 2.0 with defaultTimezone `Europe/Zagreb` and
 `overrideDatabaseTimezone: true`. Table `t.typed` has three rows covering: `INTEGER`, `VARCHAR`
@@ -26,12 +27,21 @@ Table `t.nested` has a `LIST(TIMESTAMP_NS)` (NULL element, pre-1970), a
 `STRUCT(at TIMESTAMP_NS, n INTEGER)`, a `LIST(TIMESTAMP)`, a
 `STRUCT(at TIMESTAMPTZ, d DECIMAL(5,2))` and a `LIST(TIME_NS)`, plus a row
 with an empty list and NULLs. A nested cell reaches the API's JSON as
-Python's `str()` of the value.
+Python's `str()` of the value. Table `t.unions` has DuckDB `UNION` columns
+(Arrow sparse unions) with a `TIMESTAMP_NS` member: alone with an `INTEGER`,
+beside `TIMESTAMP` and `VARCHAR`, beside `INTERVAL` and `DECIMAL`, in a `LIST`
+and in a `STRUCT`, plus NULLs. A union cell is its member's value, serialized
+as a cell of its own: no column-level step, so the `INTERVAL` member reads
+`MonthDayNano(...)` where an interval column reads as a `timedelta`.
 
 The API's JSON for nanosecond values needs pandas in the API's environment
-(`pandas.Timestamp`); `nanos_raw` and `nested_raw` were recorded from one that
-has it. Its default image (`flight-duckdb-only`) does not, and there
+(`pandas.Timestamp`); `nanos_raw`, `nested_raw` and `union_raw` were recorded
+from one that has it. Its default image (`flight-duckdb-only`) does not, and there
 `format=json` fails on such a value while the Arrow frame still carries it.
+DuckDB writes no dictionary-encoded timestamps, dense unions or list views;
+`test_decode_arrow_result_dictionaries_unions_list_views` covers those with
+pyarrow-built arrays, its expected cells taken from the API's `arrow_to_rows`
+with pandas.
 
 Re-record when the API changes how it serializes a cell, its JSON response's
 fields, or the frame.
