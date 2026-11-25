@@ -4,6 +4,59 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+For OrionBelt Semantic Layer API **3.2** (owned sessions, scopes on every
+endpoint, BI tokens, data sources that log in as the user). The version moves to
+3.2.0 and the API gate to 3.2.x when the API releases 3.2.0.
+
+### Added
+
+- **`MCP_AUTH_MODE`**: `none`, `api_key`, `oidc_client_credentials` or
+  `oidc_user`. Unset, it is `api_key` when `API_KEY` is set and `none`
+  otherwise, so existing deployments are unchanged.
+- **User mode (`oidc_user`)**: over HTTP the server is an OAuth resource server.
+  It serves RFC 9728 metadata at `/.well-known/oauth-protected-resource/mcp`,
+  answers a missing or invalid token with a 401 challenge, and accepts only
+  tokens issued for itself (signature, issuer, audience, `exp`, `sub`). It
+  exchanges each one for an OBSL token for the same user: Entra on-behalf-of,
+  or RFC 8693 token exchange for Okta, Keycloak and others. The OBSL token is
+  cached per user until a minute before it expires. The incoming token is never
+  sent to the API. Settings: `MCP_RESOURCE_URL`, `MCP_AUDIENCE`, `MCP_SCOPES`,
+  `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET[_FILE]`,
+  `OIDC_CLIENT_AUTH`, `OIDC_EXCHANGE`, `OBSL_SCOPE`, `OBSL_AUDIENCE`.
+- **`oidc_client_credentials`**: a client-credentials token from the IdP, cached
+  and renewed 30 s before it expires, as one service identity. An OBSL token
+  the API refuses as `invalid_token` (revoked, clock skew) is replaced once by
+  a fresh one, in either oidc mode.
+- **A BI token as `API_KEY`**: OBSL runs as its owner, and with a warehouse
+  sign-in also on data sources that log in as the user. This is how a local
+  stdio server acts as you.
+- **Readable errors for the new API codes**:
+  - `SIGN_IN_REQUIRED`
+  - `BI_TOKEN_SIGN_IN_ENDED`
+  - an expired or revoked BI token
+  - `DATA_SOURCE_SIGN_IN_INTERACTION_REQUIRED`
+  - `DATA_SOURCE_SIGN_IN_REFUSED`
+  - `DATA_SOURCE_SIGN_IN_UNAVAILABLE`
+  - `AUTH_INSUFFICIENT_SCOPE`, which names the scope
+
+  Each says what to do, tailored to the auth mode. None contains a credential.
+
+### Changed
+
+- **An API session and loaded models per identity**: the user mode keeps one
+  per signed-in user, since the API gives a session only to its creator. One
+  user's loaded model no longer flips another user's tool surface. The service
+  modes keep a single shared identity as before.
+- **A refused credential on `/v1/settings`** (401/403) is now reported as an
+  error, and detection runs again on the next request. Before, the server
+  silently assumed multi-model mode with execution off for its whole life. On
+  stdio the server exits instead.
+- **The user mode on stdio** is refused at startup: stdio has no sign-in, so
+  use a BI token there instead.
+- **`fastmcp>=4.2.3`**, the release whose auth provider API this uses.
+
 ## [3.1.0] - 2026-11-17
 
 Tracks OrionBelt Semantic Layer API **v3.1.x**, which inspects a data source's

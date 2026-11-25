@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import gzip
 import importlib
 import inspect
@@ -11,14 +12,22 @@ import logging
 import re
 import ssl
 import sys
+import time
 import types
 from pathlib import Path
+from urllib.parse import parse_qsl
 
 import httpx
 import pytest
 import respx
+from fastmcp import FastMCP
 from fastmcp.exceptions import McpError
 from fastmcp.exceptions import ToolError as _ToolError
+from fastmcp.server.auth import AccessToken
+from fastmcp.server.auth.providers.jwt import JWTVerifier, RSAKeyPair
+from joserfc.jwk import RSAKey
+from pydantic import SecretStr
+from starlette.testclient import TestClient
 
 import server
 
@@ -27,29 +36,31 @@ import server
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(autouse=True)
-def _reset_state():
-    """Reset module-level state before each test."""
-    server._api_session_id = None
-    server._http_client = None
-    server._obml_reference_cache = None
-    server._dialect_names_cache = None
-    server._function_catalog_cache = None
-    server._single_model_mode = False
-    server._query_execute_enabled = False
-    server._loaded_model_ids.clear()
-    server._api_verified_at = None
-    yield
+def _clear_server_state() -> None:
+    server._identities.clear()
     if server._http_client is not None:
         server._http_client.close()
-        server._http_client = None
-    server._api_session_id = None
+    server._http_client = None
+    if server._idp_client is not None:
+        server._idp_client.close()
+    server._idp_client = None
+    server._oidc_metadata_cache = None
+    server._service_token = None
+    server._user_tokens.clear()
     server._obml_reference_cache = None
     server._dialect_names_cache = None
     server._function_catalog_cache = None
     server._single_model_mode = False
     server._query_execute_enabled = False
-    server._loaded_model_ids.clear()
+    server._api_verified_at = None
+
+
+@pytest.fixture(autouse=True)
+def _reset_state():
+    """Reset module-level state before and after each test."""
+    _clear_server_state()
+    yield
+    _clear_server_state()
 
 
 @pytest.fixture()
@@ -145,7 +156,7 @@ def test_load_model(mock_api: respx.MockRouter):
     resp = server._session_request("POST", "/models", json_body={"model_yaml": "version: 1.0\n..."})
     data = server._parse_json(resp)
     assert data["model_id"] == "m001"
-    assert server._api_session_id == "test-session-1"
+    assert server._identity().session_id == "test-session-1"
 
 
 def test_load_model_with_warnings(mock_api: respx.MockRouter):
@@ -1612,7 +1623,7 @@ def test_remove_model(mock_api: respx.MockRouter):
     )
 
     server._session_request("DELETE", "/models/m001")
-    assert server._api_session_id == "test-session-1"
+    assert server._identity().session_id == "test-session-1"
 
 
 # ---------------------------------------------------------------------------
@@ -2581,7 +2592,7 @@ def test_session_retry_on_404(mock_api: respx.MockRouter):
     _mock_create_session(mock_api, session_id="session-old")
 
     # Pre-set the session to an old ID
-    server._api_session_id = "session-old"
+    server._identity().session_id = "session-old"
 
     # First call to dimensions returns 404 (session expired)
     mock_api.get("/v1/sessions/session-old/models/m001/dimensions").mock(
@@ -2609,14 +2620,14 @@ def test_session_retry_on_404(mock_api: respx.MockRouter):
 
     result = server._impl_list_artefacts("m001", "dimension")
     assert "No dimensions" in result
-    assert server._api_session_id == "session-new"
+    assert server._identity().session_id == "session-new"
 
 
 def test_session_retry_on_410(mock_api: respx.MockRouter):
     """When session returns 410 (Gone/expired), a new session is created and retried."""
     _mock_create_session(mock_api, session_id="session-old")
 
-    server._api_session_id = "session-old"
+    server._identity().session_id = "session-old"
 
     # First call returns 410 (session expired — new API behavior)
     mock_api.get("/v1/sessions/session-old/models/m001/dimensions").mock(
@@ -2644,14 +2655,14 @@ def test_session_retry_on_410(mock_api: respx.MockRouter):
 
     result = server._impl_list_artefacts("m001", "dimension")
     assert "No dimensions" in result
-    assert server._api_session_id == "session-new"
+    assert server._identity().session_id == "session-new"
 
 
 def test_session_create_429_rate_limited(mock_api: respx.MockRouter):
     """429 on session creation surfaces a clear rate-limit error."""
     from fastmcp.exceptions import ToolError
 
-    server._api_session_id = None
+    server._identity().session_id = None
     mock_api.post("/v1/sessions").mock(
         return_value=httpx.Response(
             429,
@@ -2673,7 +2684,7 @@ def test_session_not_invalidated_on_model_404(mock_api: respx.MockRouter):
     """A 404 for a missing model should not invalidate the session."""
     from fastmcp.exceptions import ToolError
 
-    server._api_session_id = "session-old"
+    server._identity().session_id = "session-old"
     mock_api.get("/v1/sessions/session-old/models/no-such-model/schema").mock(
         return_value=httpx.Response(404, json={"detail": "Model not found"})
     )
@@ -2683,14 +2694,14 @@ def test_session_not_invalidated_on_model_404(mock_api: respx.MockRouter):
 
     session_calls = [call for call in mock_api.calls if call.request.url.path == "/v1/sessions"]
     assert len(session_calls) == 0
-    assert server._api_session_id == "session-old"
+    assert server._identity().session_id == "session-old"
 
 
 def test_session_not_invalidated_on_plain_text_404(mock_api: respx.MockRouter):
     """A plain-text 404 (e.g. from a reverse proxy) should not invalidate the session."""
     from fastmcp.exceptions import ToolError
 
-    server._api_session_id = "session-old"
+    server._identity().session_id = "session-old"
     mock_api.get("/v1/sessions/session-old/models/missing/schema").mock(
         return_value=httpx.Response(404, text="Not Found")
     )
@@ -2700,7 +2711,7 @@ def test_session_not_invalidated_on_plain_text_404(mock_api: respx.MockRouter):
 
     session_calls = [call for call in mock_api.calls if call.request.url.path == "/v1/sessions"]
     assert len(session_calls) == 0
-    assert server._api_session_id == "session-old"
+    assert server._identity().session_id == "session-old"
 
 
 # ---------------------------------------------------------------------------
@@ -3374,32 +3385,20 @@ def test_get_client_uses_versioned_user_agent(mock_api):
     assert client.headers["user-agent"] == f"OrionBelt-MCP/{server.__version__}"
 
 
-def test_shutdown_resets_global_state(mock_api):
-    """After shutdown cleanup, _get_client() returns a fresh open client."""
-    # Step 1: create a client and a session id
+async def test_shutdown_resets_global_state(mock_api):
+    """The lifespan's cleanup closes the session and the client; a new client is fresh."""
     client_before = server._get_client()
-    server._api_session_id = "session-lifecycle"
+    server._identity().session_id = "session-lifecycle"
+    closed = mock_api.delete("/v1/sessions/session-lifecycle").mock(
+        return_value=httpx.Response(204)
+    )
 
-    # Step 2: simulate shutdown cleanup (the finally block in main())
-    mock_api.delete("/v1/sessions/session-lifecycle").mock(return_value=httpx.Response(204))
+    async with server._server_lifespan(server.mcp):
+        pass
 
-    # Run the cleanup logic directly
-    if server._api_session_id is not None:
-        try:
-            c = server._get_client()
-            c.delete(f"/v1/sessions/{server._api_session_id}")
-        except Exception:
-            pass
-        finally:
-            server._api_session_id = None
-
-    if server._http_client is not None:
-        server._http_client.close()
-        server._http_client = None
-
-    # Step 3: verify state is fully reset
+    assert closed.called
     assert server._http_client is None
-    assert server._api_session_id is None
+    assert server._identities == {}
 
     # Step 4: a new _get_client() call should return a fresh, open client
     client_after = server._get_client()
@@ -3894,7 +3893,7 @@ def test_tool_phase_buckets_classify_every_registered_tool():
 def test_current_phase_multi_model_transitions():
     """Multi-model: design until a model loads, run while loaded, design again."""
     server._single_model_mode = False
-    server._loaded_model_ids.clear()
+    server._identity().loaded_model_ids.clear()
     assert server._current_phase() == server.PHASE_DESIGN
 
     server._mark_model_loaded("m001")
@@ -3911,7 +3910,7 @@ def test_current_phase_multi_model_transitions():
 def test_current_phase_single_model_always_run():
     """Single-model mode is permanently run-time (model pre-loaded)."""
     server._single_model_mode = True
-    server._loaded_model_ids.clear()
+    server._identity().loaded_model_ids.clear()
     assert server._current_phase() == server.PHASE_RUN
 
 
@@ -3938,7 +3937,7 @@ def _all_bucket_sample():
 def test_phase_middleware_design_shows_lifecycle_plus_design_only():
     """Design phase → lifecycle + design-only; run-only verbs hidden."""
     server._single_model_mode = False
-    server._loaded_model_ids.clear()
+    server._identity().loaded_model_ids.clear()
     mw = server.PhaseMiddleware()
 
     async def call_next(_ctx):
@@ -3956,7 +3955,7 @@ def test_phase_middleware_design_shows_lifecycle_plus_design_only():
 def test_phase_middleware_run_swaps_out_design_tools():
     """Run phase → lifecycle + run-only; design/reference verbs GONE (a swap)."""
     server._single_model_mode = False
-    server._loaded_model_ids.clear()
+    server._identity().loaded_model_ids.clear()
     server._mark_model_loaded("m001")
     mw = server.PhaseMiddleware()
 
@@ -3989,13 +3988,13 @@ def test_run_batch_is_always_listed_and_unguarded():
         return "ok"
 
     # Visible in the design phase (no model) and run phase (model loaded).
-    server._loaded_model_ids.clear()
+    server._identity().loaded_model_ids.clear()
     assert "run_batch" in {t.name for t in _run(mw.on_list_tools(object(), list_next))}
     server._mark_model_loaded("m001")
     assert "run_batch" in {t.name for t in _run(mw.on_list_tools(object(), list_next))}
 
     # Callable in the design phase (not a run-only verb → no guard).
-    server._loaded_model_ids.clear()
+    server._identity().loaded_model_ids.clear()
     ctx = types.SimpleNamespace(message=types.SimpleNamespace(name="run_batch"))
     assert _run(mw.on_call_tool(ctx, ok)) == "ok"
 
@@ -4003,7 +4002,7 @@ def test_run_batch_is_always_listed_and_unguarded():
 def test_phase_middleware_guard_blocks_runtime_call_in_design():
     """Calling a run-time verb in the design phase raises a structured error."""
     server._single_model_mode = False
-    server._loaded_model_ids.clear()
+    server._identity().loaded_model_ids.clear()
     mw = server.PhaseMiddleware()
     ctx = types.SimpleNamespace(message=types.SimpleNamespace(name="describe_model"))
 
@@ -4017,7 +4016,7 @@ def test_phase_middleware_guard_blocks_runtime_call_in_design():
 def test_phase_middleware_guard_allows_lifecycle_call_in_design():
     """Lifecycle verbs (load_model/remove_model) are callable in the design phase."""
     server._single_model_mode = False
-    server._loaded_model_ids.clear()
+    server._identity().loaded_model_ids.clear()
     mw = server.PhaseMiddleware()
 
     async def call_next(_ctx):
@@ -4031,7 +4030,7 @@ def test_phase_middleware_guard_allows_lifecycle_call_in_design():
 def test_phase_middleware_guard_allows_runtime_call_in_run():
     """Run-time verbs pass the guard once a model is loaded."""
     server._single_model_mode = False
-    server._loaded_model_ids.clear()
+    server._identity().loaded_model_ids.clear()
     server._mark_model_loaded("m001")
     mw = server.PhaseMiddleware()
     ctx = types.SimpleNamespace(message=types.SimpleNamespace(name="describe_model"))
@@ -4066,7 +4065,7 @@ def test_load_model_marks_loaded_and_emits_relist_signal(mock_api: respx.MockRou
         dedup=True,
     )
 
-    assert "m001" in server._loaded_model_ids
+    assert "m001" in server._identity().loaded_model_ids
     assert server._current_phase() == server.PHASE_RUN
     assert "Run-time tools are now available" in out
     assert "Re-list tools" in out
@@ -4074,7 +4073,7 @@ def test_load_model_marks_loaded_and_emits_relist_signal(mock_api: respx.MockRou
 
 def test_remove_model_reverse_transition_signal(mock_api: respx.MockRouter):
     """remove_model forgets the model and signals the reverse transition."""
-    server._api_session_id = "test-session-1"
+    server._identity().session_id = "test-session-1"
     server._mark_model_loaded("m001")
     mock_api.delete("/v1/sessions/test-session-1/models/m001").mock(
         return_value=httpx.Response(204)
@@ -4082,14 +4081,14 @@ def test_remove_model_reverse_transition_signal(mock_api: respx.MockRouter):
 
     out = server._impl_remove_model("m001")
 
-    assert "m001" not in server._loaded_model_ids
+    assert "m001" not in server._identity().loaded_model_ids
     assert server._current_phase() == server.PHASE_DESIGN
     assert "back to the design-time tool set" in out
 
 
 def test_remove_model_keeps_run_phase_when_others_loaded(mock_api: respx.MockRouter):
     """Removing one of several models stays in the run phase, no reverse signal."""
-    server._api_session_id = "test-session-1"
+    server._identity().session_id = "test-session-1"
     server._mark_model_loaded("m001")
     server._mark_model_loaded("m002")
     mock_api.delete("/v1/sessions/test-session-1/models/m001").mock(
@@ -4185,7 +4184,7 @@ def test_phase_middleware_hides_execute_when_capability_disabled():
     """execute_* are filtered from tools/list when query_execute is off — even in run phase."""
     server._single_model_mode = False
     server._query_execute_enabled = False
-    server._loaded_model_ids.clear()
+    server._identity().loaded_model_ids.clear()
     server._mark_model_loaded("m001")  # run phase
     mw = server.PhaseMiddleware()
     tools = [
@@ -4204,7 +4203,7 @@ def test_phase_middleware_shows_execute_when_capability_enabled():
     """execute_* appear once query_execute is enabled (and a model is loaded)."""
     server._single_model_mode = False
     server._query_execute_enabled = True
-    server._loaded_model_ids.clear()
+    server._identity().loaded_model_ids.clear()
     server._mark_model_loaded("m001")
     mw = server.PhaseMiddleware()
     tools = [_fake_tool("describe_model"), _fake_tool("execute_query")]
@@ -4247,7 +4246,7 @@ def test_capability_and_phase_compose():
     """A verb shows only if its phase is active AND its capability is enabled."""
     server._single_model_mode = False
     server._query_execute_enabled = True
-    server._loaded_model_ids.clear()  # design phase
+    server._identity().loaded_model_ids.clear()  # design phase
     mw = server.PhaseMiddleware()
     tools = [_fake_tool("load_model"), _fake_tool("execute_query")]
 
@@ -5040,7 +5039,7 @@ def test_validate_model_is_visible_in_both_phases():
         return _all_bucket_sample() + [_fake_tool("validate_model")]
 
     server._single_model_mode = False
-    server._loaded_model_ids.clear()
+    server._identity().loaded_model_ids.clear()
     design = {t.name for t in _run(mw.on_list_tools(object(), call_next))}
     server._mark_model_loaded("m001")
     run = {t.name for t in _run(mw.on_list_tools(object(), call_next))}
@@ -6349,7 +6348,7 @@ def test_lineage_probe_miss_on_a_session_named_artefact_keeps_the_session(
     out = server._impl_get_lineage("m001", "Session Count", None, None, None, "text")
     assert out.startswith("Lineage of measure 'Session Count'")
     assert create.call_count == 1
-    assert server._api_session_id == "test-session-1"
+    assert server._identity().session_id == "test-session-1"
 
 
 def test_session_expiry_matches_only_the_session_wording():
@@ -6369,3 +6368,914 @@ def test_lineage_single_model_without_a_model_is_a_real_error(mock_api: respx.Mo
     )
     with pytest.raises(_ToolError, match="No models loaded in any session"):
         server._impl_get_lineage(None, "Revenue", None, None, None, "text")
+
+
+# ---------------------------------------------------------------------------
+# MCP_AUTH_MODE — BI tokens, sign-in errors, a session per identity and the
+# user mode (OBSL design/PLAN_mcp_auth.md and PLAN_mcp_new_auth.md)
+# ---------------------------------------------------------------------------
+
+_ISSUER = "https://idp.example.com/realms/obsl"
+_TOKEN_ENDPOINT = f"{_ISSUER}/protocol/openid-connect/token"
+_JWKS_URI = f"{_ISSUER}/protocol/openid-connect/certs"
+_DISCOVERY = {
+    "issuer": _ISSUER,
+    "jwks_uri": _JWKS_URI,
+    "token_endpoint": _TOKEN_ENDPOINT,
+    "authorization_endpoint": f"{_ISSUER}/protocol/openid-connect/auth",
+}
+_RESOURCE = "https://mcp.example.com/mcp"
+_API = server.settings.api_base_url
+_BI_TOKEN = "obsl_tok_0123456789ab_" + "f" * 40
+_SERVICE_KEY = "service-key-0123456789abcdef"
+
+
+def _oidc_settings(monkeypatch, mode: str = "oidc_user", **overrides) -> None:
+    values = {
+        "mcp_auth_mode": mode,
+        "oidc_issuer": _ISSUER,
+        "oidc_token_endpoint": None,
+        "oidc_client_id": "obsl-mcp",
+        "oidc_client_secret": SecretStr("mcp-client-secret"),
+        "oidc_client_secret_file": None,
+        "oidc_client_auth": "client_secret_post",
+        "oidc_exchange": None,
+        "obsl_audience": "obsl",
+        "obsl_scope": "obsl:read obsl:write",
+        "mcp_resource_url": _RESOURCE,
+        "mcp_audience": None,
+        "mcp_scopes": None,
+        "api_key": None,
+    }
+    values.update(overrides)
+    for name, value in values.items():
+        monkeypatch.setattr(server.settings, name, value)
+
+
+def _incoming(user: str) -> AccessToken:
+    """A verified token sent to this server, as FastMCP's auth leaves it in context."""
+    return AccessToken(
+        token=f"incoming-token-of-{user}",
+        client_id="claude",
+        scopes=[],
+        expires_at=int(time.time()) + 3600,
+        subject=user,
+        claims={"iss": _ISSUER, "sub": user, "aud": _RESOURCE},
+    )
+
+
+def _form(request: httpx.Request) -> dict[str, str]:
+    return dict(parse_qsl(request.content.decode()))
+
+
+def _token_answer(token: str, expires_in: int = 300) -> httpx.Response:
+    return httpx.Response(
+        200, json={"access_token": token, "token_type": "Bearer", "expires_in": expires_in}
+    )
+
+
+def _exchange_answer(request: httpx.Request) -> httpx.Response:
+    """The IdP exchanging ``incoming-token-of-<user>`` for ``obsl-token-of-<user>``."""
+    form = _form(request)
+    subject = form.get("subject_token") or form.get("assertion") or ""
+    return _token_answer(f"obsl-token-of-{subject.removeprefix('incoming-token-of-')}")
+
+
+def _session_for_bearer(request: httpx.Request) -> httpx.Response:
+    """POST /v1/sessions answering a session named after the caller's OBSL token."""
+    user = request.headers["authorization"].removeprefix("Bearer obsl-token-of-")
+    return httpx.Response(201, json={"session_id": f"session-{user}"})
+
+
+class _SignIn:
+    """Stands in for FastMCP's auth: the signed-in user of the current request."""
+
+    def __init__(self, monkeypatch) -> None:
+        self.current: AccessToken | None = None
+        monkeypatch.setattr(server, "get_access_token", lambda: self.current)
+
+    def __call__(self, user: str | None) -> None:
+        self.current = _incoming(user) if user else None
+
+
+@pytest.fixture()
+def http_mock():
+    """respx for the API and the identity provider, routed by full URL."""
+    with respx.mock(assert_all_called=False) as rsps:
+        yield rsps
+
+
+@pytest.fixture()
+def sign_in(monkeypatch, http_mock):
+    """The user mode against a Keycloak-like issuer whose discovery answers."""
+    _oidc_settings(monkeypatch)
+    http_mock.get(f"{_ISSUER}/.well-known/openid-configuration").mock(
+        return_value=httpx.Response(200, json=_DISCOVERY)
+    )
+    return _SignIn(monkeypatch)
+
+
+def _key_of(user: str) -> str:
+    return server._user_identity_key(_incoming(user))
+
+
+# --- Modes and their settings ------------------------------------------------
+
+
+def test_auth_mode_defaults_from_api_key(monkeypatch):
+    """Unset, the mode is what it was before the setting existed."""
+    monkeypatch.setattr(server.settings, "mcp_auth_mode", None)
+    monkeypatch.setattr(server.settings, "api_key", None)
+    assert server._auth_mode() == "none"
+    monkeypatch.setattr(server.settings, "api_key", _SERVICE_KEY)
+    assert server._auth_mode() == "api_key"
+    monkeypatch.setattr(server.settings, "mcp_auth_mode", "none")
+    assert server._auth_mode() == "none"
+
+
+def test_user_mode_names_every_missing_setting(monkeypatch):
+    _oidc_settings(
+        monkeypatch,
+        oidc_issuer=None,
+        oidc_client_id=None,
+        oidc_client_secret=None,
+        obsl_scope=None,
+        obsl_audience=None,
+        mcp_resource_url=None,
+    )
+    with pytest.raises(server.AuthConfigError) as exc:
+        server._check_auth_config()
+    for name in (
+        "OIDC_ISSUER",
+        "OIDC_CLIENT_ID",
+        "OIDC_CLIENT_SECRET",
+        "OBSL_SCOPE or OBSL_AUDIENCE",
+        "MCP_RESOURCE_URL",
+    ):
+        assert name in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "overrides,expected",
+    [
+        ({"mcp_auth_mode": "api_key"}, "MCP_AUTH_MODE=api_key needs API_KEY"),
+        (
+            {"oidc_issuer": "https://login.microsoftonline.com/tid/v2.0", "obsl_scope": None},
+            "Entra on-behalf-of (OIDC_EXCHANGE=entra_obo) needs OBSL_SCOPE",
+        ),
+        ({"mcp_resource_url": "mcp.example.com/mcp"}, "MCP_RESOURCE_URL must be an absolute URL"),
+        (
+            {"mcp_auth_mode": "oidc_client_credentials", "oidc_issuer": None},
+            "needs OIDC_ISSUER or OIDC_TOKEN_ENDPOINT",
+        ),
+    ],
+)
+def test_auth_config_problems(monkeypatch, overrides, expected):
+    _oidc_settings(monkeypatch)
+    for name, value in overrides.items():
+        monkeypatch.setattr(server.settings, name, value)
+    assert any(expected in p for p in server._auth_config_problems())
+
+
+def test_service_modes_install_no_bearer_check(monkeypatch):
+    for mode in ("none", "api_key", "oidc_client_credentials"):
+        _oidc_settings(monkeypatch, mode=mode, api_key=_SERVICE_KEY)
+        assert server._build_auth_provider() is None
+
+
+def test_exchange_kind_follows_the_issuer(monkeypatch):
+    _oidc_settings(monkeypatch)
+    assert server._exchange_kind() == "token_exchange"
+    monkeypatch.setattr(server.settings, "oidc_issuer", "https://login.microsoftonline.com/t/v2.0")
+    assert server._exchange_kind() == "entra_obo"
+    monkeypatch.setattr(server.settings, "oidc_exchange", "token_exchange")
+    assert server._exchange_kind() == "token_exchange"
+
+
+def _fresh_import(monkeypatch, env: dict[str, str]):
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    original = sys.modules["server"]
+    del sys.modules["server"]
+    try:
+        return importlib.import_module("server")
+    finally:
+        sys.modules["server"] = original
+
+
+_USER_MODE_ENV = {
+    "MCP_AUTH_MODE": "oidc_user",
+    "OIDC_ISSUER": _ISSUER,
+    "OIDC_CLIENT_ID": "obsl-mcp",
+    "OIDC_CLIENT_SECRET": "mcp-client-secret",
+    "OBSL_AUDIENCE": "obsl",
+    "MCP_RESOURCE_URL": _RESOURCE,
+}
+
+
+def test_exported_server_serves_the_user_mode_only_behind_its_bearer_check(monkeypatch):
+    """``server.py:mcp`` (Horizon, ``fastmcp run``) gets the check at import, never open."""
+    fresh = _fresh_import(monkeypatch, _USER_MODE_ENV)
+    assert isinstance(fresh.mcp.auth, fresh._ResourceAuthProvider)
+
+
+def test_unusable_user_mode_settings_fail_the_import(monkeypatch):
+    # The fresh module's own AuthConfigError class: match on its base.
+    with pytest.raises(ValueError, match="needs MCP_RESOURCE_URL"):
+        _fresh_import(monkeypatch, {**_USER_MODE_ENV, "MCP_RESOURCE_URL": ""})
+
+
+def test_main_refuses_the_user_mode_on_stdio(monkeypatch, caplog):
+    monkeypatch.setattr(server, "_configure_logging", lambda: None)
+    _oidc_settings(monkeypatch)
+    monkeypatch.setattr(server.settings, "mcp_transport", "stdio")
+    with (
+        caplog.at_level(logging.ERROR, logger=server.logger.name),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        server.main()
+    assert exc_info.value.code == 1
+    assert "stdio has no such sign-in" in caplog.text
+    assert "BI token" in caplog.text
+
+
+def test_user_mode_http_without_tls_warns_about_tls_only(caplog, monkeypatch):
+    monkeypatch.setattr(server.settings, "mcp_auth_mode", "oidc_user")
+    records = _warn_records(caplog, monkeypatch)
+    assert len(records) == 1
+    message = records[0].getMessage()
+    assert "no TLS" in message
+    assert "callers are authenticated" in message
+
+
+@pytest.mark.parametrize(
+    "mode,key,expected",
+    [
+        ("api_key", _BI_TOKEN, "api_key (a BI token in X-API-Key)"),
+        ("api_key", _SERVICE_KEY, "api_key (a key in X-API-Key)"),
+        ("oidc_client_credentials", None, "oidc_client_credentials (client obsl-mcp)"),
+        ("oidc_user", None, f"oidc_user (token_exchange at {_ISSUER}; resource {_RESOURCE})"),
+    ],
+)
+def test_auth_summary_never_shows_a_credential(monkeypatch, mode, key, expected):
+    _oidc_settings(monkeypatch, mode=mode, api_key=key)
+    summary = server._auth_summary()
+    assert summary == expected
+    assert "mcp-client-secret" not in summary
+    assert _BI_TOKEN not in summary
+
+
+# --- M1: a BI token as the stdio credential ------------------------------------
+
+
+def test_bi_token_rides_the_api_key_header(mock_api, monkeypatch):
+    """OBSL reads its API-key header first, sees a BI token, and runs as its owner."""
+    monkeypatch.setattr(server.settings, "mcp_auth_mode", None)
+    monkeypatch.setattr(server.settings, "api_key", _BI_TOKEN)
+    monkeypatch.setattr(server.settings, "api_key_header", "X-API-Key")
+    route = mock_api.get("/v1/datasources").mock(
+        return_value=httpx.Response(200, json={"datasources": []})
+    )
+    server._shortcut_request("GET", "/datasources")
+    sent = route.calls.last.request.headers
+    assert sent["x-api-key"] == _BI_TOKEN
+    assert "authorization" not in sent
+
+
+# --- M2: readable errors for the new codes -------------------------------------
+
+
+def _refusal(status: int, code: str, message: str, www: str | None = None) -> httpx.Response:
+    headers = {"WWW-Authenticate": www} if www else None
+    return httpx.Response(
+        status, json={"detail": {"code": code, "message": message}}, headers=headers
+    )
+
+
+@pytest.mark.parametrize(
+    "mode,key,response,expected",
+    [
+        (
+            "api_key",
+            _SERVICE_KEY,
+            _refusal(
+                401,
+                "SIGN_IN_REQUIRED",
+                "This data source logs in as the signed-in user; call with the identity "
+                "provider's access token (AUTH_MODE=oidc) or a BI token, not an API key.",
+            ),
+            ["queries as the signed-in user", "use your BI token", "MCP_AUTH_MODE=oidc_user"],
+        ),
+        (
+            "api_key",
+            _BI_TOKEN,
+            _refusal(401, "SIGN_IN_REQUIRED", "This BI token holds no warehouse sign-in."),
+            ["create a BI token with a warehouse sign-in on OBSL's /tokens page"],
+        ),
+        (
+            "api_key",
+            _BI_TOKEN,
+            _refusal(401, "BI_TOKEN_SIGN_IN_ENDED", "This BI token's warehouse sign-in has ended."),
+            ["warehouse sign-in has ended", "create a new BI token"],
+        ),
+        (
+            "api_key",
+            _BI_TOKEN,
+            _refusal(
+                401,
+                "DATA_SOURCE_SIGN_IN_INTERACTION_REQUIRED",
+                "Data source 'sf' needs the user to sign in again first.",
+                'Bearer realm="obsl", error="insufficient_claims", claims="e30="',
+            ),
+            ["sign in again (MFA", "OBSL's /tokens page", "retrying will not help"],
+        ),
+        (
+            "oidc_user",
+            None,
+            _refusal(
+                401,
+                "DATA_SOURCE_SIGN_IN_INTERACTION_REQUIRED",
+                "Data source 'sf' needs the user to sign in again first.",
+            ),
+            ["sign in again in your MCP client", "retrying will not help"],
+        ),
+        (
+            "api_key",
+            _BI_TOKEN,
+            _refusal(
+                403,
+                "DATA_SOURCE_SIGN_IN_REFUSED",
+                "Data source 'sf' refused to log in this user (invalid_grant: user disabled).",
+            ),
+            ["refused to log you in (403 DATA_SOURCE_SIGN_IN_REFUSED)", "user disabled"],
+        ),
+        (
+            "api_key",
+            _BI_TOKEN,
+            _refusal(
+                503,
+                "DATA_SOURCE_SIGN_IN_UNAVAILABLE",
+                "Could not reach the sign-in service of data source 'sf': ConnectError.",
+            ),
+            ["sign-in service is unavailable", "retry later"],
+        ),
+        (
+            "api_key",
+            _BI_TOKEN,
+            _refusal(403, "AUTH_INSUFFICIENT_SCOPE", "Insufficient scope: requires obsl:write"),
+            ["lacks the scope", "create a BI token that holds obsl:write"],
+        ),
+        (
+            "oidc_user",
+            None,
+            _refusal(
+                403,
+                "AUTH_INSUFFICIENT_SCOPE",
+                "Insufficient scope: requires obsl:write",
+                'Bearer realm="obsl", error="insufficient_scope", scope="obsl:write"',
+            ),
+            ["ask an administrator to grant you obsl:write"],
+        ),
+        (
+            "api_key",
+            _BI_TOKEN,
+            _refusal(
+                401,
+                "AUTH_INVALID",
+                "BI token expired",
+                'Bearer realm="obsl", error="invalid_token", error_description="BI token expired"',
+            ),
+            ["authentication failed (401): BI token expired", "create a new BI token"],
+        ),
+        (
+            "api_key",
+            _BI_TOKEN,
+            _refusal(401, "AUTH_INVALID", "BI token was revoked"),
+            ["create a new BI token"],
+        ),
+        (
+            "oidc_user",
+            None,
+            _refusal(401, "AUTH_INVALID", "Token audience does not include OIDC_AUDIENCE"),
+            ["sign in again in your MCP client", "OIDC_AUDIENCE"],
+        ),
+    ],
+)
+def test_auth_and_sign_in_errors_say_what_to_do(monkeypatch, mode, key, response, expected):
+    _oidc_settings(monkeypatch, mode=mode, api_key=key)
+    with pytest.raises(_ToolError) as exc:
+        server._raise_api_error(response)
+    message = str(exc.value)
+    for part in expected:
+        assert part in message
+    assert _BI_TOKEN not in message
+    if response.status_code != 401 or "AUTH_INVALID" not in response.text:
+        assert "authentication failed" not in message
+
+
+def test_mode_detection_reports_a_refused_credential_instead_of_guessing(mock_api):
+    """A 401 on /v1/settings must not freeze a guessed mode for the server's life."""
+    mock_api.get("/v1/settings").mock(
+        return_value=_refusal(401, "AUTH_REQUIRED", "API key required")
+    )
+    with pytest.raises(_ToolError, match=r"authentication failed \(401\).*set API_KEY"):
+        server._detect_api_mode()
+
+
+# --- M3: a session and loaded models per identity -------------------------------
+
+
+def _model_loaded(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(
+        201,
+        json={
+            "model_id": "m-" + request.url.path.split("/")[3].removeprefix("session-"),
+            "data_objects": 1,
+            "dimensions": 1,
+            "measures": 1,
+            "metrics": 0,
+            "warnings": [],
+        },
+    )
+
+
+def test_user_mode_keeps_sessions_and_models_per_user(sign_in, http_mock):
+    exchanges = http_mock.post(_TOKEN_ENDPOINT).mock(side_effect=_exchange_answer)
+    http_mock.post(f"{_API}/v1/sessions").mock(side_effect=_session_for_bearer)
+    http_mock.post(url__regex=rf"{re.escape(_API)}/v1/sessions/session-\w+/models").mock(
+        side_effect=_model_loaded
+    )
+    http_mock.get(f"{_API}/v1/settings").mock(return_value=httpx.Response(200, json={}))
+
+    sign_in("alice")
+    server._impl_load_model({"version": 1.0}, None, None, False)
+    assert server._current_phase() == server.PHASE_RUN
+
+    sign_in("bob")
+    # Alice's model flips nobody else's surface, and Bob gets his own session.
+    assert server._current_phase() == server.PHASE_DESIGN
+    assert server._ensure_session() == "session-bob"
+
+    sign_in("alice")
+    assert server._ensure_session() == "session-alice"
+    assert server._identity().loaded_model_ids == {"m-alice"}
+    assert exchanges.call_count == 2  # one per user; then from the cache
+
+    # Every API call carried the caller's OBSL token — never an incoming one.
+    api_calls = [c.request for c in http_mock.calls if str(c.request.url).startswith(_API)]
+    assert api_calls
+    for request in api_calls:
+        assert request.headers["authorization"].startswith("Bearer obsl-token-of-")
+        assert all("incoming-token" not in v for v in request.headers.values())
+
+
+def test_user_mode_without_a_sign_in_has_no_identity(sign_in):
+    sign_in(None)
+    assert server._current_phase() == server.PHASE_DESIGN
+    with pytest.raises(_ToolError, match="carries no sign-in"):
+        server._ensure_session()
+    assert server._identities == {}
+
+
+def test_idle_users_are_forgotten(sign_in):
+    sign_in("alice")
+    server._identity().session_id = "session-alice"
+    server._identities[_key_of("alice")].last_used -= server._IDENTITY_IDLE_SECONDS + 1
+    sign_in("bob")
+    server._identity()
+    assert list(server._identities) == [_key_of("bob")]
+
+
+def test_service_modes_share_one_identity(mock_api):
+    _mock_create_session(mock_api)
+    assert server._ensure_session() == "test-session-1"
+    assert list(server._identities) == [server._SERVICE_IDENTITY]
+
+
+async def test_shutdown_closes_each_users_session_as_that_user(sign_in, http_mock):
+    server._identities[_key_of("alice")] = server._Identity(session_id="session-alice")
+    server._identities[_key_of("bob")] = server._Identity(session_id="session-bob")
+    server._user_tokens[_key_of("alice")] = ("obsl-token-of-alice", time.time() + 300)
+    server._user_tokens[_key_of("bob")] = ("obsl-token-of-bob", time.time() - 1)
+    alice = http_mock.delete(f"{_API}/v1/sessions/session-alice").mock(
+        return_value=httpx.Response(204)
+    )
+    bob = http_mock.delete(f"{_API}/v1/sessions/session-bob").mock(return_value=httpx.Response(204))
+    sign_in(None)  # shutdown has no request, hence no signed-in user
+    async with server._server_lifespan(server.mcp):
+        pass
+    assert alice.calls.last.request.headers["authorization"] == "Bearer obsl-token-of-alice"
+    assert not bob.called  # expired: nothing to act as Bob with; the API's TTL ends it
+
+
+# --- M4: the user mode's exchange ------------------------------------------------
+
+
+def test_token_exchange_request_rfc8693(sign_in, http_mock):
+    route = http_mock.post(_TOKEN_ENDPOINT).mock(side_effect=_exchange_answer)
+    sign_in("alice")
+    assert server._obsl_bearer() == ("obsl-token-of-alice", False)
+    assert _form(route.calls.last.request) == {
+        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "subject_token": "incoming-token-of-alice",
+        "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
+        "requested_token_type": "urn:ietf:params:oauth:token-type:access_token",
+        "audience": "obsl",
+        "scope": "obsl:read obsl:write",
+        "client_id": "obsl-mcp",
+        "client_secret": "mcp-client-secret",
+    }
+
+
+def test_token_exchange_with_client_secret_basic(sign_in, http_mock, monkeypatch):
+    monkeypatch.setattr(server.settings, "oidc_client_auth", "client_secret_basic")
+    route = http_mock.post(_TOKEN_ENDPOINT).mock(side_effect=_exchange_answer)
+    sign_in("alice")
+    server._obsl_bearer()
+    request = route.calls.last.request
+    assert "client_secret" not in _form(request)
+    expected = base64.b64encode(b"obsl-mcp:mcp-client-secret").decode()
+    assert request.headers["authorization"] == f"Basic {expected}"
+
+
+def test_entra_on_behalf_of_request(sign_in, http_mock, monkeypatch):
+    monkeypatch.setattr(server.settings, "oidc_issuer", "https://login.microsoftonline.com/t/v2.0")
+    monkeypatch.setattr(server.settings, "oidc_token_endpoint", _TOKEN_ENDPOINT)
+    monkeypatch.setattr(server.settings, "obsl_scope", "api://obsl/.default")
+    route = http_mock.post(_TOKEN_ENDPOINT).mock(side_effect=_exchange_answer)
+    sign_in("alice")
+    assert server._obsl_bearer()[0] == "obsl-token-of-alice"
+    assert _form(route.calls.last.request) == {
+        "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        "requested_token_use": "on_behalf_of",
+        "assertion": "incoming-token-of-alice",
+        "scope": "api://obsl/.default",
+        "client_id": "obsl-mcp",
+        "client_secret": "mcp-client-secret",
+    }
+
+
+def test_obsl_token_is_cached_per_user_until_a_minute_before_expiry(sign_in, http_mock):
+    route = http_mock.post(_TOKEN_ENDPOINT).mock(side_effect=_exchange_answer)
+    sign_in("alice")
+    assert server._obsl_bearer() == ("obsl-token-of-alice", False)
+    assert server._obsl_bearer() == ("obsl-token-of-alice", True)
+    assert route.call_count == 1
+    server._user_tokens[_key_of("alice")] = ("obsl-token-of-alice", time.time() + 30)
+    assert server._obsl_bearer() == ("obsl-token-of-alice", False)
+    # Exchanged again from the *current* incoming token.
+    assert _form(route.calls.last.request)["subject_token"] == "incoming-token-of-alice"
+    assert route.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "error,expected",
+    [
+        ("interaction_required", "sign in again (MFA or conditional access)"),
+        ("consent_required", "consent is missing"),
+        ("invalid_client", "the operator must check OIDC_CLIENT_ID"),
+        ("invalid_scope", "the operator must check OBSL_SCOPE"),
+        ("invalid_grant", "sign in again in your MCP client"),
+    ],
+)
+def test_refused_exchange_is_a_readable_tool_error(sign_in, http_mock, error, expected):
+    http_mock.post(_TOKEN_ENDPOINT).mock(
+        return_value=httpx.Response(
+            400,
+            json={
+                "error": error,
+                "error_description": "AADSTS50076: Due to a configuration change.\r\n"
+                "Trace ID: 1234 Correlation ID: 5678",
+            },
+        )
+    )
+    sign_in("alice")
+    with pytest.raises(_ToolError) as exc:
+        server._obsl_bearer()
+    message = str(exc.value)
+    assert f"answered {error}: AADSTS50076" in message
+    assert expected in message
+    assert "Trace ID" not in message
+    assert "incoming-token" not in message
+    assert server._user_tokens == {}
+
+
+def test_cached_token_refused_as_invalid_is_renewed_once(sign_in, http_mock):
+    exchanges = http_mock.post(_TOKEN_ENDPOINT).mock(
+        side_effect=[_token_answer("obsl-token-1"), _token_answer("obsl-token-2")]
+    )
+    expired = _refusal(
+        401,
+        "AUTH_INVALID",
+        "Token has expired",
+        'Bearer realm="obsl", error="invalid_token", error_description="Token has expired"',
+    )
+    api = http_mock.get(f"{_API}/v1/settings").mock(
+        side_effect=[httpx.Response(200, json={}), expired, httpx.Response(200, json={})]
+    )
+    sign_in("alice")
+    client = server._get_client()
+    assert client.get("/v1/settings").status_code == 200  # fresh token
+    assert client.get("/v1/settings").status_code == 200  # cached → refused → renewed
+    assert [c.request.headers["authorization"] for c in api.calls] == [
+        "Bearer obsl-token-1",
+        "Bearer obsl-token-1",
+        "Bearer obsl-token-2",
+    ]
+    assert exchanges.call_count == 2
+
+
+def test_health_check_needs_no_sign_in(sign_in, http_mock):
+    """The version gate's /health is public: no user, no exchange, no credential."""
+    health = http_mock.get(f"{_API}/health").mock(
+        return_value=httpx.Response(200, json={"status": "ok"})
+    )
+    exchanges = http_mock.post(_TOKEN_ENDPOINT).mock(side_effect=_exchange_answer)
+    sign_in(None)
+    server._verify_api()
+    assert "authorization" not in health.calls.last.request.headers
+    assert not exchanges.called
+
+
+# --- oidc_client_credentials ---------------------------------------------------
+
+
+def test_client_credentials_token_is_cached_and_renewed(monkeypatch, http_mock):
+    _oidc_settings(monkeypatch, mode="oidc_client_credentials", oidc_token_endpoint=_TOKEN_ENDPOINT)
+    tokens = http_mock.post(_TOKEN_ENDPOINT).mock(
+        side_effect=[_token_answer("svc-1", 3600), _token_answer("svc-2", 3600)]
+    )
+    api = http_mock.get(f"{_API}/v1/settings").mock(return_value=httpx.Response(200, json={}))
+    client = server._get_client()
+    client.get("/v1/settings")
+    client.get("/v1/settings")
+    assert tokens.call_count == 1
+    assert _form(tokens.calls.last.request) == {
+        "grant_type": "client_credentials",
+        "scope": "obsl:read obsl:write",
+        "audience": "obsl",
+        "client_id": "obsl-mcp",
+        "client_secret": "mcp-client-secret",
+    }
+    server._service_token = ("svc-1", time.time() + 10)  # inside the 30 s margin
+    client.get("/v1/settings")
+    assert [c.request.headers["authorization"] for c in api.calls] == [
+        "Bearer svc-1",
+        "Bearer svc-1",
+        "Bearer svc-2",
+    ]
+
+
+def test_client_credentials_refused(monkeypatch, http_mock):
+    _oidc_settings(monkeypatch, mode="oidc_client_credentials", oidc_token_endpoint=_TOKEN_ENDPOINT)
+    http_mock.post(_TOKEN_ENDPOINT).mock(
+        return_value=httpx.Response(401, json={"error": "invalid_client"})
+    )
+    with pytest.raises(_ToolError, match=r"client credentials \(invalid_client\).*OIDC_CLIENT_ID"):
+        server._service_obsl_token()
+
+
+def test_client_secret_file_is_read_on_use(monkeypatch, http_mock, tmp_path):
+    secret = tmp_path / "secret"
+    secret.write_text("from-the-file\n")
+    _oidc_settings(
+        monkeypatch,
+        mode="oidc_client_credentials",
+        oidc_token_endpoint=_TOKEN_ENDPOINT,
+        oidc_client_secret=None,
+        oidc_client_secret_file=str(secret),
+    )
+    tokens = http_mock.post(_TOKEN_ENDPOINT).mock(return_value=_token_answer("svc-1"))
+    server._service_obsl_token()
+    assert _form(tokens.calls.last.request)["client_secret"] == "from-the-file"
+
+
+# --- The incoming token: verification, metadata and the 401 -------------------
+
+
+@pytest.fixture()
+def idp_keys(monkeypatch):
+    """The IdP's signing key, published as its JWKS (FastMCP fetches it with httpx2)."""
+    pair = RSAKeyPair.generate()
+    published = {**RSAKey.import_key(pair.public_key).as_dict(private=False), "kid": "k1"}
+
+    async def fetch_jwks(self):
+        return {"keys": [published]}
+
+    monkeypatch.setattr(JWTVerifier, "_fetch_jwks", fetch_jwks)
+    return pair
+
+
+async def test_verifier_accepts_a_token_issued_for_this_server(sign_in, idp_keys):
+    verifier = server._OidcUserVerifier([_RESOURCE])
+    token = idp_keys.create_token(subject="alice", issuer=_ISSUER, audience=_RESOURCE, kid="k1")
+    access = await verifier.verify_token(token)
+    assert access is not None
+    assert access.claims["sub"] == "alice"
+
+
+@pytest.mark.parametrize(
+    "claims",
+    [
+        {"audience": "obsl"},  # issued for OBSL: accepting it would be passthrough
+        {"issuer": "https://other.example.com"},
+        {"expires_in_seconds": -60},
+        {"subject": ""},
+    ],
+)
+async def test_verifier_refuses_other_tokens(sign_in, idp_keys, claims):
+    token = idp_keys.create_token(
+        **{"subject": "alice", "issuer": _ISSUER, "audience": _RESOURCE, "kid": "k1", **claims}
+    )
+    assert await server._OidcUserVerifier([_RESOURCE]).verify_token(token) is None
+
+
+async def test_verifier_refuses_symmetric_algorithms(sign_in):
+    header = base64.urlsafe_b64encode(b'{"alg":"HS256","typ":"JWT"}').rstrip(b"=").decode()
+    assert await server._OidcUserVerifier([_RESOURCE]).verify_token(f"{header}.e30.c2ln") is None
+
+
+async def test_verifier_refuses_a_discovery_document_for_another_issuer(monkeypatch, http_mock):
+    _oidc_settings(monkeypatch)
+    http_mock.get(f"{_ISSUER}/.well-known/openid-configuration").mock(
+        return_value=httpx.Response(200, json={**_DISCOVERY, "issuer": "https://evil.example"})
+    )
+    header = base64.urlsafe_b64encode(b'{"alg":"RS256"}').rstrip(b"=").decode()
+    with pytest.raises(_ToolError, match="is not the issuer"):
+        await server._OidcUserVerifier([_RESOURCE]).verify_token(f"{header}.e30.c2ln")
+
+
+def _b64(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+@pytest.mark.parametrize("header", [b"[]", b'"x"', b"7", b'{"alg":["RS256"]}', b'{"alg":{}}'])
+async def test_verifier_refuses_odd_headers_without_an_error(sign_in, header):
+    """Untrusted header JSON is a 401 (None), never a 500 from an exception."""
+    verifier = server._OidcUserVerifier([_RESOURCE])
+    assert await verifier.verify_token(f"{_b64(header)}.e30.c2ln") is None
+
+
+async def test_unreachable_jwks_is_an_error_not_an_invalid_token(sign_in, idp_keys, monkeypatch):
+    """An outage must not 401 valid users round the sign-in loop, nor wait out a throttle."""
+    token = idp_keys.create_token(subject="alice", issuer=_ISSUER, audience=_RESOURCE, kid="k1")
+    working = JWTVerifier._fetch_jwks
+    fetches = 0
+
+    async def unreachable(self):
+        nonlocal fetches
+        fetches += 1
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(JWTVerifier, "_fetch_jwks", unreachable)
+    verifier = server._OidcUserVerifier([_RESOURCE])
+    for _ in range(2):
+        with pytest.raises(server._IdpUnavailableError, match="keys could not be fetched"):
+            await verifier.verify_token(token)
+    assert fetches == 2  # the failed attempt did not start the refetch throttle
+    monkeypatch.setattr(JWTVerifier, "_fetch_jwks", working)
+    assert await verifier.verify_token(token) is not None
+
+
+async def test_default_audience_is_the_advertised_resource(monkeypatch, sign_in, idp_keys):
+    """A trailing slash or an upper-case host in MCP_RESOURCE_URL still matches ``aud``."""
+    monkeypatch.setattr(server.settings, "mcp_resource_url", "https://MCP.example.com/mcp/")
+    provider = server._build_auth_provider()
+    token = idp_keys.create_token(subject="alice", issuer=_ISSUER, audience=_RESOURCE, kid="k1")
+    assert await provider.verify_token(token) is not None
+
+
+def test_mode_detection_does_not_guess_past_an_issuer_mismatch(monkeypatch, http_mock):
+    """A discovery document for another issuer is reported, not swallowed as a ValueError."""
+    _oidc_settings(monkeypatch, mode="oidc_client_credentials")
+    http_mock.get(f"{_ISSUER}/.well-known/openid-configuration").mock(
+        return_value=httpx.Response(200, json={**_DISCOVERY, "issuer": "https://evil.example"})
+    )
+    with pytest.raises(_ToolError, match="is not the issuer"):
+        server._detect_api_mode()
+
+
+def test_mode_detection_is_shared_per_identity(sign_in):
+    sign_in("alice")
+    alice = server._mode_detection_for_caller()
+    assert server._mode_detection_for_caller() is alice
+    sign_in("bob")
+    assert server._mode_detection_for_caller() is not alice
+
+
+def test_unavailable_identity_provider_says_retry_later(sign_in, http_mock):
+    http_mock.post(_TOKEN_ENDPOINT).mock(
+        return_value=httpx.Response(503, text="Service Unavailable")
+    )
+    sign_in("alice")
+    with pytest.raises(
+        _ToolError, match=r"identity provider is unavailable \(HTTP 503\); retry later"
+    ):
+        server._obsl_bearer()
+
+
+@pytest.mark.parametrize(
+    "field,expected",
+    [("mcp_auth_mode", None), ("oidc_exchange", None), ("oidc_client_auth", "client_secret_post")],
+)
+def test_empty_auth_settings_mean_unset(field, expected):
+    """Compose's ``${VAR:-}`` writes an empty value: unset, not an import failure."""
+    assert getattr(server.Settings(api_base_url=_API, **{field: ""}), field) == expected
+
+
+def test_user_mode_serves_resource_metadata_and_a_401_challenge(monkeypatch):
+    _oidc_settings(monkeypatch, mcp_scopes="api://obsl-mcp/mcp.access")
+    app = FastMCP("t", auth=server._build_auth_provider()).http_app()
+    client = TestClient(app)
+
+    metadata = client.get("/.well-known/oauth-protected-resource/mcp").json()
+    assert metadata["resource"] == _RESOURCE
+    assert metadata["authorization_servers"] == [_ISSUER]
+    assert metadata["scopes_supported"] == ["api://obsl-mcp/mcp.access"]
+
+    refused = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
+    assert refused.status_code == 401
+    challenge = refused.headers["www-authenticate"]
+    assert (
+        'resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp"'
+        in challenge
+    )
+    assert 'scope="api://obsl-mcp/mcp.access"' in challenge
+
+
+def test_resource_url_must_name_the_mcp_endpoint(monkeypatch):
+    _oidc_settings(monkeypatch, mcp_resource_url="https://mcp.example.com/other")
+    with pytest.raises(server.AuthConfigError, match="ending in /mcp"):
+        FastMCP("t", auth=server._build_auth_provider()).http_app()
+
+
+def test_user_mode_end_to_end_over_http(monkeypatch, http_mock, idp_keys):
+    """A signed token for this server, over HTTP, to a sync tool: OBSL sees only its own.
+
+    The exported ``server.py:mcp`` of a fresh import in the user mode, served
+    by FastMCP's HTTP app: the bearer check, then the token in the tool's
+    worker thread, exchanged for an OBSL token that is all the API receives.
+    """
+    fresh = _fresh_import(monkeypatch, _USER_MODE_ENV)
+    jwt_token = idp_keys.create_token(subject="alice", issuer=_ISSUER, audience=_RESOURCE, kid="k1")
+    http_mock.get(f"{_ISSUER}/.well-known/openid-configuration").mock(
+        return_value=httpx.Response(200, json=_DISCOVERY)
+    )
+    exchanges = http_mock.post(_TOKEN_ENDPOINT).mock(
+        return_value=_token_answer("obsl-token-of-alice")
+    )
+    http_mock.get(f"{_API}/health").mock(
+        return_value=httpx.Response(200, json={"status": "ok", "auth_mode": "oidc"})
+    )
+    http_mock.get(f"{_API}/v1/settings").mock(
+        return_value=httpx.Response(200, json={"single_model_mode": False})
+    )
+    datasources = http_mock.get(f"{_API}/v1/datasources").mock(
+        return_value=httpx.Response(200, json={"datasources": []})
+    )
+
+    app = fresh.mcp.http_app(stateless_http=True, json_response=True)
+    headers = {
+        "Authorization": f"Bearer {jwt_token}",
+        "Accept": "application/json, text/event-stream",
+    }
+    try:
+        with TestClient(app, base_url="https://mcp.example.com") as client:
+            init = client.post(
+                "/mcp",
+                headers=headers,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {},
+                        "clientInfo": {"name": "test", "version": "1"},
+                    },
+                },
+            )
+            assert init.status_code == 200, init.text
+            call = client.post(
+                "/mcp",
+                headers={**headers, "MCP-Protocol-Version": "2025-06-18"},
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {"name": "list_datasources", "arguments": {}},
+                },
+            )
+            assert call.status_code == 200, call.text
+            assert call.json()["result"]["isError"] is False, call.text
+    finally:
+        if fresh._http_client is not None:
+            fresh._http_client.close()
+        if fresh._idp_client is not None:
+            fresh._idp_client.close()
+
+    assert datasources.calls.last.request.headers["authorization"] == "Bearer obsl-token-of-alice"
+    assert _form(exchanges.calls.last.request)["subject_token"] == jwt_token
+    for c in http_mock.calls:
+        if str(c.request.url).startswith(_API):
+            assert all(jwt_token not in v for v in c.request.headers.values())
