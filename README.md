@@ -238,8 +238,9 @@ Then it exchanges the token for one for OBSL, for the same user:
   (`grant_type=…:token-exchange`, `audience=$OBSL_AUDIENCE`, `scope=$OBSL_SCOPE`).
 
 The incoming token is **never** sent to the API. The OBSL token is cached per
-user (issuer + subject) until a minute before it expires and is always
-exchanged again from the current incoming token. Each user gets their own API
+user (issuer + subject) until a minute before it expires, and only for the
+sign-in it came from: signing in again (after an MFA challenge, say) gets a
+fresh exchange. It is always exchanged from the current incoming token. Each user gets their own API
 session (the API gives a session only to its creator) and their own design-time
 and run-time tool surface.
 

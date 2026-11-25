@@ -21,7 +21,10 @@ endpoint, BI tokens, data sources that log in as the user). The version moves to
   tokens issued for itself (signature, issuer, audience, `exp`, `sub`). It
   exchanges each one for an OBSL token for the same user: Entra on-behalf-of,
   or RFC 8693 token exchange for Okta, Keycloak and others. The OBSL token is
-  cached per user until a minute before it expires. The incoming token is never
+  cached per user until a minute before it expires, and only for the sign-in it
+  came from, so signing in again (after an MFA challenge, say) is exchanged
+  anew. An outage at the IdP (a 5xx, `temporarily_unavailable`,
+  `server_error`) says to retry later rather than sign in again. The incoming token is never
   sent to the API. Settings: `MCP_RESOURCE_URL`, `MCP_AUDIENCE`, `MCP_SCOPES`,
   `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET[_FILE]`,
   `OIDC_CLIENT_AUTH`, `OIDC_EXCHANGE`, `OBSL_SCOPE`, `OBSL_AUDIENCE`.

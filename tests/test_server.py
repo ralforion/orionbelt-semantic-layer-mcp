@@ -6479,6 +6479,11 @@ def _key_of(user: str) -> str:
     return server._user_identity_key(_incoming(user))
 
 
+def _cached_for(user: str, token: str, expires_at: float) -> server._UserToken:
+    """A cache entry as an exchange from ``_incoming(user)`` leaves it."""
+    return server._UserToken(token, expires_at, server._fingerprint(_incoming(user).token))
+
+
 # --- Modes and their settings ------------------------------------------------
 
 
@@ -6855,8 +6860,10 @@ def test_service_modes_share_one_identity(mock_api):
 async def test_shutdown_closes_each_users_session_as_that_user(sign_in, http_mock):
     server._identities[_key_of("alice")] = server._Identity(session_id="session-alice")
     server._identities[_key_of("bob")] = server._Identity(session_id="session-bob")
-    server._user_tokens[_key_of("alice")] = ("obsl-token-of-alice", time.time() + 300)
-    server._user_tokens[_key_of("bob")] = ("obsl-token-of-bob", time.time() - 1)
+    server._user_tokens[_key_of("alice")] = _cached_for(
+        "alice", "obsl-token-of-alice", time.time() + 300
+    )
+    server._user_tokens[_key_of("bob")] = _cached_for("bob", "obsl-token-of-bob", time.time() - 1)
     alice = http_mock.delete(f"{_API}/v1/sessions/session-alice").mock(
         return_value=httpx.Response(204)
     )
@@ -6921,11 +6928,84 @@ def test_obsl_token_is_cached_per_user_until_a_minute_before_expiry(sign_in, htt
     assert server._obsl_bearer() == ("obsl-token-of-alice", False)
     assert server._obsl_bearer() == ("obsl-token-of-alice", True)
     assert route.call_count == 1
-    server._user_tokens[_key_of("alice")] = ("obsl-token-of-alice", time.time() + 30)
+    server._user_tokens[_key_of("alice")] = _cached_for(
+        "alice", "obsl-token-of-alice", time.time() + 30
+    )
     assert server._obsl_bearer() == ("obsl-token-of-alice", False)
     # Exchanged again from the *current* incoming token.
     assert _form(route.calls.last.request)["subject_token"] == "incoming-token-of-alice"
     assert route.call_count == 2
+
+
+def test_signing_in_again_exchanges_the_new_sign_in(sign_in, http_mock):
+    """After an MFA challenge the user signs in again: OBSL must see the new sign-in.
+
+    The cached OBSL token is still valid for the same issuer and subject, but
+    it came from the sign-in OBSL challenged (DATA_SOURCE_SIGN_IN_INTERACTION_
+    REQUIRED); serving it again would repeat the challenge until it expired.
+    """
+    exchanges = http_mock.post(_TOKEN_ENDPOINT).mock(
+        side_effect=[_token_answer("obsl-token-before-mfa"), _token_answer("obsl-token-after-mfa")]
+    )
+    challenged = _refusal(
+        401,
+        "DATA_SOURCE_SIGN_IN_INTERACTION_REQUIRED",
+        "Data source 'sf' needs the user to sign in again first.",
+        'Bearer realm="obsl", error="insufficient_claims", claims="e30="',
+    )
+    api = http_mock.post(f"{_API}/v1/query/execute").mock(
+        side_effect=[challenged, httpx.Response(200, json={"rows": []})]
+    )
+    sign_in("alice")
+    client = server._get_client()
+    assert client.post("/v1/query/execute", json={}).status_code == 401
+    # The user signs in again (MFA): same issuer and subject, a new token.
+    sign_in_again = _incoming("alice").model_copy(update={"token": "incoming-after-mfa"})
+    sign_in.current = sign_in_again
+    assert client.post("/v1/query/execute", json={}).status_code == 200
+    assert [c.request.headers["authorization"] for c in api.calls] == [
+        "Bearer obsl-token-before-mfa",
+        "Bearer obsl-token-after-mfa",
+    ]
+    assert _form(exchanges.calls.last.request)["subject_token"] == "incoming-after-mfa"
+    # The same sign-in is still served from the cache.
+    assert server._obsl_bearer() == ("obsl-token-after-mfa", True)
+    assert exchanges.call_count == 2
+
+
+def test_the_cache_never_holds_an_incoming_token(sign_in, http_mock):
+    http_mock.post(_TOKEN_ENDPOINT).mock(side_effect=_exchange_answer)
+    sign_in("alice")
+    server._obsl_bearer()
+    cached = server._user_tokens[_key_of("alice")]
+    assert "incoming-token-of-alice" not in repr(cached)
+
+
+@pytest.mark.parametrize(
+    "status,body",
+    [
+        (503, {"error": "temporarily_unavailable", "error_description": "Try again later"}),
+        (500, {"error": "server_error"}),
+        (400, {"error": "server_error", "error_description": "AADSTS90033: transient"}),
+        (502, None),
+    ],
+)
+def test_identity_provider_outages_say_retry_later(sign_in, http_mock, monkeypatch, status, body):
+    """In both modes an IdP outage is a retry, never "sign in again" or "check the config"."""
+    answer = httpx.Response(status, json=body) if body else httpx.Response(status, text="Bad")
+    http_mock.post(_TOKEN_ENDPOINT).mock(return_value=answer)
+    sign_in("alice")
+    with pytest.raises(_ToolError) as user_mode_error:
+        server._obsl_bearer()
+    monkeypatch.setattr(server.settings, "mcp_auth_mode", "oidc_client_credentials")
+    with pytest.raises(_ToolError) as service_error:
+        server._service_obsl_token()
+    for error in (user_mode_error, service_error):
+        message = str(error.value)
+        assert "identity provider is unavailable" in message
+        assert "retry later" in message
+        assert "sign in again" not in message
+        assert "OIDC_CLIENT_ID" not in message
 
 
 @pytest.mark.parametrize(

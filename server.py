@@ -25,6 +25,7 @@ import asyncio
 import base64
 import contextlib
 import gzip
+import hashlib
 import importlib.metadata
 import ipaddress
 import json
@@ -44,7 +45,7 @@ from datetime import UTC, date, datetime, timedelta, timezone
 from datetime import time as dt_time
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Literal, NoReturn
+from typing import Any, Literal, NamedTuple, NoReturn
 from urllib.parse import quote, urlencode, urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -455,6 +456,16 @@ class _IdpRefusedError(Exception):
             return f"HTTP {self.status}"
         return f"{self.error}: {self.description}" if self.description else self.error
 
+    @property
+    def temporary(self) -> bool:
+        """An outage at the IdP (any 5xx, or its own words for one): retry, don't re-sign-in."""
+        return self.status >= 500 or self.error in _IDP_TEMPORARY_ERRORS
+
+
+# The OAuth error codes for the authorization server's own trouble (RFC 6749
+# §4.1.2.1), which some IdPs also answer at the token endpoint.
+_IDP_TEMPORARY_ERRORS = frozenset({"temporarily_unavailable", "server_error"})
+
 
 def _unverified_claims(token: str) -> dict[str, Any]:
     """A JWT's payload, unverified: only ever read for a token's own expiry."""
@@ -526,8 +537,23 @@ _token_lock = threading.Lock()
 # so callers arriving meanwhile wait for the one request rather than each sending one.
 _service_token_lock = threading.Lock()
 _service_token: tuple[str, float] | None = None
+
+
+class _UserToken(NamedTuple):
+    """An OBSL token obtained for a user, and the sign-in it was exchanged from."""
+
+    token: str
+    expires_at: float
+    # SHA-256 of the incoming token it came from — never the token itself.
+    source: str
+
+
 # OBSL tokens obtained for users, by identity (``_user_identity_key``).
-_user_tokens: dict[str, tuple[str, float]] = {}
+_user_tokens: dict[str, _UserToken] = {}
+
+
+def _fingerprint(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 def _service_obsl_token(*, renew: bool = False) -> tuple[str, bool]:
@@ -546,7 +572,7 @@ def _service_obsl_token(*, renew: bool = False) -> tuple[str, bool]:
             token, expires_at = _idp_token_request(form)
         except _IdpRefusedError as exc:
             logger.warning("The identity provider refused the client credentials: %s", exc)
-            if exc.status >= 500 and not exc.error:
+            if exc.temporary:
                 raise ToolError(
                     f"The identity provider is unavailable ({exc.summary()}); retry later."
                 ) from None
@@ -603,7 +629,7 @@ def _exchange_form(subject_token: str) -> dict[str, str]:
 
 def _exchange_refusal(exc: _IdpRefusedError) -> str:
     """A refused exchange, for the user: what the IdP said and what to do."""
-    if exc.status >= 500 and not exc.error:
+    if exc.temporary:
         return (
             "Your sign-in could not be exchanged for an OBSL token: the identity "
             f"provider is unavailable ({exc.summary()}); retry later."
@@ -637,16 +663,21 @@ def _exchange_refusal(exc: _IdpRefusedError) -> str:
 def _user_obsl_token(incoming: AccessToken, *, renew: bool = False) -> tuple[str, bool]:
     """An OBSL token for the user of ``incoming``, and whether it came from the cache.
 
-    Cached per user until a minute before it expires; a new one is always
-    exchanged from the *current* incoming token, never a stored one.
+    Cached per user until a minute before it expires, and only for the sign-in
+    it was exchanged from: a new incoming token — the user signed in again,
+    after MFA or a conditional-access challenge (``DATA_SOURCE_SIGN_IN_
+    INTERACTION_REQUIRED``), with new consent or scopes — is exchanged anew, so
+    what OBSL sees follows the latest sign-in. A new one is always exchanged
+    from the *current* incoming token, never a stored one.
     """
     key = _user_identity_key(incoming)
+    source = _fingerprint(incoming.token)
     now = time.time()
     if not renew:
         with _token_lock:
             cached = _user_tokens.get(key)
-        if cached and cached[1] - _USER_TOKEN_MARGIN > now:
-            return cached[0], True
+        if cached and cached.source == source and cached.expires_at - _USER_TOKEN_MARGIN > now:
+            return cached.token, True
     try:
         token, expires_at = _idp_token_request(_exchange_form(incoming.token))
     except _IdpRefusedError as exc:
@@ -655,10 +686,10 @@ def _user_obsl_token(incoming: AccessToken, *, renew: bool = False) -> tuple[str
         )
         raise ToolError(_exchange_refusal(exc)) from None
     with _token_lock:
-        for stale in [k for k, (_, exp) in _user_tokens.items() if exp <= now]:
+        for stale in [k for k, cached in _user_tokens.items() if cached.expires_at <= now]:
             del _user_tokens[stale]
         if expires_at:
-            _user_tokens[key] = (token, expires_at)
+            _user_tokens[key] = _UserToken(token, expires_at, source)
         else:
             _user_tokens.pop(key, None)
     return token, False
@@ -881,9 +912,9 @@ async def _server_lifespan(server):
         if key != _SERVICE_IDENTITY:
             with _token_lock:
                 cached = _user_tokens.get(key)
-            if not cached or cached[1] <= time.time():
+            if not cached or cached.expires_at <= time.time():
                 continue
-            headers = {"Authorization": f"Bearer {cached[0]}"}
+            headers = {"Authorization": f"Bearer {cached.token}"}
         try:
             _get_client().delete(f"{_API_V1}/sessions/{session_id}", headers=headers)
             logger.info("Cleaned up API session: %s", session_id)
