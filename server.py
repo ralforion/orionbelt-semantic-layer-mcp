@@ -25,6 +25,7 @@ import asyncio
 import base64
 import contextlib
 import gzip
+import hashlib
 import importlib.metadata
 import ipaddress
 import json
@@ -36,13 +37,15 @@ import ssl
 import threading
 import time
 import zlib
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import UTC, date, datetime, timedelta, timezone
 from datetime import time as dt_time
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Literal, NoReturn
+from typing import Any, Literal, NamedTuple, NoReturn
 from urllib.parse import quote, urlencode, urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -50,8 +53,13 @@ import httpx
 from fastmcp import FastMCP
 from fastmcp.exceptions import INTERNAL_ERROR, McpError, ToolError
 from fastmcp.prompts import Prompt as _BasePrompt
+from fastmcp.server.auth import AccessToken, RemoteAuthProvider, TokenVerifier
+from fastmcp.server.auth.providers.jwt import JWTVerifier
+from fastmcp.server.dependencies import get_access_token
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from fastmcp.utilities.auth import decode_jwt_header
 from mcp.types import ToolAnnotations
+from pydantic import AnyHttpUrl, SecretStr, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # ---------------------------------------------------------------------------
@@ -71,11 +79,42 @@ class Settings(BaseSettings):
     )
 
     api_base_url: str
-    # API credential for auth-enabled deployments (AUTH_MODE=api_key on the API).
-    # Leave unset for unauthenticated APIs (AUTH_MODE=none).
+    # How this server authenticates to the API — see "Authentication" below.
+    # Unset: api_key when API_KEY is set, none otherwise (the behaviour before
+    # the setting existed).
+    mcp_auth_mode: Literal["none", "api_key", "oidc_client_credentials", "oidc_user"] | None = None
+    # api_key mode: a key from the API's API_KEYS, or a person's BI token
+    # (obsl_tok_…, from OBSL's /tokens page), with which the API runs as them.
     api_key: str | None = None
     # Header the credential is sent in; must match the API's API_KEY_HEADER.
     api_key_header: str = "X-API-Key"
+    # oidc_user: the public URL of this server's MCP endpoint, as users add it to
+    # their MCP client. The resource its RFC 9728 metadata names and, unless
+    # MCP_AUDIENCE says otherwise, the audience incoming tokens must carry.
+    mcp_resource_url: str | None = None
+    # oidc_user: the accepted ``aud`` values (comma-separated) when the IdP puts
+    # something else there than the URL (Entra: the MCP app's client ID).
+    mcp_audience: str | None = None
+    # oidc_user: the scopes an MCP client asks the IdP for to call this server
+    # (Entra: api://<MCP app>/<scope>), advertised in the metadata and the 401.
+    mcp_scopes: str | None = None
+    # Both oidc modes: the IdP. Its discovery document gives the signing keys and
+    # the token endpoint (OIDC_TOKEN_ENDPOINT overrides the latter).
+    oidc_issuer: str | None = None
+    oidc_token_endpoint: str | None = None
+    # This server's confidential client at the IdP, for the token requests.
+    oidc_client_id: str | None = None
+    oidc_client_secret: SecretStr | None = None
+    oidc_client_secret_file: str | None = None
+    # How the client authenticates at the token endpoint.
+    oidc_client_auth: Literal["client_secret_post", "client_secret_basic"] = "client_secret_post"
+    # oidc_user: how the user's token is exchanged. Unset: entra_obo for an
+    # Entra issuer (login.microsoftonline.com), token_exchange (RFC 8693) else.
+    oidc_exchange: Literal["entra_obo", "token_exchange"] | None = None
+    # What to ask the IdP for, for OBSL: Entra <OBSL app ID URI>/.default; for
+    # RFC 8693 IdPs (Okta, Keycloak) OBSL's audience and/or a scope.
+    obsl_scope: str | None = None
+    obsl_audience: str | None = None
     # Client-side TLS for the hop to the API, for an API that serves HTTPS
     # itself (API_TLS_* on the API, v2.29+) or a gateway in front of it.
     # API_CLIENT_CERT (+ API_CLIENT_KEY unless the key is in the same PEM)
@@ -103,6 +142,14 @@ class Settings(BaseSettings):
     # "console" (pretty), "json" (structured), or "cloudrun" (JSON, GCP severity).
     log_format: Literal["console", "json", "cloudrun"] = "console"
     api_timeout: int = 30
+
+    @field_validator("mcp_auth_mode", "oidc_exchange", "oidc_client_auth", mode="before")
+    @classmethod
+    def _empty_is_unset(cls, value: Any, info: ValidationInfo) -> Any:
+        """``MCP_AUTH_MODE=`` (as compose's ``${VAR:-}`` writes it) means unset, not invalid."""
+        if value == "":
+            return "client_secret_post" if info.field_name == "oidc_client_auth" else None
+        return value
 
     @property
     def effective_port(self) -> int:
@@ -161,6 +208,682 @@ def _configure_logging() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Authentication — who this server is to the API
+# ---------------------------------------------------------------------------
+#
+# ``MCP_AUTH_MODE`` (design/PLAN_mcp_auth.md, PLAN_mcp_new_auth.md in OBSL):
+#
+#   none                     no credential: an API running AUTH_MODE=none.
+#   api_key                  API_KEY in API_KEY_HEADER: a key from the API's
+#                            API_KEYS (one shared service identity), or a
+#                            person's BI token (obsl_tok_…), with which the API
+#                            runs as that person — on data sources that log in
+#                            as the user too, when the token holds a warehouse
+#                            sign-in. The way a local stdio server acts as you.
+#   oidc_client_credentials  a client-credentials token from the IdP, cached and
+#                            renewed shortly before it expires: one service
+#                            identity managed at the IdP.
+#   oidc_user                the caller's own identity, over HTTP. The MCP client
+#                            signs the user in at the IdP and sends a token
+#                            issued for *this server*; the server checks it
+#                            (signature, issuer, audience, expiry) and exchanges
+#                            it — Entra on-behalf-of, or RFC 8693 token exchange
+#                            — for a token for OBSL, for the same user. The
+#                            incoming token is never sent to the API (the MCP
+#                            spec forbids passing it through).
+#
+# The first three are service modes: every caller acts as the one identity the
+# environment holds. Only oidc_user tells callers apart, and so only it keys the
+# API session and the loaded models by caller (``_Identity``).
+
+AUTH_NONE = "none"
+AUTH_API_KEY = "api_key"
+AUTH_CLIENT_CREDENTIALS = "oidc_client_credentials"
+AUTH_USER = "oidc_user"
+_OAUTH_MODES = frozenset({AUTH_CLIENT_CREDENTIALS, AUTH_USER})
+
+# A BI token, as OBSL issues it (``auth/bi_tokens.py``): only used to tailor advice.
+_BI_TOKEN_PREFIX = "obsl_tok_"
+
+EXCHANGE_ENTRA_OBO = "entra_obo"
+EXCHANGE_TOKEN_EXCHANGE = "token_exchange"
+# Entra's sign-in hosts (public cloud, US Government, China): their issuers
+# exchange with on-behalf-of rather than RFC 8693, which Entra does not offer.
+_ENTRA_HOSTS = frozenset(
+    {"login.microsoftonline.com", "login.microsoftonline.us", "login.partner.microsoftonline.cn"}
+)
+
+# The incoming token's signing algorithms accepted: asymmetric only, the set
+# OBSL accepts for its own tokens.
+_JWT_ALGORITHMS = frozenset({"RS256", "PS256", "ES256", "EdDSA"})
+
+# Seconds before expiry a cached OBSL token is renewed: a minute for a user's
+# (PLAN_mcp_auth.md §3), 30 s for the service token (§4).
+_USER_TOKEN_MARGIN = 60.0
+_SERVICE_TOKEN_MARGIN = 30.0
+
+
+class AuthConfigError(ValueError):
+    """The ``MCP_AUTH_MODE`` settings are incomplete or contradict each other."""
+
+
+def _auth_mode() -> str:
+    """The effective ``MCP_AUTH_MODE``."""
+    if settings.mcp_auth_mode:
+        return settings.mcp_auth_mode
+    return AUTH_API_KEY if settings.api_key else AUTH_NONE
+
+
+def _split_setting(value: str | None) -> list[str]:
+    """A comma- or space-separated setting as a list, empty entries dropped."""
+    return [part for part in re.split(r"[,\s]+", value or "") if part]
+
+
+def _exchange_kind() -> str:
+    """How ``oidc_user`` exchanges a user's token: ``OIDC_EXCHANGE``, or by issuer."""
+    if settings.oidc_exchange:
+        return settings.oidc_exchange
+    host = (urlsplit(settings.oidc_issuer or "").hostname or "").lower()
+    return EXCHANGE_ENTRA_OBO if host in _ENTRA_HOSTS else EXCHANGE_TOKEN_EXCHANGE
+
+
+def _auth_config_problems() -> list[str]:
+    """What the configured ``MCP_AUTH_MODE`` is missing, one line per problem."""
+    mode = _auth_mode()
+    problems: list[str] = []
+    if mode == AUTH_API_KEY and not settings.api_key:
+        problems.append(
+            "MCP_AUTH_MODE=api_key needs API_KEY: an API key, or your BI token "
+            "from OBSL's /tokens page"
+        )
+    if mode not in _OAUTH_MODES:
+        return problems
+    if not settings.oidc_client_id:
+        problems.append(f"MCP_AUTH_MODE={mode} needs OIDC_CLIENT_ID")
+    if not (settings.oidc_client_secret or settings.oidc_client_secret_file):
+        problems.append(f"MCP_AUTH_MODE={mode} needs OIDC_CLIENT_SECRET or OIDC_CLIENT_SECRET_FILE")
+    if not (settings.obsl_scope or settings.obsl_audience):
+        problems.append(
+            f"MCP_AUTH_MODE={mode} needs OBSL_SCOPE or OBSL_AUDIENCE: what to ask "
+            "the identity provider for (Entra: <OBSL app ID URI>/.default)"
+        )
+    if mode == AUTH_CLIENT_CREDENTIALS:
+        if not (settings.oidc_issuer or settings.oidc_token_endpoint):
+            problems.append(
+                "MCP_AUTH_MODE=oidc_client_credentials needs OIDC_ISSUER or OIDC_TOKEN_ENDPOINT"
+            )
+        return problems
+    if not settings.oidc_issuer:
+        problems.append("MCP_AUTH_MODE=oidc_user needs OIDC_ISSUER")
+    resource = urlsplit(settings.mcp_resource_url or "")
+    if not settings.mcp_resource_url:
+        problems.append(
+            "MCP_AUTH_MODE=oidc_user needs MCP_RESOURCE_URL: this server's public "
+            "MCP endpoint URL, e.g. https://mcp.example.com/mcp"
+        )
+    elif resource.scheme not in ("https", "http") or not resource.hostname:
+        problems.append(f"MCP_RESOURCE_URL must be an absolute URL: {settings.mcp_resource_url}")
+    elif resource.query or resource.fragment:
+        problems.append(f"MCP_RESOURCE_URL must have no query or fragment: {resource.geturl()}")
+    if _exchange_kind() == EXCHANGE_ENTRA_OBO and not settings.obsl_scope:
+        problems.append(
+            "Entra on-behalf-of (OIDC_EXCHANGE=entra_obo) needs OBSL_SCOPE: "
+            "<OBSL app ID URI>/.default or a named scope"
+        )
+    return problems
+
+
+def _check_auth_config() -> None:
+    """Raise :class:`AuthConfigError` naming every problem of the auth settings."""
+    problems = _auth_config_problems()
+    if problems:
+        raise AuthConfigError("; ".join(problems))
+
+
+def _auth_summary() -> str:
+    """One line for the startup banner: the auth mode, never a credential."""
+    mode = _auth_mode()
+    if mode == AUTH_API_KEY:
+        kind = "a BI token" if (settings.api_key or "").startswith(_BI_TOKEN_PREFIX) else "a key"
+        return f"api_key ({kind} in {settings.api_key_header})"
+    if mode == AUTH_CLIENT_CREDENTIALS:
+        return f"oidc_client_credentials (client {settings.oidc_client_id})"
+    if mode == AUTH_USER:
+        return (
+            f"oidc_user ({_exchange_kind()} at {settings.oidc_issuer}; "
+            f"resource {settings.mcp_resource_url})"
+        )
+    return "none"
+
+
+# --- The identity provider --------------------------------------------------
+
+# Reentrant: discovery holds it while it builds the client under it.
+_idp_lock = threading.RLock()
+_idp_client: httpx.Client | None = None
+_oidc_metadata_cache: dict[str, Any] | None = None
+
+
+def _get_idp_client() -> httpx.Client:
+    """The shared client for the IdP: discovery and its token endpoint.
+
+    Separate from the API's client — another host, httpx's default trust (and
+    ``SSL_CERT_FILE``), none of the ``API_*`` TLS settings or credentials.
+    """
+    global _idp_client
+    if _idp_client is None:
+        with _idp_lock:
+            if _idp_client is None:
+                _idp_client = httpx.Client(
+                    timeout=settings.api_timeout,
+                    headers={
+                        "User-Agent": f"OrionBelt-MCP/{__version__}",
+                        "Accept": "application/json",
+                    },
+                )
+    return _idp_client
+
+
+def _oidc_metadata() -> dict[str, Any]:
+    """The IdP's OpenID discovery document, fetched once.
+
+    Its ``issuer`` must be ``OIDC_ISSUER`` (OpenID Connect Discovery §4.3): a
+    document naming another issuer is a misconfiguration, never a fallback.
+    Every failure is a :class:`ToolError` — never a ``ValueError``, which
+    mode detection would mistake for an unreadable answer and guess past.
+    """
+    global _oidc_metadata_cache
+    if _oidc_metadata_cache is not None:
+        return _oidc_metadata_cache
+    with _idp_lock:
+        if _oidc_metadata_cache is not None:
+            return _oidc_metadata_cache
+        issuer = (settings.oidc_issuer or "").rstrip("/")
+        url = f"{issuer}/.well-known/openid-configuration"
+        try:
+            resp = _get_idp_client().get(url)
+        except httpx.HTTPError as exc:
+            raise ToolError(
+                f"The identity provider's discovery document could not be fetched "
+                f"({type(exc).__name__}): {url}"
+            ) from None
+        try:
+            doc = resp.json() if resp.status_code == 200 else None
+        except ValueError:
+            doc = None
+        if not isinstance(doc, dict) or not all(
+            isinstance(doc.get(k), str) for k in ("issuer", "jwks_uri", "token_endpoint")
+        ):
+            raise ToolError(
+                f"The identity provider's discovery document at {url} is unusable "
+                f"(HTTP {resp.status_code}; it needs issuer, jwks_uri and token_endpoint)"
+            )
+        if doc["issuer"].rstrip("/") != issuer:
+            raise ToolError(
+                f"OIDC_ISSUER ({settings.oidc_issuer}) is not the issuer the identity "
+                f"provider names in its discovery document ({doc['issuer']}); set it to that"
+            )
+        _oidc_metadata_cache = doc
+    return doc
+
+
+def _oidc_client_secret() -> str:
+    """``OIDC_CLIENT_SECRET``, or ``OIDC_CLIENT_SECRET_FILE`` read on each use (rotation)."""
+    if settings.oidc_client_secret is not None:
+        return settings.oidc_client_secret.get_secret_value()
+    path = settings.oidc_client_secret_file or ""
+    try:
+        return Path(path).read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise ToolError(
+            f"OIDC_CLIENT_SECRET_FILE could not be read ({exc.strerror or exc}): {path}"
+        ) from None
+
+
+class _IdpRefusedError(Exception):
+    """The IdP's token endpoint refused a request (OAuth ``error`` response)."""
+
+    def __init__(self, status: int, error: str | None, description: str | None) -> None:
+        self.status = status
+        self.error = error
+        # The first line only, capped: Entra appends trace and correlation ids.
+        first = (description or "").strip().splitlines()
+        self.description = first[0][:300] if first else None
+        super().__init__(self.summary())
+
+    def summary(self) -> str:
+        if not self.error:
+            return f"HTTP {self.status}"
+        return f"{self.error}: {self.description}" if self.description else self.error
+
+    @property
+    def temporary(self) -> bool:
+        """An outage at the IdP (any 5xx, or its own words for one): retry, don't re-sign-in."""
+        return self.status >= 500 or self.error in _IDP_TEMPORARY_ERRORS
+
+
+# The OAuth error codes for the authorization server's own trouble (RFC 6749
+# §4.1.2.1), which some IdPs also answer at the token endpoint.
+_IDP_TEMPORARY_ERRORS = frozenset({"temporarily_unavailable", "server_error"})
+
+
+def _unverified_claims(token: str) -> dict[str, Any]:
+    """A JWT's payload, unverified: only ever read for a token's own expiry."""
+    try:
+        payload = token.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    except (IndexError, ValueError):
+        return {}
+    return claims if isinstance(claims, dict) else {}
+
+
+def _token_expiry(body: dict[str, Any], token: str) -> float | None:
+    """When a token from the IdP expires (epoch seconds): ``expires_in``, or its ``exp``."""
+    with contextlib.suppress(TypeError, ValueError):
+        if body.get("expires_in") is not None:
+            return time.time() + float(body["expires_in"])
+    exp = _unverified_claims(token).get("exp")
+    return float(exp) if isinstance(exp, int | float) else None
+
+
+def _idp_token_request(form: dict[str, str]) -> tuple[str, float | None]:
+    """POST ``form`` to the IdP's token endpoint as this server's client.
+
+    Returns the access token and its expiry. A refusal raises
+    :class:`_IdpRefusedError` for the caller to explain; the IdP being
+    unreachable raises :class:`ToolError`. No token is ever logged or put in an
+    error.
+    """
+    endpoint = settings.oidc_token_endpoint or _oidc_metadata()["token_endpoint"]
+    client_id = settings.oidc_client_id or ""
+    secret = _oidc_client_secret()
+    data = dict(form)
+    auth: httpx.Auth | None = None
+    if settings.oidc_client_auth == "client_secret_basic":
+        # RFC 6749 §2.3.1: both are form-encoded before the Basic encoding.
+        auth = httpx.BasicAuth(quote(client_id, safe=""), quote(secret, safe=""))
+    else:
+        data["client_id"] = client_id
+        data["client_secret"] = secret
+    try:
+        resp = _get_idp_client().post(endpoint, data=data, auth=auth)
+    except httpx.HTTPError as exc:
+        raise ToolError(
+            f"The identity provider's token endpoint could not be reached "
+            f"({type(exc).__name__}); retry later."
+        ) from None
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        body = {}
+    token = body.get("access_token")
+    if resp.status_code != 200 or not isinstance(token, str) or not token:
+        error = body.get("error")
+        description = body.get("error_description")
+        raise _IdpRefusedError(
+            resp.status_code,
+            error if isinstance(error, str) else None,
+            description if isinstance(description, str) else None,
+        )
+    return token, _token_expiry(body, token)
+
+
+# --- OBSL tokens --------------------------------------------------------------
+
+_token_lock = threading.Lock()
+# The one client-credentials token (token, expires at) — renewed under this lock,
+# so callers arriving meanwhile wait for the one request rather than each sending one.
+_service_token_lock = threading.Lock()
+_service_token: tuple[str, float] | None = None
+
+
+class _UserToken(NamedTuple):
+    """An OBSL token obtained for a user, and the sign-in it was exchanged from."""
+
+    token: str
+    expires_at: float
+    # SHA-256 of the incoming token it came from — never the token itself.
+    source: str
+
+
+# OBSL tokens obtained for users, by identity (``_user_identity_key``).
+_user_tokens: dict[str, _UserToken] = {}
+
+
+def _fingerprint(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _service_obsl_token(*, renew: bool = False) -> tuple[str, bool]:
+    """The client-credentials token for OBSL, and whether it came from the cache."""
+    global _service_token
+    with _service_token_lock:
+        cached = _service_token
+        if not renew and cached and cached[1] - _SERVICE_TOKEN_MARGIN > time.time():
+            return cached[0], True
+        form = {"grant_type": "client_credentials"}
+        if settings.obsl_scope:
+            form["scope"] = settings.obsl_scope
+        if settings.obsl_audience:
+            form["audience"] = settings.obsl_audience
+        try:
+            token, expires_at = _idp_token_request(form)
+        except _IdpRefusedError as exc:
+            logger.warning("The identity provider refused the client credentials: %s", exc)
+            if exc.temporary:
+                raise ToolError(
+                    f"The identity provider is unavailable ({exc.summary()}); retry later."
+                ) from None
+            raise ToolError(
+                f"The identity provider refused this server's client credentials "
+                f"({exc.summary()}): the operator must check OIDC_CLIENT_ID, "
+                "OIDC_CLIENT_SECRET and OBSL_SCOPE / OBSL_AUDIENCE."
+            ) from None
+        _service_token = (token, expires_at) if expires_at else None
+        return token, False
+
+
+def _user_identity_key(token: AccessToken) -> str:
+    """Who an incoming token speaks for: its issuer and subject."""
+    claims = token.claims or {}
+    return f"{claims.get('iss', '')} {claims.get('sub') or token.subject or ''}"
+
+
+_NO_SIGN_IN = (
+    "This server acts as the signed-in user (MCP_AUTH_MODE=oidc_user), and this "
+    "request carries no sign-in: connect through an MCP client that signs you in."
+)
+
+
+def _incoming_token() -> AccessToken:
+    """The verified token of the current request (``oidc_user``), or a ToolError."""
+    token = get_access_token()
+    if token is None:
+        raise ToolError(_NO_SIGN_IN)
+    return token
+
+
+def _exchange_form(subject_token: str) -> dict[str, str]:
+    """The token request that exchanges a user's token for one for OBSL."""
+    if _exchange_kind() == EXCHANGE_ENTRA_OBO:
+        return {
+            "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+            "requested_token_use": "on_behalf_of",
+            "assertion": subject_token,
+            "scope": settings.obsl_scope or "",
+        }
+    form = {
+        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "subject_token": subject_token,
+        "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
+        "requested_token_type": "urn:ietf:params:oauth:token-type:access_token",
+    }
+    if settings.obsl_audience:
+        form["audience"] = settings.obsl_audience
+    if settings.obsl_scope:
+        form["scope"] = settings.obsl_scope
+    return form
+
+
+def _exchange_refusal(exc: _IdpRefusedError) -> str:
+    """A refused exchange, for the user: what the IdP said and what to do."""
+    if exc.temporary:
+        return (
+            "Your sign-in could not be exchanged for an OBSL token: the identity "
+            f"provider is unavailable ({exc.summary()}); retry later."
+        )
+    if exc.error == "interaction_required":
+        advice = (
+            "the identity provider wants you to sign in again (MFA or conditional "
+            "access): sign in again in your MCP client. Retrying will not help."
+        )
+    elif exc.error == "consent_required":
+        advice = (
+            "consent is missing for this server's permission on OBSL: sign in again "
+            "in your MCP client and consent, or ask an administrator to grant it."
+        )
+    elif exc.error in ("invalid_client", "unauthorized_client"):
+        advice = (
+            "the identity provider refused this server's own client: the operator "
+            "must check OIDC_CLIENT_ID, OIDC_CLIENT_SECRET and that the app may "
+            "exchange tokens for OBSL."
+        )
+    elif exc.error in ("invalid_scope", "invalid_target"):
+        advice = "the operator must check OBSL_SCOPE / OBSL_AUDIENCE."
+    else:
+        advice = "sign in again in your MCP client."
+    return (
+        "Your sign-in could not be exchanged for an OBSL token (the identity "
+        f"provider answered {exc.summary()}): {advice}"
+    )
+
+
+def _user_obsl_token(incoming: AccessToken, *, renew: bool = False) -> tuple[str, bool]:
+    """An OBSL token for the user of ``incoming``, and whether it came from the cache.
+
+    Cached per user until a minute before it expires, and only for the sign-in
+    it was exchanged from: a new incoming token — the user signed in again,
+    after MFA or a conditional-access challenge (``DATA_SOURCE_SIGN_IN_
+    INTERACTION_REQUIRED``), with new consent or scopes — is exchanged anew, so
+    what OBSL sees follows the latest sign-in. A new one is always exchanged
+    from the *current* incoming token, never a stored one.
+    """
+    key = _user_identity_key(incoming)
+    source = _fingerprint(incoming.token)
+    now = time.time()
+    if not renew:
+        with _token_lock:
+            cached = _user_tokens.get(key)
+        if cached and cached.source == source and cached.expires_at - _USER_TOKEN_MARGIN > now:
+            return cached.token, True
+    try:
+        token, expires_at = _idp_token_request(_exchange_form(incoming.token))
+    except _IdpRefusedError as exc:
+        logger.warning(
+            "Token exchange refused for sub=%s: %s", (incoming.claims or {}).get("sub"), exc
+        )
+        raise ToolError(_exchange_refusal(exc)) from None
+    with _token_lock:
+        for stale in [k for k, cached in _user_tokens.items() if cached.expires_at <= now]:
+            del _user_tokens[stale]
+        if expires_at:
+            _user_tokens[key] = _UserToken(token, expires_at, source)
+        else:
+            _user_tokens.pop(key, None)
+    return token, False
+
+
+def _obsl_bearer(*, renew: bool = False) -> tuple[str, bool]:
+    """The bearer token for this API request in an oidc mode, and whether it was cached."""
+    if _auth_mode() == AUTH_CLIENT_CREDENTIALS:
+        return _service_obsl_token(renew=renew)
+    return _user_obsl_token(_incoming_token(), renew=renew)
+
+
+def _www_authenticate_param(response: httpx.Response, name: str) -> str | None:
+    """A parameter of the response's ``WWW-Authenticate`` header (RFC 6750 §3)."""
+    pattern = rf'(?<![\w-]){re.escape(name)}="([^"]*)"'
+    match = re.search(pattern, response.headers.get("www-authenticate", ""))
+    return match.group(1) if match else None
+
+
+# Marks a request the API answers without a credential (``/health``): no token
+# is obtained for it, so the version gate needs no user and no IdP round trip.
+_PUBLIC_REQUEST = "orionbelt.public"
+
+
+class _ObslAuth(httpx.Auth):
+    """Put the oidc modes' bearer token on each API request.
+
+    Per request, because in ``oidc_user`` the token is the current caller's.
+    A request that already carries ``Authorization`` keeps it (the shutdown
+    cleanup acts as a stored identity). A *cached* token the API refuses as
+    ``invalid_token`` (revoked, clock skew) is replaced once by a fresh one.
+    ``api_key`` needs none of this: its key is a default header of the client.
+    """
+
+    def auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response, None]:
+        if (
+            _auth_mode() not in _OAUTH_MODES
+            or request.extensions.get(_PUBLIC_REQUEST)
+            or "authorization" in request.headers
+        ):
+            yield request
+            return
+        token, cached = _obsl_bearer()
+        request.headers["Authorization"] = f"Bearer {token}"
+        response = yield request
+        if (
+            cached
+            and response.status_code == 401
+            and _www_authenticate_param(response, "error") == "invalid_token"
+        ):
+            token, _ = _obsl_bearer(renew=True)
+            request.headers["Authorization"] = f"Bearer {token}"
+            yield request
+
+
+# --- Incoming tokens (oidc_user) -----------------------------------------------
+
+
+class _IdpUnavailableError(Exception):
+    """The IdP's keys could not be fetched: no verdict on the token."""
+
+
+class _JwksVerifier(JWTVerifier):
+    """FastMCP's JWT check, with an unreachable JWKS an error rather than a refusal.
+
+    ``JWTVerifier`` reports a failed key fetch as an invalid token, and a 401
+    sends the client round the sign-in loop for what is an outage. Here it
+    escapes as :class:`_IdpUnavailableError` (not a ``ValueError``, which the
+    base class would swallow), and the failed attempt does not count against
+    the refetch throttle, so the next request tries again.
+    """
+
+    async def _fetch_jwks(self) -> dict[str, Any]:
+        try:
+            return await super()._fetch_jwks()
+        except Exception as exc:  # noqa: BLE001 — transport, status or JSON: all an outage
+            self._jwks_last_refresh_attempt = None
+            raise _IdpUnavailableError(
+                f"The identity provider's keys could not be fetched "
+                f"({type(exc).__name__}): {self.jwks_uri}"
+            ) from None
+
+
+class _OidcUserVerifier(TokenVerifier):
+    """Check a token sent to this server: the IdP's signature, issuer, audience, expiry.
+
+    The keys come from the IdP's JWKS (cached; refetched for an unknown key id),
+    found through its discovery document on the first token — so importing the
+    server needs no network. A token must carry ``exp`` and ``sub``; the
+    audience is this server (``MCP_AUDIENCE``, else ``MCP_RESOURCE_URL``), so a
+    token issued for another resource — OBSL's included — is refused.
+    """
+
+    def __init__(self, audience: list[str]) -> None:
+        super().__init__()
+        self._audience = audience
+        self._verifiers: dict[str, JWTVerifier] = {}
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        # Whatever a caller sends is refused (None, a 401), never an exception:
+        # the header is untrusted JSON, and may be a list or carry a list alg.
+        try:
+            header = decode_jwt_header(token)
+        except ValueError:
+            return None
+        alg = header.get("alg") if isinstance(header, dict) else None
+        if not isinstance(alg, str) or alg not in _JWT_ALGORITHMS:
+            logger.info("Bearer token rejected: signing algorithm %r is not accepted", alg)
+            return None
+        try:
+            metadata = _oidc_metadata_cache or await asyncio.to_thread(_oidc_metadata)
+        except ToolError as exc:
+            # Not the caller's fault and not fixable by signing in again: an
+            # error (a 500), rather than a 401 that sends the client round the
+            # sign-in loop.
+            logger.error("Cannot verify bearer tokens: %s", exc)
+            raise
+        verifier = self._verifiers.get(alg)
+        if verifier is None:
+            verifier = self._verifiers.setdefault(
+                alg,
+                _JwksVerifier(
+                    jwks_uri=metadata["jwks_uri"],
+                    issuer=metadata["issuer"],
+                    audience=self._audience,
+                    algorithm=alg,
+                ),
+            )
+        try:
+            access = await verifier.verify_token(token)
+        except _IdpUnavailableError as exc:
+            logger.error("Cannot verify bearer tokens: %s", exc)
+            raise
+        if access is None:
+            return None
+        if not access.claims.get("sub") or access.claims.get("exp") is None:
+            logger.warning("Bearer token rejected: it has no sub or no exp claim")
+            return None
+        return access
+
+
+class _ResourceAuthProvider(RemoteAuthProvider):
+    """RFC 9728 protected resource metadata naming ``MCP_RESOURCE_URL`` as the resource.
+
+    FastMCP derives the resource from a base URL plus the path the endpoint is
+    mounted at, and tells the provider that path here; MCP_RESOURCE_URL names
+    the whole endpoint, so its base is what remains without that path. A URL
+    that does not end in the path cannot be this endpoint's.
+    """
+
+    def set_mcp_path(self, mcp_path: str | None) -> None:
+        resource = (settings.mcp_resource_url or "").rstrip("/")
+        base = resource
+        if mcp_path and mcp_path.strip("/"):
+            suffix = "/" + mcp_path.strip("/")
+            if not urlsplit(resource).path.endswith(suffix):
+                raise AuthConfigError(
+                    f"MCP_RESOURCE_URL ({resource}) must be the URL of this server's "
+                    f"MCP endpoint, ending in {suffix}"
+                )
+            base = resource[: -len(suffix)]
+        self.resource_base_url = AnyHttpUrl(base)
+        super().set_mcp_path(mcp_path)
+
+
+def _build_auth_provider() -> RemoteAuthProvider | None:
+    """The HTTP transport's bearer-token check: ``oidc_user`` only, else None.
+
+    Built at import, with the server, so that every entrypoint — ``main()``
+    and the exported ``server.py:mcp`` alike — serves the user mode only
+    behind it, never open. Unusable settings fail the import, closed.
+    """
+    _check_auth_config()
+    if _auth_mode() != AUTH_USER:
+        return None
+    resource = (settings.mcp_resource_url or "").rstrip("/")
+    # The resource as the metadata advertises it (host lowercased, default port
+    # and trailing slash dropped) — what a client asks the IdP to put in
+    # ``aud`` — and as configured.
+    audience = _split_setting(settings.mcp_audience) or list(
+        dict.fromkeys([str(AnyHttpUrl(resource)).rstrip("/"), resource])
+    )
+    scopes = _split_setting(settings.mcp_scopes)
+    return _ResourceAuthProvider(
+        token_verifier=_OidcUserVerifier(audience),
+        authorization_servers=[AnyHttpUrl(settings.oidc_issuer or "")],
+        base_url=settings.mcp_resource_url or "",
+        scopes_supported=scopes,
+        challenge_scopes=scopes or None,
+        resource_name="OrionBelt Semantic Layer",
+    )
+
+
+# ---------------------------------------------------------------------------
 # FastMCP server instance
 # ---------------------------------------------------------------------------
 
@@ -177,17 +900,26 @@ async def _server_lifespan(server):
     never runs ``main()``.
     """
     yield
-    # Best-effort session cleanup on shutdown
-    global _http_client, _api_session_id
-    if _api_session_id is not None:
+    # Best-effort session cleanup on shutdown. A user's session is closed as
+    # that user, with the OBSL token still cached for them; once that has
+    # expired there is no request to act for them, and the API's TTL ends it.
+    global _http_client
+    with _state_lock:
+        open_sessions = [(k, s.session_id) for k, s in _identities.items() if s.session_id]
+        _identities.clear()
+    for key, session_id in open_sessions:
+        headers = None
+        if key != _SERVICE_IDENTITY:
+            with _token_lock:
+                cached = _user_tokens.get(key)
+            if not cached or cached.expires_at <= time.time():
+                continue
+            headers = {"Authorization": f"Bearer {cached.token}"}
         try:
-            client = _get_client()
-            client.delete(f"{_API_V1}/sessions/{_api_session_id}")
-            logger.info("Cleaned up API session: %s", _api_session_id)
+            _get_client().delete(f"{_API_V1}/sessions/{session_id}", headers=headers)
+            logger.info("Cleaned up API session: %s", session_id)
         except Exception:
             logger.debug("Session cleanup failed (API TTL will handle it)")
-        finally:
-            _api_session_id = None
     if _http_client is not None:
         _http_client.close()
         _http_client = None
@@ -205,14 +937,18 @@ def _package_version() -> str | None:
 # and used for the User-Agent and startup banner.
 __version__ = _package_version() or "dev"
 
-mcp = FastMCP("OrionBelt Semantic Layer", version=__version__, lifespan=_server_lifespan)
+mcp = FastMCP(
+    "OrionBelt Semantic Layer",
+    version=__version__,
+    lifespan=_server_lifespan,
+    auth=_build_auth_provider(),
+)
 
 # ---------------------------------------------------------------------------
 # Internal state
 # ---------------------------------------------------------------------------
 
 _state_lock = threading.RLock()
-_api_session_id: str | None = None
 _http_client: httpx.Client | None = None
 _single_model_mode: bool = False
 _query_execute_enabled: bool = False
@@ -220,9 +956,76 @@ _tools_registered: bool = False
 # When the API last passed the version check (``time.monotonic()``); None: not yet.
 _api_verified_at: float | None = None
 
-# Model ids loaded into the current (multi-model) session. Drives the
-# design-time ↔ run-time tool surface (see "Tool phase model" below).
-_loaded_model_ids: set[str] = set()
+
+@dataclass
+class _Identity:
+    """One caller's API session and the models loaded into it.
+
+    The service modes have one identity, ``_SERVICE_IDENTITY``, shared by every
+    caller as before. ``oidc_user`` has one per signed-in user: the API gives a
+    session to its creator alone (another identity gets 404), and the loaded
+    models, which drive the design-time ↔ run-time tool surface (see "Tool
+    phase model" below), are that user's.
+    """
+
+    session_id: str | None = None
+    # Model ids loaded into ``session_id`` (multi-model mode).
+    loaded_model_ids: set[str] = dataclass_field(default_factory=set)
+    last_used: float = dataclass_field(default_factory=time.monotonic)
+    # Held while the session is created, so one identity's slow creation holds
+    # up neither another identity nor the state lock.
+    lock: threading.Lock = dataclass_field(default_factory=threading.Lock)
+
+
+_SERVICE_IDENTITY = "service"
+# A user unseen this long is forgotten: their API session has long expired
+# (the API's TTL ends it), and the map stays as small as the active users.
+_IDENTITY_IDLE_SECONDS = 4 * 3600.0
+_identities: dict[str, _Identity] = {}
+
+
+def _current_identity_key() -> str | None:
+    """The identity of the current request; None for ``oidc_user`` without a sign-in."""
+    if _auth_mode() != AUTH_USER:
+        return _SERVICE_IDENTITY
+    token = get_access_token()
+    return None if token is None else _user_identity_key(token)
+
+
+def _identity_or_none() -> _Identity | None:
+    """The current identity's state, if it has any yet."""
+    key = _current_identity_key()
+    if key is None:
+        return None
+    with _state_lock:
+        state = _identities.get(key)
+        if state is not None:
+            state.last_used = time.monotonic()
+        return state
+
+
+def _identity() -> _Identity:
+    """The current identity's state, created on first use.
+
+    Raises :class:`ToolError` in ``oidc_user`` when the request has no sign-in:
+    never the service identity, which would share one user's session with the next.
+    """
+    key = _current_identity_key()
+    if key is None:
+        raise ToolError(_NO_SIGN_IN)
+    now = time.monotonic()
+    with _state_lock:
+        for idle in [
+            k
+            for k, s in _identities.items()
+            if k != key and k != _SERVICE_IDENTITY and now - s.last_used > _IDENTITY_IDLE_SECONDS
+        ]:
+            del _identities[idle]
+        state = _identities.get(key)
+        if state is None:
+            state = _identities[key] = _Identity()
+        state.last_used = now
+        return state
 
 
 # ---------------------------------------------------------------------------
@@ -359,28 +1162,35 @@ _BATCH = ToolAnnotations(
 
 
 def _mark_model_loaded(model_id: str) -> None:
-    """Record a model as loaded — flips the surface to the run-time phase."""
+    """Record a model as loaded — flips the caller's surface to the run-time phase."""
     if not model_id:
         return
+    state = _identity()
     with _state_lock:
-        _loaded_model_ids.add(model_id)
+        state.loaded_model_ids.add(model_id)
 
 
 def _mark_model_removed(model_id: str) -> None:
     """Forget a model — flips back to design-time once none remain loaded."""
-    with _state_lock:
-        _loaded_model_ids.discard(model_id)
+    state = _identity_or_none()
+    if state is not None:
+        with _state_lock:
+            state.loaded_model_ids.discard(model_id)
 
 
 def _current_phase() -> str:
-    """Resolve the active phase from loaded-model state.
+    """Resolve the caller's active phase from its loaded-model state.
 
     Single-model mode always has a pre-loaded model, so it is permanently in the
     run-time phase. Multi-model mode is design-time until ``load_model`` succeeds
-    and reverts to design-time once every model is removed.
+    and reverts to design-time once every model is removed. Per identity: in
+    ``oidc_user`` one user's loaded model does not flip another user's surface.
     """
+    if _single_model_mode:
+        return PHASE_RUN
+    state = _identity_or_none()
     with _state_lock:
-        if _single_model_mode or _loaded_model_ids:
+        if state is not None and state.loaded_model_ids:
             return PHASE_RUN
         return PHASE_DESIGN
 
@@ -480,7 +1290,16 @@ class LazyInitMiddleware(Middleware):
         call_next: CallNext[Any, Any],
     ) -> Any:
         if not _tools_registered and context.method not in _HANDSHAKE_METHODS:
-            _setup_mode_tools(await _shared_mode_detection())
+            try:
+                detected = await _mode_detection_for_caller()()
+            except ToolError as exc:
+                # A refused credential (``_detect_api_mode``): an MCP error
+                # saying why, as the version gate answers, on any method —
+                # and nothing frozen, so the next request detects again.
+                raise McpError(INTERNAL_ERROR, str(exc)) from None
+            _setup_mode_tools(detected)
+            with _state_lock:
+                _mode_detections.clear()
         return await call_next(context)
 
 
@@ -569,7 +1388,22 @@ def _verify_api_logged() -> None:
 
 
 _shared_api_check = _SharedRun(_verify_api_logged)
-_shared_mode_detection = _SharedRun(lambda: _detect_api_mode())
+
+# Mode detection reads /v1/settings with the caller's credential, so it is
+# shared per identity: in oidc_user, one user's refusal (a missing scope, an
+# IdP asking for MFA) is never answered to another user's request. The service
+# modes have one identity, hence one shared run, as before.
+_mode_detections: dict[str, _SharedRun] = {}
+
+
+def _mode_detection_for_caller() -> _SharedRun:
+    """The shared mode-detection run of the current identity."""
+    key = _current_identity_key() or ""
+    with _state_lock:
+        run = _mode_detections.get(key)
+        if run is None:
+            run = _mode_detections[key] = _SharedRun(_detect_api_mode)
+        return run
 
 
 class PhaseMiddleware(Middleware):
@@ -770,14 +1604,16 @@ def _get_client() -> httpx.Client:
         with _state_lock:
             if _http_client is None:  # double-check under lock
                 headers = {"User-Agent": f"OrionBelt-MCP/{__version__}"}
-                # Send the API credential when configured. Required when the
-                # API runs with AUTH_MODE=api_key; harmless when AUTH_MODE=none.
-                if settings.api_key:
+                # api_key: one static credential, a default header. The oidc
+                # modes put a bearer token on each request (``_ObslAuth``) —
+                # in oidc_user the current caller's.
+                if _auth_mode() == AUTH_API_KEY and settings.api_key:
                     headers[settings.api_key_header] = settings.api_key
                 _http_client = httpx.Client(
                     base_url=settings.api_base_url,
                     timeout=settings.api_timeout,
                     headers=headers,
+                    auth=_ObslAuth(),
                     # Built once, here: the context validated is the one on the
                     # wire. A context rather than cert=, which httpx 0.28
                     # deprecates.
@@ -850,21 +1686,24 @@ def _create_api_session() -> str:
 
 
 def _ensure_session() -> str:
-    """Return the cached session ID, creating one if needed."""
-    global _api_session_id
-    if _api_session_id is None:
-        with _state_lock:
-            if _api_session_id is None:  # double-check under lock
-                _api_session_id = _create_api_session()
-                logger.info("Created API session: %s", _api_session_id)
-    return _api_session_id
+    """Return the current identity's session ID, creating one if needed."""
+    state = _identity()
+    session_id = state.session_id
+    if session_id is None:
+        with state.lock:
+            session_id = state.session_id
+            if session_id is None:  # double-check under the identity's lock
+                session_id = state.session_id = _create_api_session()
+                logger.info("Created API session: %s", session_id)
+    return session_id
 
 
 def _invalidate_session() -> None:
-    """Clear the cached session ID (e.g. on 404)."""
-    global _api_session_id
-    with _state_lock:
-        _api_session_id = None
+    """Clear the current identity's session ID (e.g. on 404)."""
+    state = _identity_or_none()
+    if state is not None:
+        with _state_lock:
+            state.session_id = None
 
 
 # ---------------------------------------------------------------------------
@@ -951,25 +1790,124 @@ def _error_code(response: httpx.Response) -> str | None:
     return code if isinstance(code, str) else None
 
 
+def _holds_bi_token() -> bool:
+    """Whether this server's credential is a person's BI token (api_key mode)."""
+    return _auth_mode() == AUTH_API_KEY and (settings.api_key or "").startswith(_BI_TOKEN_PREFIX)
+
+
+# The API's data-source sign-in codes (OBSL 3.2, ``service/user_login.py``): a
+# source that logs in to the warehouse *as the user*. Not ``AUTH_*`` codes, so
+# they are matched before the "403 without an AUTH_ code is no auth problem" rule.
+_SIGN_IN_CODES = frozenset(
+    {
+        "SIGN_IN_REQUIRED",
+        "BI_TOKEN_SIGN_IN_ENDED",
+        "DATA_SOURCE_SIGN_IN_INTERACTION_REQUIRED",
+        "DATA_SOURCE_SIGN_IN_REFUSED",
+        "DATA_SOURCE_SIGN_IN_UNAVAILABLE",
+    }
+)
+
+
+def _sign_in_error(status: int, code: str, detail: str) -> str:
+    """A data-source sign-in refusal, with what the caller can do about it."""
+    user_mode = _auth_mode() == AUTH_USER
+    if code == "SIGN_IN_REQUIRED":
+        lead = "This data source queries as the signed-in user"
+        if _holds_bi_token():
+            advice = (
+                "create a BI token with a warehouse sign-in on OBSL's /tokens page "
+                "and set it as API_KEY"
+            )
+        else:
+            advice = (
+                "use your BI token (with a warehouse sign-in) as API_KEY, or run this "
+                "server in the user mode (MCP_AUTH_MODE=oidc_user), not a service key"
+            )
+    elif code == "BI_TOKEN_SIGN_IN_ENDED":
+        lead = "Your BI token's warehouse sign-in has ended"
+        advice = "create a new BI token on OBSL's /tokens page and set it as API_KEY"
+    elif code == "DATA_SOURCE_SIGN_IN_INTERACTION_REQUIRED":
+        lead = "The identity provider wants you to sign in again (MFA or conditional access)"
+        advice = (
+            "sign in again in your MCP client"
+            if user_mode
+            else "sign in again on OBSL's /tokens page and create a new BI token"
+        ) + "; retrying will not help"
+    elif code == "DATA_SOURCE_SIGN_IN_REFUSED":
+        # The API's message names the warehouse's reason.
+        return f"The data source refused to log you in ({status} {code}): {detail}"
+    else:  # DATA_SOURCE_SIGN_IN_UNAVAILABLE
+        lead = "The data source's sign-in service is unavailable"
+        advice = "retry later"
+    return f"{lead} ({status} {code}): {detail} — {advice}"
+
+
+def _scope_error(response: httpx.Response, detail: str) -> str:
+    """A 403 ``AUTH_INSUFFICIENT_SCOPE``, naming the scope the tool needs."""
+    scope = _www_authenticate_param(response, "scope")
+    if not scope:
+        match = re.search(r"requires (\S+)", detail)
+        scope = match.group(1) if match else "that scope"
+    mode = _auth_mode()
+    if mode == AUTH_USER:
+        advice = f"ask an administrator to grant you {scope} at the identity provider"
+    elif _holds_bi_token():
+        advice = f"create a BI token that holds {scope} on OBSL's /tokens page"
+    elif mode == AUTH_CLIENT_CREDENTIALS:
+        advice = f"grant this server's client {scope} at the identity provider"
+    else:
+        advice = f"use a credential that holds {scope}"
+    return (
+        "Your identity lacks the scope this tool needs (403 AUTH_INSUFFICIENT_SCOPE): "
+        f"{detail} — {advice}"
+    )
+
+
+def _credential_hint(detail: str) -> str:
+    """What to check when the API refuses this server's credential (401/403)."""
+    mode = _auth_mode()
+    if mode == AUTH_NONE:
+        return (
+            "set API_KEY to an API key or your BI token from OBSL's /tokens page "
+            "(and API_KEY_HEADER if the API uses a custom header) in the MCP environment"
+        )
+    if mode == AUTH_API_KEY:
+        if _holds_bi_token() and "BI token" in detail:
+            return "create a new BI token on OBSL's /tokens page and set it as API_KEY"
+        return "verify API_KEY matches a key configured on the API, or is a current BI token"
+    if mode == AUTH_CLIENT_CREDENTIALS:
+        return (
+            "the operator must check that OBSL_SCOPE / OBSL_AUDIENCE ask the identity "
+            "provider for a token with OBSL's OIDC_ISSUER and OIDC_AUDIENCE"
+        )
+    return (
+        "sign in again in your MCP client; if that does not help, the operator must "
+        "check that OBSL_SCOPE / OBSL_AUDIENCE ask for a token with OBSL's OIDC_AUDIENCE"
+    )
+
+
 def _raise_api_error(response: httpx.Response, detail: str | None = None) -> NoReturn:
-    """Raise ToolError from an API error response."""
+    """Raise ToolError from an API error response. Never includes a credential."""
     if detail is None:
         detail = _parse_error_detail(response)
+    status = response.status_code
     code = _error_code(response)
-    # The API's auth layer always sends an ``AUTH_*`` code. A 403 with any other
-    # code is the model or server refusing the request (``VALUE_SEARCH_DISABLED``
-    # for a ``valueSearch: false`` dimension), which no credential fixes.
-    if response.status_code == 403 and code is not None and not code.startswith("AUTH_"):
+    if code in _SIGN_IN_CODES:
+        raise ToolError(_sign_in_error(status, code, detail))
+    if status == 403 and code == "AUTH_INSUFFICIENT_SCOPE":
+        raise ToolError(_scope_error(response, detail))
+    # Otherwise the API's auth layer always sends an ``AUTH_*`` code. A 403 with
+    # any other code is the model or server refusing the request
+    # (``VALUE_SEARCH_DISABLED`` for a ``valueSearch: false`` dimension), which
+    # no credential fixes.
+    if status == 403 and code is not None and not code.startswith("AUTH_"):
         raise ToolError(f"API refused the request (403 {code}): {detail}")
-    if response.status_code in (401, 403):
-        hint = (
-            "set API_KEY (and API_KEY_HEADER if the API uses a custom header) "
-            "in the MCP environment"
-            if not settings.api_key
-            else "verify API_KEY matches a key configured on the API"
+    if status in (401, 403):
+        raise ToolError(
+            f"API authentication failed ({status}): {detail} — {_credential_hint(detail)}"
         )
-        raise ToolError(f"API authentication failed ({response.status_code}): {detail} — {hint}")
-    raise ToolError(f"API error ({response.status_code}): {detail}")
+    raise ToolError(f"API error ({status}): {detail}")
 
 
 # "Session 'abc' not found" (current API) or "Session not found" (older ones).
@@ -1006,10 +1944,17 @@ def _do_request(
     path: str,
     json_body: dict | None,
     params: dict[str, Any] | None = None,
+    *,
+    public: bool = False,
 ) -> httpx.Response:
-    """Execute a single HTTP request, wrapping connection/timeout errors."""
+    """Execute a single HTTP request, wrapping connection/timeout errors.
+
+    ``public``: the API answers it without a credential (``/health``), so none
+    is obtained for it.
+    """
+    extensions = {_PUBLIC_REQUEST: True} if public else None
     try:
-        return client.request(method, path, json=json_body, params=params)
+        return client.request(method, path, json=json_body, params=params, extensions=extensions)
     except httpx.TimeoutException:
         raise ToolError("API request timed out") from None
     except httpx.TransportError as exc:  # after TimeoutException, its subclass
@@ -1651,8 +2596,10 @@ def _fetch_effective_settings(model_id: str | None = None) -> dict[str, Any]:
     """
     try:
         params: dict[str, str] = {}
-        if not _single_model_mode and _api_session_id is not None:
-            params["session_id"] = _api_session_id
+        state = _identity_or_none()
+        session_id = state.session_id if state is not None else None
+        if not _single_model_mode and session_id is not None:
+            params["session_id"] = session_id
             # model_id is rejected without a session_id, and the block is
             # omitted rather than guessed when a session holds more than one
             # model — so scoping it is what makes the settings block appear.
@@ -5768,7 +6715,7 @@ def _verify_api() -> None:
     _api_verified_at = None
     client = _get_client()
     try:
-        resp = _do_request(client, "GET", "/health", None)
+        resp = _do_request(client, "GET", "/health", None, public=True)
         resp.raise_for_status()
     except ToolError as exc:
         # The message says why — a stopped service, an untrusted certificate
@@ -5824,10 +6771,17 @@ def _detect_api_mode() -> tuple[bool, bool]:
 
     Returns:
         (single_model_mode, query_execute_enabled)
+
+    ``/v1/settings`` needs a credential on an API with auth. A refused one
+    raises :class:`ToolError` rather than defaulting: the mode is fixed once
+    detected, and a guess made from a 401 would outlast the credential's fix.
+    The next request detects again.
     """
     client = _get_client()
     try:
         resp = client.get(f"{_API_V1}/settings")
+        if resp.status_code in (401, 403):
+            _raise_api_error(resp)
         resp.raise_for_status()
         data = resp.json()
         single = data.get("single_model_mode", False)
@@ -5849,9 +6803,10 @@ def _stateless_http_enabled() -> bool:
     sampling, or elicitation requests), so instances behind a load balancer no
     longer need session affinity.
 
-    Note this is the *transport* session only. The API session
-    (``_api_session_id``) and the loaded-model set stay process-global and are
-    shared by every client of an instance, exactly as before.
+    Note this is the *transport* session only. The API session and the
+    loaded-model set are kept per identity (``_Identity``): process-global in
+    the service modes, shared by every client of an instance as before; per
+    signed-in user in ``oidc_user``, whose bearer token comes on every request.
 
     SSE cannot run stateless (it is a long-lived per-connection stream, and
     FastMCP rejects the combination), so it is forced off there.
@@ -5884,11 +6839,12 @@ def _warn_if_transport_exposed() -> None:
     """Warn when the HTTP transport is reachable off-box with nothing in front.
 
     Unlike stdio (pipes to a child process, no socket at all), the HTTP/SSE
-    transport is a real listener — and this server terminates no TLS and
-    authenticates no caller. Whatever can reach the port can call every
-    registered tool, spending the server's own ``API_KEY`` against the API, and
-    reads the queries and results in transit. The credential itself never
-    crosses this hop; the access it buys does.
+    transport is a real listener — and this server terminates no TLS and,
+    outside the user mode (``oidc_user`` checks every caller's token, which
+    leaves only the TLS half), authenticates no caller. Whatever can reach the
+    port can call every registered tool, spending the server's own ``API_KEY``
+    against the API, and reads the queries and results in transit. The
+    credential itself never crosses this hop; the access it buys does.
 
     Both jobs belong to an ingress, so this is scoped to actual evidence of
     exposure rather than firing on every HTTP start and teaching operators to
@@ -5919,6 +6875,22 @@ def _warn_if_transport_exposed() -> None:
     if settings.mcp_transport == "stdio":
         return
     if settings.mcp_behind_proxy or _is_loopback_bind(settings.mcp_server_host):
+        return
+    if _auth_mode() == AUTH_USER:
+        # Callers are authenticated — each brings a token issued for this
+        # server — so only the TLS half is left, which Cloud Run provides.
+        if os.environ.get("K_SERVICE"):
+            return
+        logger.warning(
+            "The %s transport is bound to %s with no TLS: callers are authenticated "
+            "(MCP_AUTH_MODE=oidc_user), but their bearer tokens, queries and results "
+            "are readable in transit on port %s. Put an ingress in front that "
+            "terminates TLS, or set MCP_BEHIND_PROXY=true to acknowledge one this "
+            "server cannot see.",
+            settings.mcp_transport,
+            settings.mcp_server_host,
+            settings.effective_port,
+        )
         return
     if os.environ.get("K_SERVICE"):
         logger.info(
@@ -5965,10 +6937,27 @@ def main() -> None:
         logger.error("API TLS configuration is unusable: %s", exc)
         raise SystemExit(1) from None
 
+    auth_mode = _auth_mode()
+    if auth_mode == AUTH_USER and settings.mcp_transport == "stdio":
+        logger.error(
+            "MCP_AUTH_MODE=oidc_user signs users in through their MCP client over "
+            "HTTP, and stdio has no such sign-in. Run MCP_TRANSPORT=http, or for a "
+            "local stdio server set API_KEY to your BI token from OBSL's /tokens page."
+        )
+        raise SystemExit(1)
+    if auth_mode in _OAUTH_MODES and settings.api_key:
+        logger.warning("API_KEY is ignored under MCP_AUTH_MODE=%s", auth_mode)
+
     if settings.mcp_transport == "stdio":
         # stdio: eager init — connection is local & synchronous, fail-fast is fine.
         _check_api_health()
-        _setup_mode_tools()
+        try:
+            _setup_mode_tools()
+        except (ToolError, AuthConfigError) as exc:
+            # A refused credential (or a client-credentials token the IdP would
+            # not issue): say so now, rather than serve a guessed mode.
+            logger.error("Could not read the API's settings: %s", exc)
+            raise SystemExit(1) from None
 
         if _single_model_mode:
             # Verify the pre-loaded model is valid and reachable (fail fast)
@@ -6013,6 +7002,7 @@ def main() -> None:
     logger.info("Configuration:")
     logger.info("  API URL:    %s", settings.api_base_url)
     logger.info("  API TLS:    %s", _api_tls_summary())
+    logger.info("  API auth:   %s", _auth_summary())
     logger.info("  Transport:  %s", settings.mcp_transport)
     if settings.mcp_transport != "stdio":
         logger.info("  Host:       %s", settings.mcp_server_host)

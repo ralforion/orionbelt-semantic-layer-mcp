@@ -102,14 +102,18 @@ instances can sit behind a load balancer without session affinity. Set
 stateful, since it is a long-lived per-connection stream.
 
 Note this is the *transport* session only. The upstream API session and the set
-of loaded models remain process-global and shared by every client of an
-instance, unchanged by this flag.
+of loaded models belong to the caller's identity, unchanged by this flag: one
+shared by every client of an instance in the service auth modes, one per
+signed-in user in the user mode (see [Authentication to the API](#authentication-to-the-api)).
 
 #### Transport security
 
-The HTTP/SSE transport terminates **no TLS** and authenticates **no caller** —
-it expects an ingress in front that does both. These are two separate jobs, and
-no platform does both for you by default.
+The HTTP/SSE transport terminates **no TLS** and, except in the user mode
+(`MCP_AUTH_MODE=oidc_user`, below), authenticates **no caller** — it expects an
+ingress in front that does both. These are two separate jobs, and no platform
+does both for you by default. In the user mode every caller must bring a token
+the identity provider issued for this server, so only the TLS half is left to
+the ingress.
 
 On Cloud Run, the intended deployment, **TLS is automatic**: the service URL is
 served over HTTPS and plain HTTP is forwarded to the container. **Access control
@@ -181,6 +185,107 @@ ended up with.
   or hang. Provide the key decrypted, protected by file permissions or a
   secret mount.
 
+### Authentication to the API
+
+`MCP_AUTH_MODE` picks who this server is to the API. Unset, it is `api_key` when
+`API_KEY` is set and `none` otherwise, exactly as before the setting existed.
+
+| Mode | Sends | Acts as | Use |
+| --- | --- | --- | --- |
+| `none` | nothing | — | an API with `AUTH_MODE=none`, the public demo |
+| `api_key` | `API_KEY` in `API_KEY_HEADER` | a key from the API's `API_KEYS`: one shared service identity. **A BI token** (`obsl_tok_…`): its owner | a team sharing one identity; **you**, on a local stdio server |
+| `oidc_client_credentials` | a client-credentials token from the IdP, cached and renewed before it expires | the server's client at the IdP | a service identity managed at the IdP |
+| `oidc_user` | a token for OBSL obtained for each caller | **the signed-in user**, end to end | a remote HTTP server added to Claude as a connector |
+
+The first three are service modes: every caller acts as the one identity the
+environment holds, and shares one API session. Only the user mode tells callers
+apart.
+
+#### A BI token on a local server (OBSL 3.2)
+
+Create a BI token on OBSL's `/tokens` page and set it as the credential:
+
+```bash
+API_KEY=obsl_tok_…     # sent in X-API-Key; OBSL runs as the token's owner
+```
+
+OBSL recognises the token in its API-key header and runs each request as its
+owner, with the token's scopes. If the token was created with a **warehouse
+sign-in**, queries on data sources that log in as the user
+(`DB_<NAME>_AUTH=user` on the API) reach the warehouse as you too. A token
+without one gets `SIGN_IN_REQUIRED` there, and the tool error says to create a
+token with a warehouse sign-in.
+
+#### The user mode: Claude → MCP → OBSL as the signed-in user
+
+```
+Claude ── signs the user in at the IdP; token issued for the MCP server ──► MCP server (HTTP)
+MCP    ── checks it; exchanges it for a token for OBSL, same user ────────► OBSL REST API
+OBSL   ── (its own exchange, if the data source logs in as the user) ─────► warehouse
+```
+
+The server is an OAuth resource server (MCP authorization spec). It serves
+RFC 9728 protected resource metadata at
+`/.well-known/oauth-protected-resource/mcp` naming the IdP, and answers a
+request without a valid token with 401 and a `WWW-Authenticate` challenge
+pointing there. It accepts only tokens issued **for itself**: the IdP's
+signature (JWKS from the discovery document), issuer, audience, `exp`, `sub`.
+Then it exchanges the token for one for OBSL, for the same user:
+
+- **Entra ID:** on-behalf-of (`grant_type=…:jwt-bearer`, `requested_token_use=on_behalf_of`,
+  `scope=$OBSL_SCOPE`). Chosen automatically for a `login.microsoftonline.com` issuer.
+- **Okta, Keycloak and other RFC 8693 IdPs:** token exchange
+  (`grant_type=…:token-exchange`, `audience=$OBSL_AUDIENCE`, `scope=$OBSL_SCOPE`).
+
+The incoming token is **never** sent to the API. The OBSL token is cached per
+user (issuer + subject) until a minute before it expires, and only for the
+sign-in it came from: signing in again (after an MFA challenge, say) gets a
+fresh exchange. It is always exchanged from the current incoming token. Each user gets their own API
+session (the API gives a session only to its creator) and their own design-time
+and run-time tool surface.
+
+```bash
+MCP_TRANSPORT=http
+MCP_AUTH_MODE=oidc_user
+MCP_RESOURCE_URL=https://mcp.example.com/mcp      # what users add in Claude
+OIDC_ISSUER=https://login.microsoftonline.com/<tenant-id>/v2.0
+OIDC_CLIENT_ID=<the MCP app's client id>
+OIDC_CLIENT_SECRET_FILE=/secrets/mcp-client-secret
+OBSL_SCOPE=api://<OBSL app>/.default             # Entra; Okta/Keycloak: OBSL_AUDIENCE (+ OBSL_SCOPE)
+MCP_AUDIENCE=<the MCP app's client id>           # Entra v2 tokens carry it as aud
+MCP_SCOPES=api://<MCP app>/mcp.access            # what Claude asks the IdP for
+```
+
+Setup notes:
+
+- **Client registration.** Entra and Okta do not offer dynamic client
+  registration: register the MCP client at the IdP and enter its client ID in
+  Claude's connector settings.
+- **Entra:** both apps use v2 tokens (`requestedAccessTokenVersion: 2`, otherwise
+  the issuer is `https://sts.windows.net/<tid>/`). The MCP app needs a delegated
+  permission on OBSL's app, with admin consent. On-behalf-of can answer
+  `interaction_required` (MFA, conditional access): the user must sign in
+  again in Claude, and the server does not retry.
+- **OBSL** needs nothing new: its `OIDC_ISSUER` / `OIDC_AUDIENCE` stay its own.
+  The token this server asks for must carry OBSL's audience, never the MCP
+  server's.
+- **Transport:** HTTP only. `stdio` has no sign-in, so the server refuses to
+  start with it. Settings the mode needs are checked at import, so the exported
+  `server.py:mcp` is never served open by accident.
+
+#### Errors
+
+API refusals arrive as tool errors that say what to do, and never contain a
+credential: `SIGN_IN_REQUIRED` (use your BI token or the user mode, not a
+service key), `BI_TOKEN_SIGN_IN_ENDED` and an expired or revoked BI token
+(create a new one), `DATA_SOURCE_SIGN_IN_INTERACTION_REQUIRED` (sign in again;
+retrying will not help), `DATA_SOURCE_SIGN_IN_REFUSED` (the warehouse's
+reason), `DATA_SOURCE_SIGN_IN_UNAVAILABLE` (retry later) and
+`AUTH_INSUFFICIENT_SCOPE` (the scope the tool needs, such as `obsl:write` to
+load a model). A refused exchange names the IdP's error code. Every tool stays
+listed whatever the caller's scopes are. A tool they may not use fails with the
+scope error.
+
 ### MCP client configuration
 
 Add to your MCP client config (e.g. `claude_desktop_config.json`):
@@ -204,15 +309,25 @@ Environment variables or `.env` file (pydantic-settings). See `.env.example` for
 | Variable          | Default      | Description                           |
 | ----------------- | ------------ | ------------------------------------- |
 | `API_BASE_URL`    | — (required) | OrionBelt® Semantic Layer REST API URL |
-| `API_KEY`         | — (unset)    | API credential; required only when the API runs with `AUTH_MODE=api_key` |
+| `MCP_AUTH_MODE`   | `api_key` if `API_KEY` is set, else `none` | `none`, `api_key`, `oidc_client_credentials` or `oidc_user` — see [Authentication to the API](#authentication-to-the-api) |
+| `API_KEY`         | — (unset)    | `api_key` mode: a key from the API's `API_KEYS`, or your BI token (`obsl_tok_…`) from OBSL's `/tokens` page |
 | `API_KEY_HEADER`  | `X-API-Key`  | Header the credential is sent in; must match the API's `API_KEY_HEADER` |
+| `MCP_RESOURCE_URL` | — (unset)   | `oidc_user`: this server's public MCP endpoint URL (ending in `/mcp`), the resource in its metadata and by default the audience incoming tokens must carry |
+| `MCP_AUDIENCE`    | `MCP_RESOURCE_URL` | `oidc_user`: accepted `aud` values, comma-separated (Entra: the MCP app's client ID) |
+| `MCP_SCOPES`      | — (unset)    | `oidc_user`: scopes MCP clients ask the IdP for, advertised in the metadata and the 401 challenge |
+| `OIDC_ISSUER`     | — (unset)    | Both oidc modes: the IdP; its discovery document gives the keys and the token endpoint |
+| `OIDC_TOKEN_ENDPOINT` | from discovery | Overrides the token endpoint (`oidc_client_credentials` can then run without `OIDC_ISSUER`) |
+| `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` / `OIDC_CLIENT_SECRET_FILE` | — (unset) | Both oidc modes: this server's confidential client at the IdP. The file is read on each use, so a rotated secret is picked up |
+| `OIDC_CLIENT_AUTH` | `client_secret_post` | Or `client_secret_basic`, as the IdP's client registration requires |
+| `OIDC_EXCHANGE`   | by issuer    | `oidc_user`: `entra_obo` (default for `login.microsoftonline.com`) or `token_exchange` (RFC 8693) |
+| `OBSL_SCOPE` / `OBSL_AUDIENCE` | — (unset) | Both oidc modes: what to ask the IdP for. Entra: `<OBSL app ID URI>/.default`; RFC 8693 IdPs: OBSL's audience and/or a scope |
 | `API_CA_CERT`     | — (unset)    | PEM CA bundle to verify the API against, **replacing** the default trust store; for a private CA. Requires an `https://` `API_BASE_URL` — see [TLS to the API](#tls-to-the-api) |
 | `API_CLIENT_CERT` | — (unset)    | PEM client certificate presented to the API, for mutual TLS (`API_TLS_CLIENT_CA` on the API, or a gateway that asks for one) |
 | `API_CLIENT_KEY`  | — (unset)    | PEM private key for `API_CLIENT_CERT`; omit when the key is in the same file. Unencrypted only |
 | `MCP_TRANSPORT`   | `stdio`      | `stdio`, `http`, or `sse`             |
 | `MCP_SERVER_HOST` | `localhost`  | Bind host for HTTP/SSE                |
 | `MCP_SERVER_PORT` | `9000`       | Bind port for HTTP/SSE                |
-| `MCP_BEHIND_PROXY` | `false`   | Acknowledges an ingress in front of the HTTP transport that terminates TLS **and** authenticates callers — both, not either. Silences the exposure warning only — it grants the server no capability and changes no behavior |
+| `MCP_BEHIND_PROXY` | `false`   | Acknowledges an ingress in front of the HTTP transport that terminates TLS **and** authenticates callers — both, not either (in `oidc_user` the server authenticates callers itself, so only TLS). Silences the exposure warning only — it grants the server no capability and changes no behavior |
 | `MCP_STATELESS_HTTP` | `true`    | Run the HTTP transport without a per-connection MCP session (no `Mcp-Session-Id`, no stream resumability) so instances scale without session affinity. Ignored for stdio; forced off for `sse` |
 | `LOG_LEVEL`       | `INFO`       | Logging level                         |
 | `API_TIMEOUT`     | `30`         | HTTP timeout in seconds               |

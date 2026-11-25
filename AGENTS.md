@@ -51,6 +51,15 @@ Phase is derived from explicit loaded-model state (`_loaded_model_ids`, flipped 
 - **HTTP/SSE, and `server.py:mcp` on any transport** — `LazyInitMiddleware` defers mode detection and registration to the first request after the version gate, so the container starts instantly (Cloud Run cold starts). `PORT` env (injected by Cloud Run) overrides `MCP_SERVER_PORT`.
 - The middleware's API calls (the version check, mode detection) run in a worker thread shared by the requests waiting on them (`_SharedRun`), never on the event loop.
 
+**Auth modes (`MCP_AUTH_MODE`, `_auth_mode`).**
+- `none`, or `api_key` (`API_KEY` as a static default header; it may be a person's BI token).
+- `oidc_client_credentials`: one cached IdP token.
+- `oidc_user`: over HTTP, a `_ResourceAuthProvider` (FastMCP `RemoteAuthProvider` + `_OidcUserVerifier`) built **at import**, so the exported `server.py:mcp` is never served open. It checks tokens issued for this server.
+- `_ObslAuth` (an `httpx.Auth` on the API client) puts the oidc modes' bearer token on each request. In the user mode that is the current caller's token, exchanged via Entra OBO or RFC 8693 and cached per user. The incoming token is never forwarded; a test asserts it.
+- `/health` is marked public (`_do_request(public=True)`), so the version gate needs no sign-in.
+- The API session and loaded models live in `_Identity` objects keyed by `_current_identity_key()`: one `_SERVICE_IDENTITY` in the service modes, issuer + subject in `oidc_user`. Read them via `_identity()` / `_identity_or_none()`, never a global.
+- Error mapping for the API's auth and sign-in codes is in `_raise_api_error`. The sign-in codes are not `AUTH_*`, so they are matched first.
+
 **Version compatibility gate.** The server serves only an API of its own `major.minor` (MCP 3.1 ↔ API 3.1.x; patches may differ), checked against the API's `/health` (`_verify_api`). On stdio via `main()` it checks at startup and **exits** on a mismatch. Otherwise (HTTP, which starts before it reaches the API, and the exported `server.py:mcp`), `ApiVersionGateMiddleware` refuses every request but the handshake with an MCP error saying why, until the API matches; on both transports a request checks again once the last pass is over a minute old, so an API redeployed to another minor under a running server is refused too. This is why every API minor bump *requires* a matching MCP release even when no tool changes.
 
 ## Version tracking & release discipline
