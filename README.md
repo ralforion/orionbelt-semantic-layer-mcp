@@ -7,8 +7,8 @@
 
 <p align="center"><strong>Thin MCP server that delegates to the OrionBelt® Semantic Layer REST API</strong></p>
 
-[![Version 3.1.0](https://img.shields.io/badge/version-3.1.0-purple.svg)](https://github.com/ralforion/orionbelt-semantic-layer-mcp/releases)
-[![OrionBelt® Semantic Layer 3.1](https://img.shields.io/badge/OrionBelt_Semantic_Layer-3.1-0054A6.svg)](https://github.com/ralforion/orionbelt-semantic-layer)
+[![Version 3.2.0](https://img.shields.io/badge/version-3.2.0-purple.svg)](https://github.com/ralforion/orionbelt-semantic-layer-mcp/releases)
+[![OrionBelt® Semantic Layer 3.2](https://img.shields.io/badge/OrionBelt_Semantic_Layer-3.2-0054A6.svg)](https://github.com/ralforion/orionbelt-semantic-layer)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/ralforion/orionbelt-semantic-layer-mcp/blob/main/LICENSE)
 [![FastMCP](https://img.shields.io/badge/FastMCP-4.0+-8A2BE2)](https://gofastmcp.com)
@@ -639,6 +639,13 @@ Add to `.mcp.json` in any repo (or `~/.config/claude-code/.mcp.json` globally):
   }
 }
 ```
+
+### ChatGPT
+
+Add the URL above to ChatGPT as a custom MCP server (a connector), with no
+authentication for the hosted demo; your own deployment is added the same way
+by its HTTPS address. This replaces the API's Custom GPT integration, which
+OBSL 3.2 removed because OpenAI retires Custom GPTs on December 11, 2026.
 
 ### Other MCP clients
 
