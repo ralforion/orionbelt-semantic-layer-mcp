@@ -4,11 +4,28 @@ All notable changes to OrionBelt Semantic Layer MCP are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [3.2.0] - 2026-11-26
 
-For OrionBelt Semantic Layer API **3.2** (owned sessions, scopes on every
-endpoint, BI tokens, data sources that log in as the user). The version moves to
-3.2.0 and the API gate to 3.2.x when the API releases 3.2.0.
+Tracks OrionBelt Semantic Layer API **v3.2.x**, which signs users in through an
+OpenID Connect provider, gives each session to its creator, names a scope on
+every endpoint, issues BI tokens, and runs a data source's queries as the
+signed-in user. The MCP can now act as that user, and it starts only against a
+3.2 API.
+
+### Upgrading from 3.1
+
+- **Deploy the API 3.2 first.** An MCP 3.2.0 refuses a 3.1 API, as every minor
+  before it did (`Incompatible API version: MCP server v3.2.0 requires API
+  v3.2.x — found v3.1.1`).
+- **Nothing to change in the configuration.** With `MCP_AUTH_MODE` unset the
+  server sends what it sent before: `API_KEY` when it is set, nothing
+  otherwise. The new modes are opt-in.
+- **ChatGPT connects through this server.** The API 3.2 removed its Custom GPT
+  integration; add this server to ChatGPT as a custom MCP server by its HTTPS
+  address instead (see [Hosted MCP Server](README.md#hosted-mcp-server)).
+- The API's new endpoints, `/v1/auth/tokens` (BI tokens) and
+  `GET /v1/auth/status` (an admin's view of the setup), are not tools: a person
+  creates a BI token on the API's `/tokens` page, not through an assistant.
 
 ### Added
 

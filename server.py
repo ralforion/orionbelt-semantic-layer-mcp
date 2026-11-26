@@ -6706,7 +6706,7 @@ def _verify_api() -> None:
     """Check the API answers ``/health`` with this server's ``major.minor``.
 
     Each MCP minor tracks the API minor of the same number (tools, parameters
-    and response fields follow that API), so MCP 3.1 serves API 3.1.x only.
+    and response fields follow that API), so MCP 3.2 serves API 3.2.x only.
     Patch releases may differ. Raises :class:`_ApiUnusableError` with the reason;
     an API or a build without a version is let through. A pass is timed in
     ``_api_verified_at``, a failure clears it.
